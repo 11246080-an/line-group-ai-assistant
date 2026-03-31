@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sky Gate</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main class="page-shell">
+    <section class="hud-panel">
+      <p class="eyebrow">Browser MVP Prototype</p>
+      <h1>Sky Gate</h1>
+      <p class="intro">
+        類 Flappy Bird 操作。按下空白鍵起飛，穿過能量門累積分數，碰撞即結束。
+      </p>
+      <div class="stats">
+        <div class="stat-card">
+          <span class="label">Score</span>
+          <strong id="score">0</strong>
+        </div>
+        <div class="stat-card">
+          <span class="label">Best</span>
+          <strong id="best-score">0</strong>
+        </div>
+        <div class="stat-card">
+          <span class="label">State</span>
+          <strong id="state-label">Ready</strong>
+        </div>
+      </div>
+      <div class="controls">
+        <span>Space</span>
+        <span>飛行 / 開始 / 重新開始</span>
+      </div>
+    </section>
+
+    <section class="game-panel">
+      <canvas id="game" width="420" height="720" aria-label="Sky Gate playable canvas"></canvas>
+      <div class="overlay" id="overlay">
+        <div class="overlay-card">
+          <p class="overlay-kicker">Sky Gate</p>
+          <h2 id="overlay-title">準備起飛</h2>
+          <p id="overlay-text">按下空白鍵穿越能量門。</p>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script src="game.js"></script>
+</body>
+</html>
