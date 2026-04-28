@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+# 這個檔案負責「先把對話整理成重點」。
+# 白話來說，就是先從一大串群組聊天裡，
+# 抓出時間、地點、活動、預算、風險這些資訊。
+
 import re
 
 from app.models import ExtractedInfo
@@ -83,6 +87,7 @@ OPTION_KEYWORDS = [
 ]
 
 
+# 用正則規則抓出像「週六」、「13:00」、「500內」這種明確資訊。
 def _find_matches(patterns: list[str], text: str) -> list[str]:
     results: list[str] = []
     for pattern in patterns:
@@ -93,6 +98,8 @@ def _find_matches(patterns: list[str], text: str) -> list[str]:
     return results
 
 
+# 用簡單關鍵字找出已知地點、活動、風險等。
+# 這一步不是最後判斷劇本，只是幫後面整理資料。
 def _find_keywords(keywords: list[str], text: str) -> list[str]:
     found: list[str] = []
     lowered = text.lower()
@@ -102,8 +109,13 @@ def _find_keywords(keywords: list[str], text: str) -> list[str]:
     return found
 
 
+# 這是資訊抽取的主函式。
+# 它會把原始聊天內容整理成 ExtractedInfo，
+# 讓後面的 LLM 或 fallback classifier 更容易理解對話。
 def extract_info(text: str) -> ExtractedInfo:
     info = ExtractedInfo()
+
+    # 先抽取比較具體、容易辨認的欄位。
     info.time = _find_matches(TIME_PATTERNS, text)
     info.location = _find_keywords(LOCATION_KEYWORDS, text)
     info.people_count = _find_matches(PEOPLE_PATTERNS, text)
@@ -113,6 +125,8 @@ def extract_info(text: str) -> ExtractedInfo:
     info.options = _find_keywords(OPTION_KEYWORDS, text)
     info.risk_info = _find_keywords(RISK_KEYWORDS, text)
 
+    # need_type 可以理解成「這段對話目前主要需要什麼幫助」。
+    # 例如是需要投票收斂，還是需要外部查資料。
     if any(word in text for word in ["投票", "選項有點多"]):
         info.need_type = "決策收斂"
     elif any(
@@ -132,6 +146,8 @@ def extract_info(text: str) -> ExtractedInfo:
     elif any(word in text for word in ["排行程", "順序", "動線"]):
         info.need_type = "規劃建議"
 
+    # decision_state 是在判斷大家討論到哪一步。
+    # 例如：還沒定、正在收斂、還是已經定案。
     if any(word in text for word in ["那就這家吧", "先定了", "不用再選"]):
         info.decision_state = "已定案"
     elif any(word in text for word in ["投票", "選項", "還是", "不然"]):
