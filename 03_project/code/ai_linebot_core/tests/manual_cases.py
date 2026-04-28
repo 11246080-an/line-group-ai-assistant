@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+# 這個檔案放的是「手動測試案例」。
+# 用來快速確認系統在幾種典型情境下的輸出是否合理。
+
 import json
 
 from app.engine import analyze_dialogue
 
 
+# 這裡先準備幾段代表性的群組對話。
 CASES = {
     "case_4": """A：目前時間、地點跟人數是不是差不多都定好了
 B：對啊，現在應該可以開始排一下行程了
@@ -28,6 +32,9 @@ B：好，快點決定""",
 }
 
 
+# 測試主函式。
+# 逐一把每段案例丟進 analyze_dialogue，
+# 再把結果印出來看。
 def main() -> None:
     for name, text in CASES.items():
         result = analyze_dialogue(text)
