@@ -1,0 +1,16 @@
+本檔案為 GPT 測試紀錄表，用於記錄各劇本在不同 Prompt 下之測試輸出結果，並與標準答案進行比對。
+
+注意事項：
+1. 本檔案用途為測試與驗證，不作為正式標準答案。
+2. 正式判斷依據請以 standard_answers.csv（17劇本標準答案）為主。
+3. 本檔案中若出現「部分符合」，通常表示 GPT 在資訊抽取時較標準答案寬鬆，可能出現泛化描述，但不代表整體情境判斷錯誤。
+4. Codex 在設計系統時，應將本檔案視為測試結果參考，而非唯一規格來源。
+2026-05-09 OpenAI 串接測試補充
+1. OpenAI 套件可正常 import。
+2. OPENAI_API_KEY 已有被程式讀到，但本檔不記錄實際值。
+3. app/llm_judge.py 已走 OpenAI API 路徑，不再是 Groq 主路徑。
+4. 目前無法完成 OpenAI 回應驗證，主因不是 API key 格式錯誤，而是執行環境的 proxy 環境變數指向 127.0.0.1:9，導致 httpx / OpenAI SDK 連線被拒絕。
+5. 同一環境下，Test-NetConnection api.openai.com:443 可通，Python socket 直連 443 也成功，代表外網與 DNS 基本可達。
+6. 在關閉環境 proxy 影響的情況下，httpx 直連 https://api.openai.com/v1/models 可收到 401，表示 OpenAI 站點本身可連到。
+7. fallback classifier 測試通過。
+8. CLI 測試通過。
