@@ -2,17 +2,17 @@ from __future__ import annotations
 
 from .classifier import classify
 from .extractor import extract_info
-from .models import AnalysisResult
 from .llm_judge import LLMJudgeError, judge_with_llm
+from .models import AnalysisResult
 
 
 EXTERNAL_SEARCH_SCENARIOS = {
+    "劇本四",
     "劇本五",
     "劇本六",
-    "劇本十一",
     "劇本十二",
-    "劇本十三",
     "劇本十四",
+    "劇本十五",
     "劇本十六",
     "劇本十七",
 }
@@ -24,18 +24,18 @@ def _derive_external_search_fields(
 ) -> tuple[bool, str]:
     requires_external_search = (
         scenario_code in EXTERNAL_SEARCH_SCENARIOS
-        or need_type in {"外部資訊查詢", "資訊查詢"}
+        or need_type == "外部資訊查詢"
     )
     if not requires_external_search:
         return False, ""
 
-    intermediate_reply = "我先幫你們看一下，等等整理幾個選項給你們～"
-    if scenario_code == "劇本十四":
-        intermediate_reply = "我先幫你們看一下場次，等等整理幾個可行時間給你們～"
-    elif scenario_code == "劇本十七":
-        intermediate_reply = "我先幫你們看一下天氣，等等整理建議跟備案給你們～"
-    elif scenario_code in {"劇本五", "劇本十二", "劇本十三"}:
-        intermediate_reply = "我先幫你們看一下路線跟相關資訊，等等整理給你們～"
+    intermediate_reply = "我先幫大家查一下，整理好再回。"
+    if scenario_code == "劇本十七":
+        intermediate_reply = "我先幫大家查一下天氣和備案，再整理給你們。"
+    elif scenario_code == "劇本十四":
+        intermediate_reply = "我先幫大家確認場次和時間，再整理給你們。"
+    elif scenario_code in {"劇本四", "劇本五", "劇本六"}:
+        intermediate_reply = "我先幫大家整理一下行程資訊，再回你們。"
 
     return True, intermediate_reply
 
@@ -55,10 +55,11 @@ def analyze_dialogue(text: str) -> AnalysisResult:
         scenario.code,
         info.need_type,
     )
+
     if not evidence:
-        evidence = ["LLM 無法使用，使用 rule-based fallback 進行近似判斷"]
+        evidence = ["LLM 判斷失敗，改用 rule-based fallback。"]
     else:
-        evidence.insert(0, f"LLM 無法使用，改用 rule-based fallback：{fallback_reason}")
+        evidence.insert(0, f"LLM 判斷失敗，改用 rule-based fallback：{fallback_reason}")
 
     return AnalysisResult(
         scenario_code=scenario.code,

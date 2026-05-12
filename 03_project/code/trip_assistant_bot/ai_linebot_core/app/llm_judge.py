@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+# 這個檔案負責和 OpenAI LLM 溝通。
+# 可以把它想成「把資料整理好，交給 AI 模型判斷，
+# 再把模型回傳結果整理成固定格式」的地方。
+
 import csv
 import json
 import os
@@ -11,12 +15,13 @@ from .models import AnalysisResult, ExtractedInfo
 
 
 class LLMJudgeError(RuntimeError):
-    """Raised when the LLM judgment path is unavailable or invalid."""
+    """當 LLM 路線不能用時，丟出這個錯誤給 engine 處理。"""
 
 
 ROOT_DIR = Path(__file__).resolve().parent.parent.parent
 
 
+# 讀取 .env 檔，把 API key 之類的設定放進環境變數。
 def _load_env_file() -> None:
     env_path = ROOT_DIR / ".env"
     if not env_path.exists():
@@ -32,6 +37,8 @@ def _load_env_file() -> None:
         os.environ.setdefault(key, value)
 
 
+# 有些文字檔可能不是同一種編碼存出來的。
+# 這個函式會依序嘗試多種常見編碼，避免讀檔直接失敗。
 def _load_text_file(filename: str) -> str:
     path = ROOT_DIR / filename
     encodings = ("utf-8-sig", "utf-8", "utf-16", "cp950")
@@ -51,6 +58,8 @@ def _load_text_file(filename: str) -> str:
     raise LLMJudgeError(f"無法讀取檔案 {filename}")
 
 
+# 讀取標準答案 CSV，整理成一段簡短文字，
+# 讓 LLM 了解 17 個劇本大致應該怎麼判。
 def _load_standard_answer_summaries() -> str:
     path = ROOT_DIR / "standard_answers.csv"
     rows: list[str] = []
@@ -84,6 +93,8 @@ def _load_standard_answer_summaries() -> str:
     return "\n".join(rows)
 
 
+# 把 knowledge base 裡的劇本定義整理成 prompt 文字。
+# 這樣 LLM 不只是看原始對話，還會一起參考劇本資料。
 def _scenario_context() -> str:
     lines: list[str] = []
     for scenario in SCENARIOS:
@@ -95,6 +106,15 @@ def _scenario_context() -> str:
             f"｜suggested_reply={scenario.suggested_reply or '空字串'}"
         )
     return "\n".join(lines)
+
+
+# LLM 有時會回傳多餘文字或 Markdown。
+# 這個函式負責把真正的 JSON 內容挖出來。
+def _default_suggested_reply_for_scenario(scenario_code: str) -> str:
+    for scenario in SCENARIOS:
+        if scenario.code == scenario_code:
+            return scenario.suggested_reply
+    return ""
 
 
 def _extract_json(text: str) -> dict[str, Any]:
@@ -118,6 +138,11 @@ def _extract_json(text: str) -> dict[str, Any]:
         raise LLMJudgeError(f"LLM JSON 解析失敗: {exc}") from exc
 
 
+# LLM 有時候會把清單欄位回成：
+# - 真正的 list
+# - 一整串字串
+# - 用逗號、頓號、換行分開的字串
+# 這個函式會把它整理成一致的「字串列表」。
 def _normalize_string_list(value: Any, field_name: str) -> list[str]:
     if isinstance(value, list):
         normalized: list[str] = []
@@ -149,6 +174,9 @@ def _normalize_string_list(value: Any, field_name: str) -> list[str]:
     raise LLMJudgeError(f"LLM 輸出的 {field_name} 格式不正確")
 
 
+# intermediate_reply 是查資料前先回的一句話。
+# 這個函式會把語氣調整得像 LINE 群組聊天，
+# 避免出現太像系統訊息的句子。
 def _normalize_intermediate_reply(value: Any, requires_external_search: bool) -> str:
     if not requires_external_search:
         return ""
@@ -171,6 +199,8 @@ def _normalize_intermediate_reply(value: Any, requires_external_search: bool) ->
     return text
 
 
+# 把 LLM 回傳的資料檢查、補齊、整理成 AnalysisResult。
+# 這一步很重要，因為它保證輸出格式固定。
 def _normalize_result(data: dict[str, Any], fallback_info: ExtractedInfo) -> AnalysisResult:
     required_fields = {
         "scenario_code",
@@ -190,6 +220,8 @@ def _normalize_result(data: dict[str, Any], fallback_info: ExtractedInfo) -> Ana
     if missing:
         raise LLMJudgeError(f"LLM 輸出缺少必要欄位: {sorted(missing)}")
 
+    # 如果 LLM 漏掉某些 extracted_info 欄位，
+    # 就先用 extractor 先前抓到的資料補上。
     raw_info = data.get("extracted_info") or {}
     merged_info = fallback_info.to_dict()
     if isinstance(raw_info, dict):
@@ -208,26 +240,45 @@ def _normalize_result(data: dict[str, Any], fallback_info: ExtractedInfo) -> Ana
             "是",
         }
 
+    scenario_code = str(data["scenario_code"])
+    scenario_name = str(data["scenario_name"])
+    should_intervene = bool(should_intervene)
+    requires_external_search = bool(requires_external_search)
+
+    suggested_reply = str(data.get("suggested_reply", "")).strip()
+    if not should_intervene:
+        suggested_reply = ""
+    elif not suggested_reply:
+        suggested_reply = _default_suggested_reply_for_scenario(scenario_code)
+
     normalized = {
-        "scenario_code": str(data["scenario_code"]),
-        "scenario_name": str(data["scenario_name"]),
+        "scenario_code": scenario_code,
+        "scenario_name": scenario_name,
         "stage": str(data["stage"]),
-        "should_intervene": bool(should_intervene),
+        "should_intervene": should_intervene,
         "intervention_type": str(data["intervention_type"]),
         "confidence_score": float(data["confidence_score"]),
         "evidence": _normalize_string_list(data["evidence"], "evidence"),
         "system_behavior": _normalize_string_list(data["system_behavior"], "system_behavior"),
-        "requires_external_search": bool(requires_external_search),
+        "requires_external_search": requires_external_search,
         "intermediate_reply": _normalize_intermediate_reply(
             data.get("intermediate_reply", ""),
-            bool(requires_external_search),
+            requires_external_search,
         ),
-        "suggested_reply": str(data.get("suggested_reply", "")),
+        "suggested_reply": suggested_reply,
         "extracted_info": merged_info,
     }
     return AnalysisResult.from_dict(normalized)
 
 
+# 建立要送給 LLM 的 prompt。
+# 內容包含：
+# - 原始對話
+# - extractor 摘要資訊
+# - AI 判斷邏輯
+# - 17 劇本定義
+# - 標準答案摘要
+# 目的是讓 LLM 根據整體語意判斷，而不是只看關鍵字。
 def _build_messages(text: str, extracted_info: ExtractedInfo) -> list[dict[str, str]]:
     prompt_template = _load_text_file("prompt_templates.txt")
     ai_logic = _load_text_file("ai_logic.txt")
@@ -308,32 +359,40 @@ def _build_messages(text: str, extracted_info: ExtractedInfo) -> list[dict[str, 
     ]
 
 
+# 這是 LLM 判斷的主要函式。
+# engine.py 會先呼叫它；如果失敗，才會改走 fallback classifier。
 def judge_with_llm(text: str, extracted_info: ExtractedInfo) -> AnalysisResult:
+    # 先載入 .env 設定，讓程式可以讀到 API key。
     _load_env_file()
 
-    api_key = os.getenv("GROQ_API_KEY")
+    api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
-        raise LLMJudgeError("未設定 GROQ_API_KEY")
+        raise LLMJudgeError("未設定 OPENAI_API_KEY")
 
-    model = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+    model = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
 
     try:
-        from groq import Groq
+        from openai import OpenAI
     except ImportError as exc:
-        raise LLMJudgeError("未安裝 groq 套件") from exc
+        raise LLMJudgeError("未安裝 openai 套件") from exc
 
-    client = Groq(api_key=api_key)
+    # 建立 OpenAI client，準備呼叫模型。
+    client = OpenAI(api_key=api_key)
     messages = _build_messages(text, extracted_info)
 
     try:
+        # 把整理好的 prompt 丟給 LLM，
+        # 請它直接回固定格式的 JSON。
         response = client.chat.completions.create(
             model=model,
             temperature=0.1,
             messages=messages,
+            response_format={"type": "json_object"},
         )
     except Exception as exc:  # pragma: no cover - network/sdk path
-        raise LLMJudgeError(f"Groq 呼叫失敗: {exc}") from exc
+        raise LLMJudgeError(f"OpenAI 呼叫失敗: {exc}") from exc
 
+    # 拿到模型回應後，先找出 JSON，再整理成固定結果格式。
     content = response.choices[0].message.content or ""
     data = _extract_json(content)
     return _normalize_result(data, extracted_info)

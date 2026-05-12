@@ -1,8 +1,15 @@
 from __future__ import annotations
 
+# 這個檔案像是「劇本資料庫」。
+# 裡面放了 17 種情境的基本定義，
+# 讓系統知道每個劇本叫什麼、屬於哪個階段、建議怎麼回。
+
 from .models import ScenarioDefinition
 
 
+# SCENARIOS 是所有劇本的清單。
+# LLM prompt 會參考這份資料，
+# fallback classifier 也會參考這份資料。
 SCENARIOS: list[ScenarioDefinition] = [
     ScenarioDefinition(
         code="劇本一",

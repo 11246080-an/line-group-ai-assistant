@@ -6,27 +6,38 @@ This module is retained as a backup strategy when the LLM-based scenario
 judgment path is unavailable. It is no longer the primary classification path.
 """
 
+# 這個檔案是備用判斷器。
+# 平常主判斷會先交給 LLM，
+# 只有 LLM 失敗時才會改用這裡的規則式判斷。
+
 from .knowledge_base import SCENARIOS
 from .models import ExtractedInfo, ScenarioDefinition
 
 
+# 簡單判斷是否同時提到多個地點。
 def _has_multiple_locations(info: ExtractedInfo) -> bool:
     return len(info.location) >= 2
 
 
+# 簡單判斷是否同時出現多個選項。
 def _has_multiple_options(info: ExtractedInfo) -> bool:
     return len(info.options) >= 2
 
 
+# 看對話是否已經進入「在規劃細節」的階段。
 def _is_planning(text: str) -> bool:
     return any(word in text for word in ["排行程", "順序", "景點", "餐廳", "路線", "動線"])
 
 
+# 看大家是不是開始卡住，例如一直說「都可以、隨便」。
 def _is_discussion_stalled(text: str) -> bool:
     stall_words = ["都可以", "隨便", "看你們", "再說"]
     return sum(1 for word in stall_words if word in text) >= 2
 
 
+# 這個函式會幫每個劇本打分數。
+# 分數越高，代表這段對話越像那個劇本。
+# 注意：這是 fallback 用，所以仍然使用不少規則與關鍵字。
 def _score_scenario(scenario: ScenarioDefinition, text: str, info: ExtractedInfo) -> tuple[int, list[str]]:
     score = 0
     evidence: list[str] = []
@@ -117,6 +128,8 @@ def _score_scenario(scenario: ScenarioDefinition, text: str, info: ExtractedInfo
     return score, evidence
 
 
+# 從 17 個劇本中選出分數最高的那個，
+# 作為 fallback 的最終判斷結果。
 def classify(text: str, info: ExtractedInfo) -> tuple[ScenarioDefinition, list[str], float]:
     scored: list[tuple[int, ScenarioDefinition, list[str]]] = []
     for scenario in SCENARIOS:
