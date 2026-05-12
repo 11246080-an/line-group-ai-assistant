@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-# 這個檔案負責和 Groq LLM 溝通。
+# 這個檔案負責和 OpenAI LLM 溝通。
 # 可以把它想成「把資料整理好，交給 AI 模型判斷，
 # 再把模型回傳結果整理成固定格式」的地方。
 
@@ -347,19 +347,19 @@ def judge_with_llm(text: str, extracted_info: ExtractedInfo) -> AnalysisResult:
     # 先載入 .env 設定，讓程式可以讀到 API key。
     _load_env_file()
 
-    api_key = os.getenv("GROQ_API_KEY")
+    api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
-        raise LLMJudgeError("未設定 GROQ_API_KEY")
+        raise LLMJudgeError("未設定 OPENAI_API_KEY")
 
-    model = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+    model = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
 
     try:
-        from groq import Groq
+        from openai import OpenAI
     except ImportError as exc:
-        raise LLMJudgeError("未安裝 groq 套件") from exc
+        raise LLMJudgeError("未安裝 openai 套件") from exc
 
-    # 建立 Groq client，準備呼叫模型。
-    client = Groq(api_key=api_key)
+    # 建立 OpenAI client，準備呼叫模型。
+    client = OpenAI(api_key=api_key)
     messages = _build_messages(text, extracted_info)
 
     try:
@@ -369,9 +369,10 @@ def judge_with_llm(text: str, extracted_info: ExtractedInfo) -> AnalysisResult:
             model=model,
             temperature=0.1,
             messages=messages,
+            response_format={"type": "json_object"},
         )
     except Exception as exc:  # pragma: no cover - network/sdk path
-        raise LLMJudgeError(f"Groq 呼叫失敗: {exc}") from exc
+        raise LLMJudgeError(f"OpenAI 呼叫失敗: {exc}") from exc
 
     # 拿到模型回應後，先找出 JSON，再整理成固定結果格式。
     content = response.choices[0].message.content or ""
