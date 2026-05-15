@@ -23,6 +23,7 @@ def handle_group_dialogue(group_text: str) -> None:
 
     print("[ANALYSIS RESULT]")
     print(result)
+    print("[REPLY TRIGGER]", result.get("reply_trigger"))
 
     # 如果系統判斷不該介入，就什麼都不回。
     if not result["should_intervene"]:
