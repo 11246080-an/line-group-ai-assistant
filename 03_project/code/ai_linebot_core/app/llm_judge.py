@@ -305,8 +305,9 @@ def _build_messages(text: str, extracted_info: ExtractedInfo) -> list[dict[str, 
 - reply_trigger 只能是以下其中一種：
   - explicit_request：使用者明確向 AI 求助、要求幫忙、要求整理、要求推薦
   - functional_question：使用者提出具有功能性的問題，例如查詢、推薦、規劃、比較、排序
-  - stuck_discussion：群組討論明顯卡住，成員反覆附和、沒有新資訊、無法推進決策
+  - stuck_discussion：群組討論明顯卡住，成員反覆出現「都可以」、「隨便」、「沒意見」、「你們決定」等附和語句，且沒有新增具體選項、條件或決策方向，對話仍無法推進時
   - no_reply：一般聊天、寒暄、附和、閒聊、情緒反應，或尚未形成明確需求時
+- 若對話中已明確表現出「還是沒決定」、「還沒想法」、「不知道怎麼選」等無法收斂的語意，應優先判定為 stuck_discussion，而非 no_reply。
 - 如果 reply_trigger = no_reply，則 should_intervene 必須為 false。
 - 對於一般聊天、附和、寒暄、情緒反應、單純延續話題但未形成明確需求的訊息，應優先判定為 no_reply，不應主動回覆。
 
