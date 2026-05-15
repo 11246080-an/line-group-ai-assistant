@@ -101,6 +101,7 @@ def analyze_dialogue(text: str) -> AnalysisResult:
         scenario_name=scenario.name,
         stage=scenario.stage,
         should_intervene=scenario.should_intervene,
+        reply_trigger="no_reply" if not scenario.should_intervene else "functional_question",
         intervention_type=scenario.intervention_type if scenario.should_intervene else "不介入",
         confidence_score=confidence,
         evidence=evidence,

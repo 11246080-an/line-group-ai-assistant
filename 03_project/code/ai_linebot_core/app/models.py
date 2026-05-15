@@ -65,6 +65,7 @@ class AnalysisResult:
     scenario_name: str
     stage: str
     should_intervene: bool
+    reply_trigger: str
     intervention_type: str
     confidence_score: float
     evidence: list[str]
@@ -81,6 +82,7 @@ class AnalysisResult:
             "scenario_name": self.scenario_name,
             "stage": self.stage,
             "should_intervene": self.should_intervene,
+            "reply_trigger": self.reply_trigger,
             "intervention_type": self.intervention_type,
             "confidence_score": self.confidence_score,
             "evidence": self.evidence,
@@ -99,6 +101,7 @@ class AnalysisResult:
             scenario_name=str(data["scenario_name"]),
             stage=str(data["stage"]),
             should_intervene=bool(data["should_intervene"]),
+            reply_trigger=str(data["reply_trigger"]),
             intervention_type=str(data["intervention_type"]),
             confidence_score=float(data["confidence_score"]),
             evidence=list(data["evidence"]),

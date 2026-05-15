@@ -200,6 +200,7 @@ def _normalize_result(data: dict[str, Any], fallback_info: ExtractedInfo) -> Ana
         "scenario_name",
         "stage",
         "should_intervene",
+        "reply_trigger",
         "intervention_type",
         "confidence_score",
         "evidence",
@@ -238,6 +239,7 @@ def _normalize_result(data: dict[str, Any], fallback_info: ExtractedInfo) -> Ana
         "scenario_name": str(data["scenario_name"]),
         "stage": str(data["stage"]),
         "should_intervene": bool(should_intervene),
+        "reply_trigger": str(data["reply_trigger"]),
         "intervention_type": str(data["intervention_type"]),
         "confidence_score": float(data["confidence_score"]),
         "evidence": _normalize_string_list(data["evidence"], "evidence"),
@@ -280,6 +282,7 @@ def _build_messages(text: str, extracted_info: ExtractedInfo) -> list[dict[str, 
 - scenario_name
 - stage
 - should_intervene
+- reply_trigger
 - intervention_type
 - confidence_score
 - evidence
@@ -288,6 +291,7 @@ def _build_messages(text: str, extracted_info: ExtractedInfo) -> list[dict[str, 
 - intermediate_reply
 - suggested_reply
 - extracted_info
+
 
 規則補充：
 - 若情境需要查詢外部資訊，例如附近餐廳、電影場次、天氣、餐廳推薦、路線或交通查詢，requires_external_search 必須為 true。
@@ -298,6 +302,15 @@ def _build_messages(text: str, extracted_info: ExtractedInfo) -> list[dict[str, 
 - 可以使用「我先幫你們...」、「等等整理給你們」、「稍等一下」這類說法。
 - 避免使用「我正在查詢」、「正在處理中」、「系統處理中」等機械式語句。
 - 可以適度使用「～」，但不要太多。
+- reply_trigger 只能是以下其中一種：
+  - explicit_request：使用者明確向 AI 求助、要求幫忙、要求整理、要求推薦
+  - functional_question：使用者提出具有功能性的問題，例如查詢、推薦、規劃、比較、排序
+  - stuck_discussion：群組討論明顯卡住，成員反覆附和、沒有新資訊、無法推進決策
+  - no_reply：一般聊天、寒暄、附和、閒聊、情緒反應，或尚未形成明確需求時
+- 如果 reply_trigger = no_reply，則 should_intervene 必須為 false。
+- 對於一般聊天、附和、寒暄、情緒反應、單純延續話題但未形成明確需求的訊息，應優先判定為 no_reply，不應主動回覆。
+
+
 
 其中 extracted_info 必須是物件，欄位包含：
 - time
