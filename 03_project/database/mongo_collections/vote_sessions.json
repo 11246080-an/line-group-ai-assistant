@@ -1,0 +1,26 @@
+[
+  {
+    "line_group_id": "C1234567890",
+    "title": "要去哪個景點？",
+    "status": "進行中",
+    "created_at": "2026-01-02T15:00:00",
+    "closed_at": null,
+    "options": [
+      {
+        "option_id": 1,
+        "option_text": "高美濕地",
+        "votes": [
+          {
+            "line_user_id": "U1234567890",
+            "voted_at": "2026-01-02T15:10:00"
+          }
+        ]
+      },
+      {
+        "option_id": 2,
+        "option_text": "彩虹眷村",
+        "votes": []
+      }
+    ]
+  }
+]

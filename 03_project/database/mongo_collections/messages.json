@@ -1,0 +1,10 @@
+[
+  {
+    "line_message_id": "M123456",
+    "line_group_id": "C1234567890",
+    "line_user_id": "U1234567890",
+    "display_name": "Mike",
+    "message_text": "這週要不要去台中玩？",
+    "sent_at": "2026-01-02T12:00:00"
+  }
+]

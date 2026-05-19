@@ -1,0 +1,13 @@
+[
+  {
+    "line_user_id": "U1234567890",
+    "line_group_id": "C1234567890",
+    "preferences": [
+      {
+        "type": "飲食",
+        "value": "不吃辣",
+        "updated_at": "2026-01-02T16:00:00"
+      }
+    ]
+  }
+]

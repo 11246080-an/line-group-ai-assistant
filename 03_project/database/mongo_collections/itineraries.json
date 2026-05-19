@@ -1,0 +1,17 @@
+[
+  {
+    "line_group_id": "C1234567890",
+    "itinerary_text": "三天兩夜台中行程建議",
+    "created_at": "2026-01-02T14:00:00",
+    "stops": [
+      {
+        "stop_order": 1,
+        "stop_name": "高美濕地",
+        "stop_address": "台中市清水區",
+        "arrive_time": "10:00",
+        "duration_min": 120,
+        "category": "景點"
+      }
+    ]
+  }
+]
