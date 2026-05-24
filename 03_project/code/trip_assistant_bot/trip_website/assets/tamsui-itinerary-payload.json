@@ -1,0 +1,34 @@
+{
+  "kind": "travel_itinerary",
+  "version": 1,
+  "itinerary_id": "newtaipei-tamsui-day",
+  "title": "淡水河岸夕陽一日遊",
+  "region": "新北",
+  "duration": "一日遊",
+  "budget": "每人約 500-800 元",
+  "transport": "捷運",
+  "type": "河岸",
+  "summary": "捷運直達，吃老街、看夕陽，適合輕鬆出門。",
+  "description": "淡水很適合預算有限的學生專題展示，交通和景點都簡單，從老街一路走到漁人碼頭。",
+  "best_for": "不想排行程太滿，只想吃東西、散步、看夕陽的群組。",
+  "spots": [
+    {
+      "name": "淡水老街",
+      "description": "阿給、魚丸湯、伴手禮都集中在這裡。",
+      "lat": 25.1697,
+      "lng": 121.4406
+    },
+    {
+      "name": "紅毛城",
+      "description": "歷史建築與河岸景色，適合白天拍照。",
+      "lat": 25.1754,
+      "lng": 121.4329
+    },
+    {
+      "name": "淡水漁人碼頭",
+      "description": "傍晚看夕陽，作為一日遊收尾。",
+      "lat": 25.1837,
+      "lng": 121.4104
+    }
+  ]
+}

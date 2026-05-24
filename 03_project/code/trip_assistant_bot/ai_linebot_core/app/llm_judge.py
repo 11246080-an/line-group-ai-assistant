@@ -110,13 +110,6 @@ def _scenario_context() -> str:
 
 # LLM 有時會回傳多餘文字或 Markdown。
 # 這個函式負責把真正的 JSON 內容挖出來。
-def _default_suggested_reply_for_scenario(scenario_code: str) -> str:
-    for scenario in SCENARIOS:
-        if scenario.code == scenario_code:
-            return scenario.suggested_reply
-    return ""
-
-
 def _extract_json(text: str) -> dict[str, Any]:
     payload = text.strip()
     if payload.startswith("```"):
@@ -207,6 +200,7 @@ def _normalize_result(data: dict[str, Any], fallback_info: ExtractedInfo) -> Ana
         "scenario_name",
         "stage",
         "should_intervene",
+        "reply_trigger",
         "intervention_type",
         "confidence_score",
         "evidence",
@@ -240,32 +234,22 @@ def _normalize_result(data: dict[str, Any], fallback_info: ExtractedInfo) -> Ana
             "是",
         }
 
-    scenario_code = str(data["scenario_code"])
-    scenario_name = str(data["scenario_name"])
-    should_intervene = bool(should_intervene)
-    requires_external_search = bool(requires_external_search)
-
-    suggested_reply = str(data.get("suggested_reply", "")).strip()
-    if not should_intervene:
-        suggested_reply = ""
-    elif not suggested_reply:
-        suggested_reply = _default_suggested_reply_for_scenario(scenario_code)
-
     normalized = {
-        "scenario_code": scenario_code,
-        "scenario_name": scenario_name,
+        "scenario_code": str(data["scenario_code"]),
+        "scenario_name": str(data["scenario_name"]),
         "stage": str(data["stage"]),
-        "should_intervene": should_intervene,
+        "should_intervene": bool(should_intervene),
+        "reply_trigger": str(data["reply_trigger"]),
         "intervention_type": str(data["intervention_type"]),
         "confidence_score": float(data["confidence_score"]),
         "evidence": _normalize_string_list(data["evidence"], "evidence"),
         "system_behavior": _normalize_string_list(data["system_behavior"], "system_behavior"),
-        "requires_external_search": requires_external_search,
+        "requires_external_search": bool(requires_external_search),
         "intermediate_reply": _normalize_intermediate_reply(
             data.get("intermediate_reply", ""),
-            requires_external_search,
+            bool(requires_external_search),
         ),
-        "suggested_reply": suggested_reply,
+        "suggested_reply": str(data.get("suggested_reply", "")),
         "extracted_info": merged_info,
     }
     return AnalysisResult.from_dict(normalized)
@@ -298,6 +282,7 @@ def _build_messages(text: str, extracted_info: ExtractedInfo) -> list[dict[str, 
 - scenario_name
 - stage
 - should_intervene
+- reply_trigger
 - intervention_type
 - confidence_score
 - evidence
@@ -306,6 +291,7 @@ def _build_messages(text: str, extracted_info: ExtractedInfo) -> list[dict[str, 
 - intermediate_reply
 - suggested_reply
 - extracted_info
+
 
 規則補充：
 - 若情境需要查詢外部資訊，例如附近餐廳、電影場次、天氣、餐廳推薦、路線或交通查詢，requires_external_search 必須為 true。
@@ -316,6 +302,17 @@ def _build_messages(text: str, extracted_info: ExtractedInfo) -> list[dict[str, 
 - 可以使用「我先幫你們...」、「等等整理給你們」、「稍等一下」這類說法。
 - 避免使用「我正在查詢」、「正在處理中」、「系統處理中」等機械式語句。
 - 可以適度使用「～」，但不要太多。
+- reply_trigger 只能是以下其中一種：
+  - explicit_request：使用者明確向 AI 發出請求，例如「幫我整理」、「幫我推薦」、「幫我查一下」、「你幫我決定」、「麻煩你幫我看看」
+  - functional_question：使用者提出具有功能性的問題或查詢需求，例如詢問附近有什麼、哪個比較適合、有哪些選項、怎麼安排、怎麼比較，但未直接要求 AI 執行動作
+  - stuck_discussion：群組討論明顯卡住，成員反覆出現「都可以」、「隨便」、「沒意見」、「你們決定」等附和語句，且沒有新增具體選項、條件或決策方向，對話仍無法推進時
+  - no_reply：一般聊天、寒暄、附和、閒聊、情緒反應，或尚未形成明確需求時
+- 若對話中已明確表現出「還是沒決定」、「還沒想法」、「不知道怎麼選」等無法收斂的語意，應優先判定為 stuck_discussion，而非 no_reply。
+- 如果 reply_trigger = no_reply，則 should_intervene 必須為 false。
+- 對於一般聊天、附和、寒暄、情緒反應、單純延續話題但未形成明確需求的訊息，應優先判定為 no_reply，不應主動回覆。
+- 若使用者是在詢問資訊、選項、推薦、比較或安排方式，但沒有直接以「幫我」、「麻煩你」、「你幫我」等語句要求 AI 執行動作，應優先判定為 functional_question，而非 explicit_request。
+
+
 
 其中 extracted_info 必須是物件，欄位包含：
 - time

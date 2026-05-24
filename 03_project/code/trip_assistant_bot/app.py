@@ -4,6 +4,7 @@ import json
 import os
 import threading
 import time
+from typing import Any
 from uuid import uuid4
 
 from dotenv import load_dotenv
@@ -22,6 +23,20 @@ from linebot.v3.messaging import (
 from linebot.v3.webhooks import MessageEvent, TextMessageContent
 
 from ai_linebot_core.app.engine import analyze_dialogue
+from ai_linebot_core.app.line_import import (
+    LineImportError,
+    build_itinerary_context,
+    build_itinerary_followup_reply,
+    build_itinerary_import_reply,
+    build_spot_import_reply,
+    create_focus_spot_from_import,
+    create_placeholder_itinerary_from_spot,
+    extract_line_import_command,
+    find_itinerary_spot,
+    normalize_itinerary_payload,
+    normalize_spot_payload,
+)
+
 
 load_dotenv()
 
@@ -32,14 +47,12 @@ handler = WebhookHandler(os.getenv("LINE_CHANNEL_SECRET"))
 
 EXTERNAL_SEARCH_DELAY_SECONDS = float(os.getenv("EXTERNAL_SEARCH_DELAY_SECONDS", "0"))
 CONVERSATION_WINDOW_SIZE = max(1, int(os.getenv("CONVERSATION_WINDOW_SIZE", "15")))
-MIN_INTERVENTION_CONFIDENCE = float(
-    os.getenv("MIN_INTERVENTION_CONFIDENCE", "0.8")
-)
+MIN_INTERVENTION_CONFIDENCE = float(os.getenv("MIN_INTERVENTION_CONFIDENCE", "0.8"))
 MIN_NEW_MESSAGES_BEFORE_REPEAT_REPLY = max(
     1,
     int(os.getenv("MIN_NEW_MESSAGES_BEFORE_REPEAT_REPLY", "4")),
 )
-DEFAULT_FINAL_REPLY = "我先整理一個方向給大家參考。"
+DEFAULT_FINAL_REPLY = "我正在整理更完整的建議，稍後補充給大家。"
 
 
 @dataclass
@@ -51,21 +64,63 @@ class ConversationState:
     last_reply_text: str = ""
     last_scenario_code: str = ""
     last_reply_message_count: int = 0
+    imported_itinerary: dict[str, Any] | None = None
+    focused_spot: dict[str, Any] | None = None
 
 
 conversation_states: dict[str, ConversationState] = {}
 conversation_lock = threading.Lock()
 
 SEMANTIC_TOPICS = {
-    "booking": ("訂房", "住宿", "飯店", "旅館", "民宿"),
-    "budget": ("預算", "太貴", "省一點", "花費", "負擔"),
-    "vote": ("投票", "表決", "選哪個", "票選"),
-    "time": ("日期", "時間", "幾點", "改天", "喬時間"),
-    "location": ("地點", "去哪", "景點", "餐廳", "位置"),
-    "route": ("路線", "交通", "順路", "移動", "行程順序"),
-    "weather": ("天氣", "下雨", "溫度"),
-    "dining": ("吃什麼", "午餐", "晚餐", "早餐", "美食"),
+    "booking": ("訂位", "預約", "報名", "集合", "規劃"),
+    "budget": ("預算", "花費", "多少錢", "費用", "價格"),
+    "vote": ("投票", "選擇", "決定", "挑選", "方案"),
+    "time": ("時間", "幾點", "何時", "下午", "晚上"),
+    "location": ("哪裡", "地點", "位置", "集合點", "景點"),
+    "route": ("路線", "下一站", "順序", "行程", "安排"),
+    "weather": ("天氣", "下雨", "晴天", "預報", "風大"),
+    "dining": ("吃什麼", "晚餐", "午餐", "餐廳", "美食"),
 }
+
+
+def _get_or_create_state(conversation_key: str) -> ConversationState:
+    state = conversation_states.get(conversation_key)
+    if state is None:
+        state = ConversationState()
+        conversation_states[conversation_key] = state
+    return state
+
+
+def _note_user_message(conversation_key: str, text: str) -> None:
+    normalized_text = text.strip()
+    if not normalized_text:
+        return
+
+    with conversation_lock:
+        state = _get_or_create_state(conversation_key)
+        state.history.append(normalized_text)
+        state.user_message_count += 1
+
+
+def _store_imported_itinerary(
+    conversation_key: str,
+    itinerary: dict[str, Any],
+    focused_spot: dict[str, Any] | None,
+) -> None:
+    with conversation_lock:
+        state = _get_or_create_state(conversation_key)
+        state.imported_itinerary = itinerary
+        state.focused_spot = focused_spot
+
+
+def _get_imported_itinerary_state(
+    conversation_key: str,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    with conversation_lock:
+        state = conversation_states.get(conversation_key)
+        if state is None:
+            return None, None
+        return state.imported_itinerary, state.focused_spot
 
 
 def _reply_text(line_bot_api: MessagingApi, reply_token: str, text: str) -> None:
@@ -75,6 +130,45 @@ def _reply_text(line_bot_api: MessagingApi, reply_token: str, text: str) -> None
             messages=[TextMessage(text=text)],
         )
     )
+
+
+def _reply_text_and_mark(
+    event: MessageEvent,
+    conversation_key: str,
+    scenario_code: str,
+    text: str,
+) -> None:
+    normalized_text = text.strip()
+    if not normalized_text:
+        return
+
+    with ApiClient(configuration) as api_client:
+        line_bot_api = MessagingApi(api_client)
+        _reply_text(line_bot_api, event.reply_token, normalized_text)
+
+    _mark_reply_sent(conversation_key, scenario_code, normalized_text)
+
+
+def _reply_text_if_allowed(
+    event: MessageEvent,
+    conversation_key: str,
+    scenario_code: str,
+    text: str,
+) -> None:
+    normalized_text = text.strip()
+    if not normalized_text:
+        return
+
+    current_user_message_count = _get_user_message_count(conversation_key)
+    if _should_suppress_duplicate_reply(
+        conversation_key,
+        scenario_code,
+        normalized_text,
+        current_user_message_count,
+    ):
+        return
+
+    _reply_text_and_mark(event, conversation_key, scenario_code, normalized_text)
 
 
 def _push_text(push_target_id: str, text: str) -> None:
@@ -143,18 +237,22 @@ def _build_conversation_context(
     user_text: str,
 ) -> tuple[list[str], str]:
     normalized_text = user_text.strip()
+    imported_context = ""
 
     with conversation_lock:
-        state = conversation_states.get(conversation_key)
-        if state is None:
-            state = ConversationState()
-            conversation_states[conversation_key] = state
-
+        state = _get_or_create_state(conversation_key)
         state.history.append(normalized_text)
         state.user_message_count += 1
         history_snapshot = list(state.history)
+        if state.imported_itinerary is not None:
+            imported_context = build_itinerary_context(
+                state.imported_itinerary,
+                state.focused_spot,
+            )
 
     context_text = "\n".join(history_snapshot)
+    if imported_context:
+        context_text = f"{imported_context}\n\n[群組最近訊息]\n{context_text}"
     return history_snapshot, context_text
 
 
@@ -194,9 +292,7 @@ def _should_suppress_duplicate_reply(
             state.last_reply_text,
         )
 
-        return (
-            (is_same_reply and is_same_scenario) or is_semantic_duplicate
-        )
+        return (is_same_reply and is_same_scenario) or is_semantic_duplicate
 
 
 def _should_suppress_duplicate_candidates(
@@ -226,17 +322,13 @@ def _mark_reply_sent(
         return
 
     with conversation_lock:
-        state = conversation_states.get(conversation_key)
-        if state is None:
-            state = ConversationState()
-            conversation_states[conversation_key] = state
-
+        state = _get_or_create_state(conversation_key)
         state.last_reply_text = normalized_text
         state.last_scenario_code = scenario_code
         state.last_reply_message_count = state.user_message_count
 
 
-def _resolve_final_reply_after_external_search(result: dict) -> str:
+def _resolve_final_reply_after_external_search(result: dict[str, Any]) -> str:
     suggested_reply = str(result.get("suggested_reply") or "").strip()
     if suggested_reply:
         return suggested_reply
@@ -247,11 +339,11 @@ def _push_followup_after_external_search(
     conversation_key: str,
     push_target_id: str,
     scenario_code: str,
-    result: dict,
+    result: dict[str, Any],
 ) -> None:
     final_reply = _resolve_final_reply_after_external_search(result)
     if not final_reply:
-        print("查詢完成後沒有可發送的最終回覆。")
+        print("外部搜尋補充回覆略過：沒有可發送的最終回覆。")
         return
 
     if EXTERNAL_SEARCH_DELAY_SECONDS > 0:
@@ -260,62 +352,142 @@ def _push_followup_after_external_search(
     try:
         _push_text(push_target_id, final_reply)
         _mark_reply_sent(conversation_key, scenario_code, final_reply)
-        print(f"已補送最終回覆：{final_reply}")
+        print(f"已送出外部搜尋補充回覆：{final_reply}")
     except Exception as exc:
-        print(f"補送最終回覆失敗：{exc}")
+        print(f"推送外部搜尋補充回覆失敗：{exc}")
+
+
+def _handle_line_import_message(
+    conversation_key: str,
+    user_text: str,
+) -> str | None:
+    command = extract_line_import_command(user_text)
+    if command is None:
+        return None
+
+    if command.is_itinerary:
+        itinerary = normalize_itinerary_payload(command.payload)
+        focused_spot = itinerary["spots"][0] if itinerary["spots"] else None
+        _store_imported_itinerary(conversation_key, itinerary, focused_spot)
+        _note_user_message(conversation_key, f"[網站行程匯入] {itinerary['title']}")
+        return build_itinerary_import_reply(itinerary)
+
+    spot_payload = normalize_spot_payload(command.payload)
+    itinerary, _ = _get_imported_itinerary_state(conversation_key)
+    if itinerary is None or itinerary.get("itinerary_id") != spot_payload["itinerary_id"]:
+        itinerary = create_placeholder_itinerary_from_spot(spot_payload)
+
+    focused_spot = find_itinerary_spot(
+        itinerary,
+        spot_id=spot_payload["spot_id"],
+        spot_name=spot_payload["spot_name"],
+        sequence=spot_payload["sequence"],
+    )
+    if focused_spot is None:
+        focused_spot = create_focus_spot_from_import(spot_payload)
+
+    _store_imported_itinerary(conversation_key, itinerary, focused_spot)
+    _note_user_message(conversation_key, f"[網站焦點景點] {focused_spot['name']}")
+    return build_spot_import_reply(itinerary, focused_spot)
+
+
+def _reply_from_imported_itinerary(
+    conversation_key: str,
+    user_text: str,
+) -> str | None:
+    itinerary, focused_spot = _get_imported_itinerary_state(conversation_key)
+    if itinerary is None:
+        return None
+    return build_itinerary_followup_reply(user_text, itinerary, focused_spot)
 
 
 @app.route("/callback", methods=["POST"])
-def callback():
-    # get X-Line-Signature header value
+def callback() -> str:
     signature = request.headers["X-Line-Signature"]
-    # get request body as text
     body = request.get_data(as_text=True)
-    app.logger.info("Request body: " + body)
+    app.logger.info("Webhook 請求內容：%s", body)
 
-    # handle webhook body
     try:
         handler.handle(body, signature)
     except InvalidSignatureError:
-        app.logger.info("Webhook 簽章驗證失敗，請確認 channel access token / secret。")
+        app.logger.info("Webhook 簽章驗證失敗。")
         abort(400)
 
     return "OK"
 
 
 @handler.add(MessageEvent, message=TextMessageContent)
-def handle_message(event):
+def handle_message(event: MessageEvent) -> None:
     user_text = event.message.text.strip()
     if not user_text:
         return
-    
-    # 1. 取得 AI 判斷結果
-    try:
-        # 強制用 print 輸出，這一定會顯示在 Terminal
-        print("\n" + "=" * 50)
-        print(f"DEBUG 收到訊息：{user_text}")
 
-        conversation_key = _get_conversation_key(event)
+    conversation_key = _get_conversation_key(event)
+
+    try:
+        import_reply = _handle_line_import_message(conversation_key, user_text)
+    except LineImportError as exc:
+        _note_user_message(conversation_key, "[網站匯入解析失敗]")
+        try:
+            _reply_text_and_mark(
+                event,
+                conversation_key,
+                "line_import_error",
+                f"網站分享的行程資料無法解析：{exc}",
+            )
+        except Exception as reply_exc:
+            print(f"LINE 匯入錯誤回覆失敗：{reply_exc}")
+        return
+    except Exception as exc:
+        print(f"LINE 匯入處理失敗：{exc}")
+        return
+
+    if import_reply:
+        try:
+            _reply_text_and_mark(
+                event,
+                conversation_key,
+                "line_import_received",
+                import_reply,
+            )
+        except Exception as exc:
+            print(f"LINE 匯入回覆失敗：{exc}")
+        return
+
+    try:
+        print("\n" + "=" * 50)
+        print(f"除錯：收到訊息：{user_text}")
+
         recent_messages, context_text = _build_conversation_context(
             conversation_key,
             user_text,
         )
         print(
-            f"DEBUG 對話視窗 key={conversation_key}, "
-            f"messages={len(recent_messages)}/{CONVERSATION_WINDOW_SIZE}"
+            f"除錯：對話鍵值={conversation_key}，"
+            f"訊息數={len(recent_messages)}/{CONVERSATION_WINDOW_SIZE}"
         )
 
-        # 美化 JSON 輸出：indent=4 讓它一行一行，ensure_ascii=False 讓中文顯示正常
-        print(f"DEBUG 送進 AI 的上下文：\n{context_text}")
+        direct_reply = _reply_from_imported_itinerary(conversation_key, user_text)
+        if direct_reply:
+            _reply_text_if_allowed(
+                event,
+                conversation_key,
+                "imported_itinerary_context",
+                direct_reply,
+            )
+            print("除錯：已送出匯入行程脈絡回覆")
+            print("=" * 50 + "\n")
+            return
+
+        print(f"除錯：AI 脈絡如下：\n{context_text}")
         result_obj = analyze_dialogue(context_text)
         result = result_obj.to_dict()
         pretty_result = json.dumps(result, indent=4, ensure_ascii=False)
-        print(f"DEBUG AI 判斷結果：\n{pretty_result}")
+        print(f"除錯：AI 判斷結果：\n{pretty_result}")
     except Exception as exc:
-        print(f"AI 分析失敗：{exc}")
+        print(f"AI 處理失敗：{exc}")
         return
 
-    # 擷取關鍵變數
     should_intervene = bool(result.get("should_intervene"))
     scenario_code = str(result.get("scenario_code") or "")
     suggested_reply = str(result.get("suggested_reply") or "").strip()
@@ -326,30 +498,27 @@ def handle_message(event):
     except (TypeError, ValueError):
         confidence_score = 0.0
 
-    # 2. 判斷是否需要介入
     if not should_intervene:
-        print("AI 判斷不介入。")
+        print("AI 判斷目前不需要介入。")
         print("=" * 50 + "\n")
         return
 
     if confidence_score < MIN_INTERVENTION_CONFIDENCE:
         print(
-            "AI 有介入傾向，但信心不足，先不回覆。"
-            f" (confidence_score={confidence_score:.2f}, "
-            f"threshold={MIN_INTERVENTION_CONFIDENCE:.2f})"
+            "AI 信心分數低於門檻 "
+            f"(信心分數={confidence_score:.2f}, "
+            f"門檻={MIN_INTERVENTION_CONFIDENCE:.2f})"
         )
         print("=" * 50 + "\n")
         return
 
     current_user_message_count = _get_user_message_count(conversation_key)
 
-    # 3. 執行發送邏輯
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
 
         try:
             if requires_external_search:
-                # 情境 A: 需要外部搜尋
                 push_target_id = _get_push_target_id(event)
                 final_reply = _resolve_final_reply_after_external_search(result)
 
@@ -361,8 +530,8 @@ def handle_message(event):
                     final_reply,
                 ):
                     print(
-                        "略過語意相近的重複回覆。 "
-                        f"(scenario_code={scenario_code})"
+                        "略過重複的外部搜尋回覆 "
+                        f"(情境代碼={scenario_code})"
                     )
                     print("=" * 50 + "\n")
                     return
@@ -370,9 +539,10 @@ def handle_message(event):
                 if push_target_id and intermediate_reply:
                     _reply_text(line_bot_api, event.reply_token, intermediate_reply)
                     _mark_reply_sent(conversation_key, scenario_code, intermediate_reply)
-
-                    # 這裡之後可以接外部查詢邏輯，再發送 suggested_reply
-                    print(f"先回覆查詢中訊息：{intermediate_reply}")
+                    print(
+                        "已送出外部搜尋過渡回覆："
+                        f"{intermediate_reply}"
+                    )
 
                     threading.Thread(
                         target=_push_followup_after_external_search,
@@ -384,12 +554,11 @@ def handle_message(event):
                     if fallback_text:
                         _reply_text(line_bot_api, event.reply_token, fallback_text)
                         _mark_reply_sent(conversation_key, scenario_code, fallback_text)
-                        print(f"直接回覆最終訊息：{fallback_text}")
+                        print(f"已送出外部搜尋備援回覆：{fallback_text}")
                     else:
-                        print("需要查資料，但沒有可送出的訊息。")
+                        print("外部搜尋流程沒有可送出的回覆文字。")
 
             elif suggested_reply:
-                # 情境 B: 直接回覆
                 if _should_suppress_duplicate_reply(
                     conversation_key,
                     scenario_code,
@@ -397,18 +566,18 @@ def handle_message(event):
                     current_user_message_count,
                 ):
                     print(
-                        "略過語意相近的重複回覆。 "
-                        f"(scenario_code={scenario_code}, text={suggested_reply})"
+                        "略過重複回覆 "
+                        f"(情境代碼={scenario_code}, 回覆內容={suggested_reply})"
                     )
                     print("=" * 50 + "\n")
                     return
 
-                print(f"準備回覆：{suggested_reply}")
+                print(f"準備送出建議回覆：{suggested_reply}")
                 _reply_text(line_bot_api, event.reply_token, suggested_reply)
                 _mark_reply_sent(conversation_key, scenario_code, suggested_reply)
-                print("已送出 LINE 回覆。")
+                print("LINE 回覆已送出。")
             else:
-                print("AI 判斷要介入，但沒有可送出的 suggested_reply。")
+                print("AI 沒有產出可送出的建議回覆。")
 
             print("=" * 50 + "\n")
         except Exception as exc:

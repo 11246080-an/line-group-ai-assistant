@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>台灣一日遊行程推薦</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <link rel="stylesheet" href="src/styles.css" />
+  </head>
+  <body>
+    <header class="app-header">
+      <div class="header-copy">
+        <p class="eyebrow">Travel Planner</p>
+        <h1>台灣一日遊行程推薦</h1>
+        <p class="header-summary">
+          挑選喜歡的行程、查看景點路線，之後可把行程匯入 LINE Bot，出遊時直接詢問下一站要去哪裡。
+        </p>
+      </div>
+      <div class="header-meta" aria-label="目前推薦統計">
+        <span id="resultCount">0 筆行程</span>
+        <span id="totalSpotCount">0 個景點</span>
+      </div>
+    </header>
+
+    <main class="app-shell">
+      <aside class="sidebar" aria-label="行程推薦清單">
+        <button class="sheet-handle" type="button" aria-label="調整行程卡片高度"></button>
+        <div class="mobile-sheet-summary" aria-live="polite">
+          <p id="mobileSheetMeta">推薦行程</p>
+          <h2 id="mobileSheetTitle">台灣一日遊行程推薦</h2>
+          <p id="mobileSheetDescription">選擇喜歡的路線，查看景點順序與行程資訊。</p>
+          <div id="mobileSheetTags" class="mobile-sheet-tags" aria-label="行程資訊"></div>
+          <div class="mobile-sheet-note">
+            <span>推薦理由</span>
+            <p id="mobileSheetComment">選一條行程後會顯示推薦理由。</p>
+          </div>
+          <div class="mobile-sheet-actions">
+            <button
+              id="mobileLineImportButton"
+              class="line-import-button mobile-summary-import"
+              type="button"
+              data-line-import
+              disabled
+            >分享到 LINE 群組</button>
+          </div>
+        </div>
+        <section class="itinerary-list-section" aria-labelledby="listTitle">
+          <div class="section-heading">
+            <p class="eyebrow">Recommendations</p>
+            <h2 id="listTitle">推薦行程</h2>
+          </div>
+
+          <details id="filtersPanel" class="filters-panel" open>
+            <summary>搜尋或篩選推薦景點</summary>
+            <div class="filter-grid">
+              <label>
+                地區
+                <select id="regionFilter">
+                  <option value="all">全部地區</option>
+                </select>
+              </label>
+              <label>
+                預算
+                <select id="budgetFilter">
+                  <option value="all">全部預算</option>
+                </select>
+              </label>
+              <label>
+                距離
+                <select id="distanceFilter">
+                  <option value="all">全部距離</option>
+                </select>
+              </label>
+              <label>
+                類型
+                <select id="typeFilter">
+                  <option value="all">全部類型</option>
+                </select>
+              </label>
+              <label>
+                交通
+                <select id="transportFilter">
+                  <option value="all">全部交通</option>
+                </select>
+              </label>
+              <button id="resetFilters" type="button">重設</button>
+            </div>
+          </details>
+
+          <div class="carousel-shell" aria-label="行程輪播">
+            <button id="prevItinerary" class="carousel-button" type="button" aria-label="上一筆行程">&lsaquo;</button>
+            <div class="carousel-window">
+              <div id="itineraryList" class="itinerary-list"></div>
+            </div>
+            <button id="nextItinerary" class="carousel-button" type="button" aria-label="下一筆行程">&rsaquo;</button>
+          </div>
+
+          <div id="carouselStatus" class="carousel-status">0 / 0</div>
+        </section>
+      </aside>
+
+      <section class="map-panel" aria-label="景點互動地圖">
+        <div class="map-info" aria-live="polite">
+          <div>
+            <p class="eyebrow">Map</p>
+            <h2 id="mapTitle">點選行程即可查看路線</h2>
+          </div>
+          <span id="spotCount">0 個景點</span>
+        </div>
+        <div id="map" class="interactive-map" aria-label="顯示行程景點位置的地圖"></div>
+      </section>
+    </main>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="src/data.js"></script>
+    <script src="src/app.js"></script>
+  </body>
+</html>
