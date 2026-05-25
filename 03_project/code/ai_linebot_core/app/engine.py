@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from app.classifier import classify
 from app.extractor import extract_info
-from app.models import AnalysisResult
+from app.models import AnalysisResult, ExtractedInfo
 from app.llm_judge import LLMJudgeError, judge_with_llm
 
 
@@ -59,10 +59,10 @@ def _derive_external_search_fields(
 # LINE Bot 同學之後如果要用這個專案，
 # 基本上就是把群組對話文字丟進這個函式。
 def analyze_dialogue(text: str) -> AnalysisResult:
-    # 第一步：先從原始對話裡抓出重點資訊。
-    # 這樣後面的 LLM 就不用只看一大串原文，
-    # 還能一起參考整理好的摘要欄位。
-    info = extract_info(text)
+    # 主流程改成直接把整段對話交給 LLM 判斷，
+    # 不再把 extractor 當成主要輸入來源。
+    # extractor 只保留給 fallback classifier 使用。
+    info = ExtractedInfo()
     fallback_reason = ""
 
     try:
@@ -74,10 +74,14 @@ def analyze_dialogue(text: str) -> AnalysisResult:
         # 如果 LLM 失敗，就改用備援方案。
         # fallback 可以理解成「主方案壞掉時的替代方案」。
         fallback_reason = str(exc)
+        info = extract_info(text)
         scenario, evidence, confidence = classify(text, info)
 
     # 如果 AI 根本不該介入，就不需要正式回覆。
-    reply = scenario.suggested_reply if scenario.should_intervene else ""
+    if scenario.should_intervene:
+        reply = scenario.suggested_reply
+    else:
+        reply = ""
 
     # 根據劇本與需求類型，補上：
     # - 是否需要外部查詢

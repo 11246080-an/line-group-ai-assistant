@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from app.knowledge_base import SCENARIOS
-from app.models import AnalysisResult, ExtractedInfo
+from app.models import AnalysisResult, ExtractedInfo, ScenarioDefinition
 
 
 class LLMJudgeError(RuntimeError):
@@ -21,7 +21,6 @@ class LLMJudgeError(RuntimeError):
 ROOT_DIR = Path(__file__).resolve().parent.parent
 
 
-# 讀取 .env 檔，把 API key 之類的設定放進環境變數。
 def _load_env_file() -> None:
     env_path = ROOT_DIR / ".env"
     if not env_path.exists():
@@ -37,8 +36,6 @@ def _load_env_file() -> None:
         os.environ.setdefault(key, value)
 
 
-# 有些文字檔可能不是同一種編碼存出來的。
-# 這個函式會依序嘗試多種常見編碼，避免讀檔直接失敗。
 def _load_text_file(filename: str) -> str:
     path = ROOT_DIR / filename
     encodings = ("utf-8-sig", "utf-8", "utf-16", "cp950")
@@ -58,8 +55,6 @@ def _load_text_file(filename: str) -> str:
     raise LLMJudgeError(f"無法讀取檔案 {filename}")
 
 
-# 讀取標準答案 CSV，整理成一段簡短文字，
-# 讓 LLM 了解 17 個劇本大致應該怎麼判。
 def _load_standard_answer_summaries() -> str:
     path = ROOT_DIR / "standard_answers.csv"
     rows: list[str] = []
@@ -93,8 +88,6 @@ def _load_standard_answer_summaries() -> str:
     return "\n".join(rows)
 
 
-# 把 knowledge base 裡的劇本定義整理成 prompt 文字。
-# 這樣 LLM 不只是看原始對話，還會一起參考劇本資料。
 def _scenario_context() -> str:
     lines: list[str] = []
     for scenario in SCENARIOS:
@@ -108,8 +101,63 @@ def _scenario_context() -> str:
     return "\n".join(lines)
 
 
-# LLM 有時會回傳多餘文字或 Markdown。
-# 這個函式負責把真正的 JSON 內容挖出來。
+def _find_scenario_definition(scenario_code: str) -> ScenarioDefinition | None:
+    normalized_code = _normalize_scenario_code_value(scenario_code)
+    for scenario in SCENARIOS:
+        if scenario.code == normalized_code:
+            return scenario
+    return None
+
+
+def _normalize_scenario_code_value(value: Any) -> str:
+    text = str(value).strip()
+    if not text:
+        return text
+
+    for scenario in SCENARIOS:
+        if text in {scenario.code, scenario.name}:
+            return scenario.code
+
+    compact = text.replace(" ", "").replace("　", "").replace("劇本", "")
+    if compact.isdigit():
+        index = int(compact) - 1
+        if 0 <= index < len(SCENARIOS):
+            return SCENARIOS[index].code
+
+    chinese_number_map = {
+        "一": 1,
+        "二": 2,
+        "三": 3,
+        "四": 4,
+        "五": 5,
+        "六": 6,
+        "七": 7,
+        "八": 8,
+        "九": 9,
+        "十": 10,
+        "十一": 11,
+        "十二": 12,
+        "十三": 13,
+        "十四": 14,
+        "十五": 15,
+        "十六": 16,
+        "十七": 17,
+    }
+    if compact in chinese_number_map:
+        index = chinese_number_map[compact] - 1
+        if 0 <= index < len(SCENARIOS):
+            return SCENARIOS[index].code
+
+    return text
+
+
+def _default_suggested_reply_for_scenario(scenario_code: str) -> str:
+    scenario = _find_scenario_definition(scenario_code)
+    if scenario is None:
+        return ""
+    return scenario.suggested_reply
+
+
 def _extract_json(text: str) -> dict[str, Any]:
     payload = text.strip()
     if payload.startswith("```"):
@@ -131,11 +179,6 @@ def _extract_json(text: str) -> dict[str, Any]:
         raise LLMJudgeError(f"LLM JSON 解析失敗: {exc}") from exc
 
 
-# LLM 有時候會把清單欄位回成：
-# - 真正的 list
-# - 一整串字串
-# - 用逗號、頓號、換行分開的字串
-# 這個函式會把它整理成一致的「字串列表」。
 def _normalize_string_list(value: Any, field_name: str) -> list[str]:
     if isinstance(value, list):
         normalized: list[str] = []
@@ -167,9 +210,6 @@ def _normalize_string_list(value: Any, field_name: str) -> list[str]:
     raise LLMJudgeError(f"LLM 輸出的 {field_name} 格式不正確")
 
 
-# intermediate_reply 是查資料前先回的一句話。
-# 這個函式會把語氣調整得像 LINE 群組聊天，
-# 避免出現太像系統訊息的句子。
 def _normalize_intermediate_reply(value: Any, requires_external_search: bool) -> str:
     if not requires_external_search:
         return ""
@@ -188,12 +228,20 @@ def _normalize_intermediate_reply(value: Any, requires_external_search: bool) ->
     if any(phrase in text for phrase in banned_phrases):
         return "我先幫你們看一下，等等整理給你們～"
 
-    # Keep the reply short and conversational for LINE-style group chat.
     return text
 
 
-# 把 LLM 回傳的資料檢查、補齊、整理成 AnalysisResult。
-# 這一步很重要，因為它保證輸出格式固定。
+def _normalize_suggested_reply(value: Any, scenario_code: str, should_intervene: bool) -> str:
+    if not should_intervene:
+        return ""
+
+    text = str(value or "").strip()
+    if text:
+        return text
+
+    return _default_suggested_reply_for_scenario(scenario_code)
+
+
 def _normalize_result(data: dict[str, Any], fallback_info: ExtractedInfo) -> AnalysisResult:
     required_fields = {
         "scenario_code",
@@ -214,12 +262,12 @@ def _normalize_result(data: dict[str, Any], fallback_info: ExtractedInfo) -> Ana
     if missing:
         raise LLMJudgeError(f"LLM 輸出缺少必要欄位: {sorted(missing)}")
 
-    # 如果 LLM 漏掉某些 extracted_info 欄位，
-    # 就先用 extractor 先前抓到的資料補上。
     raw_info = data.get("extracted_info") or {}
     merged_info = fallback_info.to_dict()
     if isinstance(raw_info, dict):
         merged_info.update(raw_info)
+
+    reply_trigger = str(data["reply_trigger"]).strip()
 
     should_intervene = data["should_intervene"]
     if isinstance(should_intervene, str):
@@ -234,12 +282,17 @@ def _normalize_result(data: dict[str, Any], fallback_info: ExtractedInfo) -> Ana
             "是",
         }
 
+    if reply_trigger == "no_reply":
+        should_intervene = False
+    elif reply_trigger in {"explicit_request", "functional_question", "stuck_discussion"}:
+        should_intervene = True
+
     normalized = {
-        "scenario_code": str(data["scenario_code"]),
+        "scenario_code": _normalize_scenario_code_value(data["scenario_code"]),
         "scenario_name": str(data["scenario_name"]),
         "stage": str(data["stage"]),
         "should_intervene": bool(should_intervene),
-        "reply_trigger": str(data["reply_trigger"]),
+        "reply_trigger": reply_trigger,
         "intervention_type": str(data["intervention_type"]),
         "confidence_score": float(data["confidence_score"]),
         "evidence": _normalize_string_list(data["evidence"], "evidence"),
@@ -249,30 +302,30 @@ def _normalize_result(data: dict[str, Any], fallback_info: ExtractedInfo) -> Ana
             data.get("intermediate_reply", ""),
             bool(requires_external_search),
         ),
-        "suggested_reply": str(data.get("suggested_reply", "")),
+        "suggested_reply": _normalize_suggested_reply(
+            data.get("suggested_reply", ""),
+            _normalize_scenario_code_value(data["scenario_code"]),
+            bool(should_intervene),
+        ),
         "extracted_info": merged_info,
     }
     return AnalysisResult.from_dict(normalized)
 
 
-# 建立要送給 LLM 的 prompt。
-# 內容包含：
-# - 原始對話
-# - extractor 摘要資訊
-# - AI 判斷邏輯
-# - 17 劇本定義
-# - 標準答案摘要
-# 目的是讓 LLM 根據整體語意判斷，而不是只看關鍵字。
-def _build_messages(text: str, extracted_info: ExtractedInfo) -> list[dict[str, str]]:
-    prompt_template = _load_text_file("prompt_templates.txt")
+def _build_judgment_messages(text: str, extracted_info: ExtractedInfo) -> list[dict[str, str]]:
     ai_logic = _load_text_file("ai_logic.txt")
-    standard_answers = _load_standard_answer_summaries()
     scenarios = _scenario_context()
+    standard_answers = _load_standard_answer_summaries()
 
     system_prompt = f"""
 你是「LINE 群組行程助理」的情境判斷核心模組。
-你的主要任務不是看關鍵字，而是根據整體語意、對話進展、使用者之間的互動、已抽取摘要資訊，
-並參考 17 個劇本定義、AI 判斷邏輯與標準答案風格，判斷目前最符合哪一個劇本。
+你的工作是根據整段群組對話、對話進展、多人互動方式與摘要資訊，
+判斷目前最符合哪一個劇本，以及 AI 是否需要介入。
+
+這一階段只負責「判斷」，不負責最終回覆生成。
+所以在這一階段：
+- intermediate_reply 一律輸出空字串
+- suggested_reply 一律輸出空字串
 
 請嚴格輸出 JSON，不要輸出 Markdown，不要加註解，不要補充多餘說明。
 不可捏造對話中不存在的資訊；若資訊不足，保留空陣列、空字串，或沿用摘要中的已知值。
@@ -292,29 +345,23 @@ def _build_messages(text: str, extracted_info: ExtractedInfo) -> list[dict[str, 
 - suggested_reply
 - extracted_info
 
+reply_trigger 必須是以下其中一種：
+- explicit_request：使用者明確向 AI 求助、要求幫忙、要求整理、要求推薦
+- functional_question：使用者提出具有功能性的問題，例如查詢、推薦、規劃、比較、排序
+- stuck_discussion：群組討論明顯卡住，成員反覆出現「都可以」、「隨便」、「沒意見」、「你們決定」等附和語句，且沒有新增具體選項、條件或決策方向，對話仍無法推進時
+- no_reply：一般聊天、寒暄、附和、閒聊、情緒反應，或尚未形成明確需求時
 
-規則補充：
-- 若情境需要查詢外部資訊，例如附近餐廳、電影場次、天氣、餐廳推薦、路線或交通查詢，requires_external_search 必須為 true。
-- 若 requires_external_search = true，intermediate_reply 必須先提供一句自然的 LINE 群組回覆，表示 AI 正在查詢中。
-- suggested_reply 則是查詢完成後的正式回覆。
-- 若情境不需要外部查詢，例如討論停滯、投票決策、時間衝突提醒，requires_external_search 應為 false，intermediate_reply 應為空字串。
-- intermediate_reply 的語氣要像 LINE 群組聊天，必須自然、口語、簡短。
-- 可以使用「我先幫你們...」、「等等整理給你們」、「稍等一下」這類說法。
-- 避免使用「我正在查詢」、「正在處理中」、「系統處理中」等機械式語句。
-- 可以適度使用「～」，但不要太多。
-- reply_trigger 只能是以下其中一種：
-  - explicit_request：使用者明確向 AI 發出請求，例如「幫我整理」、「幫我推薦」、「幫我查一下」、「你幫我決定」、「麻煩你幫我看看」
-  - functional_question：使用者提出具有功能性的問題或查詢需求，例如詢問附近有什麼、哪個比較適合、有哪些選項、怎麼安排、怎麼比較，但未直接要求 AI 執行動作
-  - stuck_discussion：群組討論明顯卡住，成員反覆出現「都可以」、「隨便」、「沒意見」、「你們決定」等附和語句，且沒有新增具體選項、條件或決策方向，對話仍無法推進時
-  - no_reply：一般聊天、寒暄、附和、閒聊、情緒反應，或尚未形成明確需求時
-- 若對話中已明確表現出「還是沒決定」、「還沒想法」、「不知道怎麼選」等無法收斂的語意，應優先判定為 stuck_discussion，而非 no_reply。
+重要規則：
 - 如果 reply_trigger = no_reply，則 should_intervene 必須為 false。
+- 如果 reply_trigger 是 explicit_request、functional_question 或 stuck_discussion，則 should_intervene 必須為 true。
+- 如果 reply_trigger 是 explicit_request、functional_question 或 stuck_discussion，就不應選擇原本 should_intervene = false 的劇本。
 - 對於一般聊天、附和、寒暄、情緒反應、單純延續話題但未形成明確需求的訊息，應優先判定為 no_reply，不應主動回覆。
 - 若使用者是在詢問資訊、選項、推薦、比較或安排方式，但沒有直接以「幫我」、「麻煩你」、「你幫我」等語句要求 AI 執行動作，應優先判定為 functional_question，而非 explicit_request。
+- 若情境需要查詢外部資訊，例如附近餐廳、電影場次、天氣、餐廳推薦、路線或交通查詢，requires_external_search 必須為 true。
+- 若情境不需要外部查詢，例如討論停滯、投票決策、時間衝突提醒，requires_external_search 應為 false。
+- 這一階段不要生成 intermediate_reply 或 suggested_reply，兩者皆輸出空字串。
 
-
-
-其中 extracted_info 必須是物件，欄位包含：
+extracted_info 欄位必須包含以下欄位：
 - time
 - location
 - people_count
@@ -327,9 +374,6 @@ def _build_messages(text: str, extracted_info: ExtractedInfo) -> list[dict[str, 
 - need_type
 
 參考資料：
-[Prompt 風格]
-{prompt_template}
-
 [AI 判斷邏輯]
 {ai_logic}
 
@@ -344,10 +388,10 @@ def _build_messages(text: str, extracted_info: ExtractedInfo) -> list[dict[str, 
 以下是要判斷的群組對話：
 {text}
 
-以下是前處理抽取出的摘要資訊：
+以下是目前可用的摘要資訊（若無則可能為空）：
 {json.dumps(extracted_info.to_dict(), ensure_ascii=False, indent=2)}
 
-請依據整體語意、對話進展與摘要資訊，輸出固定 JSON。
+請優先依據整段對話脈絡進行判斷，再把可用摘要資訊當作輔助參考，輸出固定 JSON。
 """.strip()
 
     return [
@@ -356,10 +400,129 @@ def _build_messages(text: str, extracted_info: ExtractedInfo) -> list[dict[str, 
     ]
 
 
-# 這是 LLM 判斷的主要函式。
-# engine.py 會先呼叫它；如果失敗，才會改走 fallback classifier。
+def _build_generation_messages(text: str, judgment: AnalysisResult) -> list[dict[str, str]]:
+    scenario = _find_scenario_definition(judgment.scenario_code)
+    if scenario is None:
+        raise LLMJudgeError(f"找不到對應劇本定義：{judgment.scenario_code}")
+
+    is_active_intervention = (
+        judgment.intervention_type == "顯性介入"
+        or judgment.reply_trigger in {"explicit_request", "stuck_discussion"}
+    )
+    intervention_mode = "主動介入" if is_active_intervention else "被動回應"
+
+    if is_active_intervention:
+        behavior_instruction = """
+你現在要用「主動介入」方式生成回覆。
+- 主動介入代表你可以主動整理方向、縮小選項、推進討論。
+- 但不要替群組直接做最後決定，要保留選擇空間。
+- 回覆要像群組助理，不要像客服或公告系統。
+""".strip()
+    else:
+        behavior_instruction = """
+你現在要用「被動回應」方式生成回覆。
+- 被動回應代表你主要是在回答眼前問題，不要搶主導權。
+- 以補充資訊、提供候選選項、回應使用者需求為主。
+- 回覆要自然、簡短、像 LINE 群組中的助理。
+""".strip()
+
+    if judgment.requires_external_search:
+        output_instruction = """
+此情境需要外部查詢。
+- intermediate_reply 必須是一句很短、自然、口語的群組回覆，表示 AI 先幫忙查。
+- suggested_reply 則是查完資料後要貼進群組的正式回覆。
+""".strip()
+    else:
+        output_instruction = """
+此情境不需要外部查詢。
+- intermediate_reply 必須輸出空字串。
+- suggested_reply 必須直接給出可貼進 LINE 群組的正式回覆。
+""".strip()
+
+    system_prompt = f"""
+你是「LINE 群組行程助理」的回覆生成模組。
+你現在處理的劇本是：
+- 劇本代碼：{scenario.code}
+- 劇本名稱：{scenario.name}
+- 劇本階段：{scenario.stage}
+- 預設介入方式：{scenario.intervention_type}
+- 劇本建議行為：{", ".join(scenario.system_behavior)}
+- 劇本預設建議回覆：{scenario.suggested_reply or "空字串"}
+- 目前介入模式：{intervention_mode}
+
+{behavior_instruction}
+
+{output_instruction}
+
+請嚴格輸出 JSON，不要輸出 Markdown，不要加註解。
+輸出欄位只需要：
+- intermediate_reply
+- suggested_reply
+
+回覆要求：
+- 必須結合目前群組對話脈絡，不可憑空捏造不存在的資訊。
+- 必須符合這個劇本的任務，不同劇本的回覆角度要不同。
+- 若是討論卡住，重點是幫忙整理方向或縮小選項。
+- 若是功能性問題，重點是回應問題本身，不要太像硬插話。
+- 若是明確求助，重點是直接幫忙處理需求。
+- 口氣要自然、簡短、適合 LINE 群組。
+""".strip()
+
+    user_prompt = f"""
+以下是目前整段群組對話：
+{text}
+
+以下是上一階段的判斷結果：
+{json.dumps(judgment.to_dict(), ensure_ascii=False, indent=2)}
+
+請根據這個劇本與介入方式，生成最終回覆 JSON。
+""".strip()
+
+    return [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
+
+
+def _call_openai_json(
+    client: Any,
+    model: str,
+    messages: list[dict[str, str]],
+    *,
+    purpose: str,
+) -> dict[str, Any]:
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            temperature=0.1,
+            messages=messages,
+            response_format={"type": "json_object"},
+        )
+    except Exception as exc:  # pragma: no cover - network/sdk path
+        raise LLMJudgeError(f"OpenAI {purpose} 失敗: {exc}") from exc
+
+    content = response.choices[0].message.content or ""
+    return _extract_json(content)
+
+
+def _merge_generated_reply(
+    judgment: AnalysisResult,
+    generated_reply: dict[str, Any],
+) -> AnalysisResult:
+    merged = judgment.to_dict()
+    merged["intermediate_reply"] = _normalize_intermediate_reply(
+        generated_reply.get("intermediate_reply", ""),
+        judgment.requires_external_search,
+    )
+    merged["suggested_reply"] = _normalize_suggested_reply(
+        generated_reply.get("suggested_reply", ""),
+        judgment.scenario_code,
+        judgment.should_intervene,
+    )
+    return AnalysisResult.from_dict(merged)
+
+
 def judge_with_llm(text: str, extracted_info: ExtractedInfo) -> AnalysisResult:
-    # 先載入 .env 設定，讓程式可以讀到 API key。
     _load_env_file()
 
     api_key = os.getenv("OPENAI_API_KEY")
@@ -373,23 +536,25 @@ def judge_with_llm(text: str, extracted_info: ExtractedInfo) -> AnalysisResult:
     except ImportError as exc:
         raise LLMJudgeError("未安裝 openai 套件") from exc
 
-    # 建立 OpenAI client，準備呼叫模型。
     client = OpenAI(api_key=api_key)
-    messages = _build_messages(text, extracted_info)
 
-    try:
-        # 把整理好的 prompt 丟給 LLM，
-        # 請它直接回固定格式的 JSON。
-        response = client.chat.completions.create(
-            model=model,
-            temperature=0.1,
-            messages=messages,
-            response_format={"type": "json_object"},
-        )
-    except Exception as exc:  # pragma: no cover - network/sdk path
-        raise LLMJudgeError(f"OpenAI 呼叫失敗: {exc}") from exc
+    judgment_messages = _build_judgment_messages(text, extracted_info)
+    judgment_data = _call_openai_json(
+        client,
+        model,
+        judgment_messages,
+        purpose="情境判斷",
+    )
+    judgment_result = _normalize_result(judgment_data, extracted_info)
 
-    # 拿到模型回應後，先找出 JSON，再整理成固定結果格式。
-    content = response.choices[0].message.content or ""
-    data = _extract_json(content)
-    return _normalize_result(data, extracted_info)
+    if not judgment_result.should_intervene:
+        return judgment_result
+
+    generation_messages = _build_generation_messages(text, judgment_result)
+    generated_reply = _call_openai_json(
+        client,
+        model,
+        generation_messages,
+        purpose="回覆生成",
+    )
+    return _merge_generated_reply(judgment_result, generated_reply)
