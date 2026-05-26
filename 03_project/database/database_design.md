@@ -251,7 +251,7 @@ erDiagram
 
 ## 四、設計決策說明
 
-### 為何從 10 個 SQL 表縮減為 6 個 Collection？
+### 從 10 個 SQL 表縮減為 6 個 Collection？
 
 | 決策 | 原因 |
 |------|------|
