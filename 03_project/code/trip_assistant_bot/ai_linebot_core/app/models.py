@@ -8,6 +8,18 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 
+def _normalize_list_field(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(item) for item in value]
+    if isinstance(value, (tuple, set)):
+        return [str(item) for item in value]
+    if isinstance(value, str):
+        return [value] if value else []
+    return [str(value)]
+
+
 @dataclass
 class ExtractedInfo:
     # 這裡放的是從原始對話中抽取出的重點資訊。
@@ -30,15 +42,15 @@ class ExtractedInfo:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ExtractedInfo":
         return cls(
-            time=list(data.get("time", [])),
-            location=list(data.get("location", [])),
-            people_count=list(data.get("people_count", [])),
-            budget=list(data.get("budget", [])),
-            constraints=list(data.get("constraints", [])),
-            activity_types=list(data.get("activity_types", [])),
-            options=list(data.get("options", [])),
+            time=_normalize_list_field(data.get("time", [])),
+            location=_normalize_list_field(data.get("location", [])),
+            people_count=_normalize_list_field(data.get("people_count", [])),
+            budget=_normalize_list_field(data.get("budget", [])),
+            constraints=_normalize_list_field(data.get("constraints", [])),
+            activity_types=_normalize_list_field(data.get("activity_types", [])),
+            options=_normalize_list_field(data.get("options", [])),
             decision_state=str(data.get("decision_state", "未定")),
-            risk_info=list(data.get("risk_info", [])),
+            risk_info=_normalize_list_field(data.get("risk_info", [])),
             need_type=data.get("need_type"),
         )
 
