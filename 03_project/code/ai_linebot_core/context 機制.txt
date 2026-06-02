@@ -1,0 +1,166 @@
+有，我幫你確認了，目前 LINE Bot 那邊是這樣做的：
+
+# 結論
+
+## 現在抓的是「最近幾則訊息」
+不是只抓最新一句。
+
+## 預設最多抓幾句？
+**預設是 15 則訊息。**
+
+在 [`trip_assistant_bot/app.py`](C:\Users\115410\Desktop\專題製作\trip_assistant_bot\app.py) 裡有這行：
+
+```python
+CONVERSATION_WINDOW_SIZE = max(1, int(os.getenv("CONVERSATION_WINDOW_SIZE", "15")))
+```
+
+意思是：
+
+- 如果 `.env` 沒另外設定
+- 就預設保留最近 **15 則**
+
+---
+
+# 它怎麼存這些訊息？
+
+在同一支檔案裡有：
+
+```python
+history: deque[str] = field(
+    default_factory=lambda: deque(maxlen=CONVERSATION_WINDOW_SIZE)
+)
+```
+
+這代表：
+
+- 每個群組 / 對話都有一個 `history`
+- `history` 是一個固定長度的訊息佇列
+- 最多只留最近 `CONVERSATION_WINDOW_SIZE` 則
+- 超過就把最舊的丟掉
+
+最白話講就是：
+
+**它會記住最近幾句，不會一直無限累積。**
+
+---
+
+# `context_text` 是怎麼組成的？
+
+重點在這個 function：
+
+```python
+def _build_conversation_context(conversation_key: str, user_text: str) -> tuple[list[str], str]:
+```
+
+裡面做的事情是：
+
+## 第一步：把最新一句加進 history
+```python
+state.history.append(normalized_text)
+```
+
+也就是把這次新收到的訊息加進最近訊息清單。
+
+---
+
+## 第二步：把最近訊息複製出來
+```python
+history_snapshot = list(state.history)
+```
+
+這就是目前保留的最近幾句。
+
+---
+
+## 第三步：把它們用換行接起來
+```python
+context_text = "\n".join(history_snapshot)
+```
+
+這很重要。
+
+意思是：
+
+**`context_text` 不是一個 JSON，不是特別複雜格式，就是把最近幾句話用換行串成一大段文字。**
+
+---
+
+# 最白話範例
+
+假設最近三句是：
+
+```text
+晚點吃飯嗎
+都可以
+附近有什麼可以吃的
+```
+
+那送進 AI 的 `context_text` 會變成：
+
+```text
+晚點吃飯嗎
+都可以
+附近有什麼可以吃的
+```
+
+也就是：
+
+**純文字、多行、一整段上下文。**
+
+---
+
+# 它什麼時候送進 AI？
+
+在 [`trip_assistant_bot/app.py`](C:\Users\115410\Desktop\專題製作\trip_assistant_bot\app.py) 的 `handle_message(event)` 裡：
+
+```python
+recent_messages, context_text = _build_conversation_context(
+    conversation_key,
+    user_text,
+)
+...
+result_obj = analyze_dialogue(context_text)
+```
+
+意思是：
+
+1. 先把最新訊息加進最近對話紀錄
+2. 組成 `context_text`
+3. 再把整段 `context_text` 丟進 `analyze_dialogue(context_text)`
+
+---
+
+# 所以目前不是「一句一句單獨判」
+
+而是：
+
+## 現在的方式
+**最新一句 + 前面最近幾句**
+一起組成一段文字，再送進 AI。
+
+---
+
+# 你可以怎麼跟老師說
+
+你可以這樣回答：
+
+`目前 LINE Bot 端會保留最近一段群組對話，預設為最近 15 則訊息，並將這些訊息以換行方式組成一段 context_text，再送入 analyze_dialogue(text) 進行分析，因此模型不是只看單一句，而是根據最近一段多人對話上下文做判斷。`
+
+---
+
+# 再幫你濃縮成超短版
+
+## 目前 LINE Bot 的 context 機制
+- 預設保留最近 **15 則訊息**
+- 用 `deque(maxlen=15)` 暫存
+- 新訊息進來時加入 `history`
+- 再用 `"\n".join(history)` 組成 `context_text`
+- 把整段 `context_text` 丟進 AI
+
+---
+
+如果你要，我下一步可以接著幫你講：
+
+1. **這種做法的優點**
+2. **這樣有沒有缺點**
+3. **如果老師問「15 則是怎麼決定的」你可以怎麼回答**
