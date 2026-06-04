@@ -36,11 +36,23 @@ from ai_linebot_core.app.line_import import (
     normalize_itinerary_payload,
     normalize_spot_payload,
 )
-
+from db import (
+    ensure_indexes,
+    save_message,
+    save_summary,
+    upsert_group,
+    upsert_member,
+)
 
 load_dotenv()
 
 app = Flask(__name__)
+
+try:
+    ensure_indexes()
+    print("MongoDB 索引建立完成")
+except Exception as _db_exc:
+    print(f"MongoDB 連線失敗，繼續啟動（無持久化）：{_db_exc}")
 
 configuration = Configuration(access_token=os.getenv("LINE_CHANNEL_ACCESS_TOKEN"))
 handler = WebhookHandler(os.getenv("LINE_CHANNEL_SECRET"))
@@ -427,6 +439,20 @@ def handle_message(event: MessageEvent) -> None:
     if not user_text:
         return
 
+    # ── 取得來源 ID ────────────────────────────────────────────
+    source = getattr(event, "source", None)
+    line_group_id = getattr(source, "group_id", None) or ""
+    line_user_id  = getattr(source, "user_id",  None) or ""
+
+    # ── DB：儲存訊息與群組資訊（失敗不中斷主流程）─────────────
+    try:
+        if line_group_id:
+            upsert_group(line_group_id)
+            upsert_member(line_group_id, line_user_id)
+        save_message(line_group_id, line_user_id, user_text)
+    except Exception as _db_exc:
+        print(f"DB 寫入訊息失敗（繼續處理）：{_db_exc}")
+
     conversation_key = _get_conversation_key(event)
 
     # 先處理網站分享進來的行程 / 景點匯入訊息。
@@ -490,6 +516,12 @@ def handle_message(event: MessageEvent) -> None:
         result = result_obj.to_dict()
         pretty_result = json.dumps(result, indent=4, ensure_ascii=False)
         print(f"DEBUG AI 判斷結果：\n{pretty_result}")
+
+        # ── DB：儲存完整 AI 分析結果（失敗不中斷主流程）─────────
+        try:
+            save_summary(line_group_id or conversation_key, result)
+        except Exception as _db_exc:
+            print(f"DB 寫入分析結果失敗（繼續處理）：{_db_exc}")
     except Exception as exc:
         print(f"AI 分析失敗：{exc}")
         return
