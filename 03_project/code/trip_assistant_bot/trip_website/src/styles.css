@@ -556,6 +556,186 @@ button {
   font-weight: 900;
 }
 
+.locate-control {
+  margin-top: 76px !important;
+}
+
+.locate-control-button {
+  display: grid;
+  place-items: center;
+  min-width: 44px;
+  height: 34px;
+  padding: 0 10px;
+  color: var(--primary-dark);
+  background: #fff;
+  border: 0;
+  cursor: pointer;
+  font-size: 0.82rem;
+  font-weight: 900;
+}
+
+.locate-control-button:hover,
+.locate-control-button:focus-visible {
+  color: #fff;
+  background: var(--primary);
+  outline: none;
+}
+
+.user-location-dot {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+}
+
+.user-location-dot::before {
+  position: absolute;
+  width: 28px;
+  height: 28px;
+  content: "";
+  background: rgba(22, 119, 255, 0.22);
+  border-radius: 50%;
+  animation: location-pulse 1.8s ease-out infinite;
+}
+
+.user-location-dot span {
+  position: relative;
+  width: 16px;
+  height: 16px;
+  background: #1677ff;
+  border: 3px solid #fff;
+  border-radius: 50%;
+  box-shadow:
+    0 0 0 1px rgba(8, 63, 71, 0.18),
+    0 5px 14px rgba(22, 119, 255, 0.45);
+}
+
+@keyframes location-pulse {
+  0% {
+    transform: scale(0.65);
+    opacity: 0.9;
+  }
+
+  100% {
+    transform: scale(1.9);
+    opacity: 0;
+  }
+}
+
+.location-toast {
+  position: fixed;
+  z-index: 900;
+  left: 50%;
+  bottom: 24px;
+  max-width: min(420px, calc(100vw - 32px));
+  padding: 11px 14px;
+  color: #fff;
+  background: rgba(8, 63, 71, 0.94);
+  border-radius: 999px;
+  box-shadow: 0 14px 30px rgba(20, 50, 57, 0.24);
+  font-size: 0.9rem;
+  font-weight: 800;
+  line-height: 1.35;
+  text-align: center;
+  transform: translate(-50%, 16px);
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    opacity 0.18s ease,
+    transform 0.18s ease;
+}
+
+.location-toast.is-visible {
+  transform: translate(-50%, 0);
+  opacity: 1;
+}
+
+.location-permission-sheet {
+  position: fixed;
+  z-index: 980;
+  inset: 0;
+  display: grid;
+  place-items: end center;
+  padding: 18px;
+  background: rgba(8, 33, 39, 0.32);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.2s ease;
+}
+
+.location-permission-sheet.is-visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.location-permission-card {
+  width: min(420px, 100%);
+  padding: 20px;
+  background: #fff;
+  border: 1px solid rgba(217, 229, 225, 0.95);
+  border-radius: 18px;
+  box-shadow: 0 18px 48px rgba(20, 50, 57, 0.24);
+  transform: translateY(14px);
+  transition: transform 0.2s ease;
+}
+
+.location-permission-sheet.is-visible .location-permission-card {
+  transform: translateY(0);
+}
+
+.location-permission-icon {
+  width: 44px;
+  height: 44px;
+  margin-bottom: 12px;
+  background:
+    radial-gradient(circle at center, #1677ff 0 6px, #fff 7px 10px, transparent 11px),
+    radial-gradient(circle at center, rgba(22, 119, 255, 0.16) 0 21px, transparent 22px);
+  border: 1px solid rgba(22, 119, 255, 0.24);
+  border-radius: 50%;
+}
+
+.location-permission-card h2 {
+  margin: 5px 0 8px;
+  color: var(--primary-dark);
+  font-size: 1.45rem;
+  line-height: 1.22;
+}
+
+.location-permission-card p {
+  margin: 0;
+  color: #53676f;
+  line-height: 1.55;
+}
+
+.location-permission-actions {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.location-permission-primary,
+.location-permission-secondary {
+  min-height: 46px;
+  padding: 0 15px;
+  border-radius: 999px;
+  cursor: pointer;
+  font-weight: 900;
+}
+
+.location-permission-primary {
+  color: #fff;
+  background: var(--primary);
+  border: 0;
+}
+
+.location-permission-secondary {
+  color: var(--primary-dark);
+  background: #f4f7f6;
+  border: 1px solid var(--line);
+}
+
 .leaflet-popup-content-wrapper {
   border-radius: 12px;
 }
@@ -1064,8 +1244,17 @@ button {
     margin-top: 84px !important;
   }
 
+  .locate-control {
+    margin-top: 178px !important;
+  }
+
   .leaflet-bottom {
     bottom: calc(var(--sheet-height, 38dvh) + 8px);
+  }
+
+  .location-toast {
+    bottom: calc(var(--sheet-height, 38dvh) + 18px);
+    border-radius: 16px;
   }
 
   .leaflet-popup {

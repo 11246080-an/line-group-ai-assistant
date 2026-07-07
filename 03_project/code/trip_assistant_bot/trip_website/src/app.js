@@ -15,6 +15,12 @@
     map: null,
     markersLayer: null,
     routeLayer: null,
+    userLocationMarker: null,
+    userAccuracyCircle: null,
+    locationWatchId: null,
+    hasRequestedLocation: false,
+    hasShownLocationPrompt: false,
+    lastUserLocation: null,
     markerEntries: [],
     sheetHeight: 38,
     sheetSnapPoints: [32, 52, 78],
@@ -57,6 +63,7 @@
     state.selectedId = state.filtered[0]?.id ?? null;
     setupResponsiveBehavior();
     setupMap();
+    setupLocationControls();
     setupFilters();
     setupCarouselControls();
     setupBottomSheetControls();
@@ -64,6 +71,7 @@
     renderAll();
     resetMobileSheetScroll();
     fitSelectedAfterPaint(false);
+    requestMobileLocationOnOpen();
     restartCarouselAutoplay();
   }
 
@@ -77,6 +85,9 @@
       renderMapMarkers();
       updateCarousel();
       fitSelectedAfterPaint(false);
+      if (event.matches) {
+        requestMobileLocationOnOpen();
+      }
       restartCarouselAutoplay();
     });
   }
@@ -105,6 +116,221 @@
     state.routeLayer = L.layerGroup().addTo(state.map);
 
     window.addEventListener("resize", () => fitSelectedAfterPaint(false));
+  }
+
+  function setupLocationControls() {
+    if (!state.map || !window.L) return;
+
+    const LocateControl = L.Control.extend({
+      options: {
+        position: "topleft",
+      },
+      onAdd() {
+        const container = L.DomUtil.create("div", "leaflet-bar locate-control");
+        const button = L.DomUtil.create("button", "locate-control-button", container);
+        button.type = "button";
+        button.textContent = "定位";
+        button.title = "定位到目前位置";
+        button.setAttribute("aria-label", "定位到目前位置");
+
+        L.DomEvent.disableClickPropagation(container);
+        L.DomEvent.disableScrollPropagation(container);
+        L.DomEvent.on(button, "click", (event) => {
+          L.DomEvent.preventDefault(event);
+          requestUserLocation({ flyTo: true, forcePrompt: true });
+        });
+
+        return container;
+      },
+    });
+
+    state.map.addControl(new LocateControl());
+  }
+
+  function requestMobileLocationOnOpen() {
+    if (!state.isMobile || state.hasRequestedLocation || state.hasShownLocationPrompt) return;
+    window.setTimeout(() => {
+      showMobileLocationPrompt();
+    }, 700);
+  }
+
+  async function showMobileLocationPrompt() {
+    if (state.hasShownLocationPrompt || state.hasRequestedLocation) return;
+    state.hasShownLocationPrompt = true;
+
+    if (navigator.permissions?.query) {
+      try {
+        const permission = await navigator.permissions.query({ name: "geolocation" });
+        if (permission.state === "granted") {
+          requestUserLocation({ flyTo: false, forcePrompt: false });
+          return;
+        }
+      } catch (error) {
+        console.warn("Geolocation permission query failed", error);
+      }
+    }
+
+    let prompt = document.querySelector(".location-permission-sheet");
+    if (!prompt) {
+      prompt = document.createElement("div");
+      prompt.className = "location-permission-sheet";
+      prompt.innerHTML = `
+        <div class="location-permission-card" role="dialog" aria-modal="true" aria-labelledby="locationPromptTitle">
+          <div class="location-permission-icon" aria-hidden="true"></div>
+          <p class="eyebrow">Location</p>
+          <h2 id="locationPromptTitle">開啟定位</h2>
+          <p>允許定位後，地圖會顯示你目前的位置和誤差範圍。</p>
+          <div class="location-permission-actions">
+            <button class="location-permission-primary" type="button">開啟定位</button>
+            <button class="location-permission-secondary" type="button">稍後再說</button>
+          </div>
+        </div>
+      `;
+      document.body.appendChild(prompt);
+    }
+
+    prompt.classList.add("is-visible");
+
+    prompt.querySelector(".location-permission-primary")?.addEventListener("click", () => {
+      prompt.classList.remove("is-visible");
+      requestUserLocation({ flyTo: true, forcePrompt: true });
+    }, { once: true });
+
+    prompt.querySelector(".location-permission-secondary")?.addEventListener("click", () => {
+      prompt.classList.remove("is-visible");
+      showLocationMessage("之後可以按地圖左上角的定位鈕開啟。", 2600);
+    }, { once: true });
+  }
+
+  function requestUserLocation({ flyTo = true, forcePrompt = false } = {}) {
+    if (!state.map || !navigator.geolocation) {
+      showLocationMessage("這個瀏覽器不支援定位功能。");
+      return;
+    }
+
+    if (!window.isSecureContext) {
+      showLocationMessage("手機定位需要 HTTPS 網址；請用我提供的測試網址開啟。");
+      return;
+    }
+
+    if (state.hasRequestedLocation && !forcePrompt && state.locationWatchId !== null) return;
+    state.hasRequestedLocation = true;
+    showLocationMessage("正在取得目前位置...");
+
+    if (state.locationWatchId !== null) {
+      navigator.geolocation.clearWatch(state.locationWatchId);
+    }
+
+    let hasHandledFirstFix = false;
+    state.locationWatchId = navigator.geolocation.watchPosition(
+      (position) => {
+        handleLocationSuccess(position, {
+          flyTo: flyTo && !hasHandledFirstFix,
+          showFeedback: forcePrompt && !hasHandledFirstFix,
+        });
+        hasHandledFirstFix = true;
+      },
+      handleLocationError,
+      {
+        enableHighAccuracy: true,
+        maximumAge: 15000,
+        timeout: 18000,
+      }
+    );
+  }
+
+  function handleLocationSuccess(position, { flyTo = false, showFeedback = false } = {}) {
+    if (!state.map) return;
+
+    const { latitude, longitude, accuracy } = position.coords;
+    const latLng = [latitude, longitude];
+    const radius = Number.isFinite(accuracy) ? accuracy : 30;
+    const previousLocation = state.lastUserLocation;
+    const movedMeters = previousLocation ? distanceMeters(previousLocation.latLng, latLng) : Infinity;
+    const accuracyDelta = previousLocation ? Math.abs(previousLocation.radius - radius) : Infinity;
+
+    if (!flyTo && previousLocation && movedMeters < 8 && accuracyDelta < 12) return;
+
+    state.lastUserLocation = { latLng, radius };
+
+    if (!state.userAccuracyCircle) {
+      state.userAccuracyCircle = L.circle(latLng, {
+        radius,
+        color: "#1677ff",
+        weight: 1,
+        opacity: 0.85,
+        fillColor: "#1677ff",
+        fillOpacity: 0.14,
+        interactive: false,
+      }).addTo(state.map);
+    } else {
+      state.userAccuracyCircle.setLatLng(latLng);
+      state.userAccuracyCircle.setRadius(radius);
+    }
+
+    if (!state.userLocationMarker) {
+      state.userLocationMarker = L.marker(latLng, {
+        icon: createUserLocationIcon(),
+        title: "目前位置",
+        zIndexOffset: 1000,
+      }).addTo(state.map);
+      state.userLocationMarker.bindPopup("你目前的位置");
+    } else {
+      state.userLocationMarker.setLatLng(latLng);
+    }
+
+    if (flyTo) {
+      state.map.setView(latLng, Math.max(state.map.getZoom(), 16), {
+        animate: true,
+      });
+    }
+
+    if (showFeedback) {
+      showLocationMessage("已定位到目前位置。", 1400);
+    }
+  }
+
+  function handleLocationError(error) {
+    const messageByCode = {
+      1: "定位權限被關閉，可以按地圖上的定位鈕重新允許。",
+      2: "目前抓不到位置，請確認 GPS 或網路定位已開啟。",
+      3: "定位逾時，請到空曠處或稍後再試。",
+    };
+    showLocationMessage(messageByCode[error.code] || "定位失敗，請稍後再試。", 3600);
+  }
+
+  function createUserLocationIcon() {
+    return L.divIcon({
+      className: "",
+      html: '<span class="user-location-dot" aria-hidden="true"><span></span></span>',
+      iconSize: [28, 28],
+      iconAnchor: [14, 14],
+      popupAnchor: [0, -14],
+    });
+  }
+
+  function distanceMeters(fromLatLng, toLatLng) {
+    const from = L.latLng(fromLatLng[0], fromLatLng[1]);
+    const to = L.latLng(toLatLng[0], toLatLng[1]);
+    return from.distanceTo(to);
+  }
+
+  function showLocationMessage(message, duration = 2600) {
+    let toast = document.querySelector(".location-toast");
+    if (!toast) {
+      toast = document.createElement("div");
+      toast.className = "location-toast";
+      toast.setAttribute("role", "status");
+      toast.setAttribute("aria-live", "polite");
+      document.body.appendChild(toast);
+    }
+
+    toast.textContent = message;
+    toast.classList.add("is-visible");
+    window.clearTimeout(toast.hideTimer);
+    toast.hideTimer = window.setTimeout(() => {
+      toast.classList.remove("is-visible");
+    }, duration);
   }
 
   function setupFilters() {

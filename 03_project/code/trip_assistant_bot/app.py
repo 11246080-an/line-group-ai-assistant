@@ -8,7 +8,7 @@ from typing import Any
 from uuid import uuid4
 
 from dotenv import load_dotenv
-from flask import Flask, abort, request
+from flask import Flask, abort, jsonify, request, send_from_directory
 
 from linebot.v3 import WebhookHandler
 from linebot.v3.exceptions import InvalidSignatureError
@@ -17,10 +17,18 @@ from linebot.v3.messaging import (
     Configuration,
     MessagingApi,
     PushMessageRequest,
+    QuickReply,
+    QuickReplyItem,
     ReplyMessageRequest,
     TextMessage,
+    URIAction,
 )
-from linebot.v3.webhooks import MessageEvent, TextMessageContent
+from linebot.v3.webhooks import (
+    BeaconEvent,
+    LocationMessageContent,
+    MessageEvent,
+    TextMessageContent,
+)
 
 from ai_linebot_core.app.engine import analyze_dialogue
 from ai_linebot_core.app.line_import import (
@@ -42,6 +50,16 @@ from db import (
     save_summary,
     upsert_group,
     upsert_member,
+)
+from location_flow import (
+    build_liff_url,
+    create_recommendation_session,
+    finalize_session_result,
+    get_recent_beacon_context,
+    get_recommendation_session,
+    mark_session_failed,
+    register_beacon_event,
+    run_location_recommendation,
 )
 
 load_dotenv()
@@ -66,6 +84,19 @@ MIN_NEW_MESSAGES_BEFORE_REPEAT_REPLY = max(
     int(os.getenv("MIN_NEW_MESSAGES_BEFORE_REPEAT_REPLY", "4")),
 )
 DEFAULT_FINAL_REPLY = "我先整理一個方向給大家參考。"
+LIFF_LOCATION_DIR = os.path.join(app.root_path, "liff_app")
+LOCATION_TRIGGER_KEYWORDS = (
+    "附近",
+    "好吃",
+    "吃什麼",
+    "餐廳",
+    "美食",
+    "下一站",
+    "下一個點",
+    "下一個景點",
+    "接下來去哪",
+    "附近有什麼",
+)
 
 
 @dataclass
@@ -198,6 +229,144 @@ def _push_text(push_target_id: str, text: str) -> None:
             ),
             x_line_retry_key=str(uuid4()),
         )
+
+
+def _reply_message_object(
+    line_bot_api: MessagingApi,
+    reply_token: str,
+    message: TextMessage,
+) -> None:
+    line_bot_api.reply_message(
+        ReplyMessageRequest(
+            reply_token=reply_token,
+            messages=[message],
+        )
+    )
+
+
+def _is_location_recommendation_request(text: str) -> bool:
+    normalized_text = text.strip()
+    if not normalized_text:
+        return False
+    return any(keyword in normalized_text for keyword in LOCATION_TRIGGER_KEYWORDS)
+
+
+def _build_liff_prompt_message(liff_url: str) -> TextMessage:
+    prompt_text = (
+        "目前系統無法偵測到您當前的位置，\n"
+        "請您點選下方的定位按鈕分享您當前的位置，系統會依照您現在的位置整理推薦，"
+        "並同步一份摘要回到原本的群組。\n"
+    )
+    return TextMessage(
+        text=prompt_text,
+        quick_reply=QuickReply(
+            items=[
+                QuickReplyItem(
+                    action=URIAction(
+                        label="開啟定位",
+                        uri=liff_url,
+                    )
+                )
+            ]
+        ),
+    )
+
+
+def _reply_liff_prompt(
+    event: MessageEvent,
+    conversation_key: str,
+    line_group_id: str,
+    line_user_id: str,
+    user_text: str,
+) -> None:
+    if not os.getenv("LIFF_ID", "").strip():
+        _reply_text_and_mark(
+            event,
+            conversation_key,
+            "liff_missing_config",
+            "LIFF_ID 尚未設定完成，請先在 .env 補上後再使用定位推薦。",
+        )
+        return
+
+    push_target_id = _get_push_target_id(event)
+    if not push_target_id:
+        _reply_text_and_mark(
+            event,
+            conversation_key,
+            "liff_missing_target",
+            "目前無法判斷要把推薦結果同步到哪個聊天室，請稍後再試一次。",
+        )
+        return
+
+    session_token = str(uuid4())
+    create_recommendation_session(
+        token=session_token,
+        push_target_id=push_target_id,
+        conversation_key=conversation_key,
+        line_user_id=line_user_id,
+        line_group_id=line_group_id,
+        query_text=user_text,
+    )
+    liff_url = build_liff_url(session_token, request.url_root)
+    prompt_message = _build_liff_prompt_message(liff_url)
+
+    with ApiClient(configuration) as api_client:
+        line_bot_api = MessagingApi(api_client)
+        _reply_message_object(line_bot_api, event.reply_token, prompt_message)
+
+    _mark_reply_sent(
+        conversation_key,
+        "liff_location_prompt",
+        prompt_message.text,
+    )
+
+
+def _handle_location_recommendation_request(
+    event: MessageEvent,
+    conversation_key: str,
+    line_group_id: str,
+    line_user_id: str,
+    user_text: str,
+) -> bool:
+    if not _is_location_recommendation_request(user_text):
+        return False
+
+    _note_user_message(conversation_key, user_text)
+
+    beacon_context = get_recent_beacon_context(line_user_id) if line_user_id else None
+    if beacon_context and beacon_context.has_coordinates:
+        try:
+            result = run_location_recommendation(
+                line_user_id=line_user_id,
+                line_group_id=line_group_id,
+                query_text=user_text,
+                latitude=beacon_context.latitude,
+                longitude=beacon_context.longitude,
+                accuracy=None,
+                location_source="beacon",
+                beacon_context=beacon_context,
+            )
+        except Exception as exc:
+            print(f"Beacon recommendation failed, falling back to LIFF: {exc}")
+        else:
+            group_message = str(result.get("group_message") or "").strip()
+            if group_message:
+                _reply_text_and_mark(
+                    event,
+                    conversation_key,
+                    "beacon_location_recommendation",
+                    group_message,
+                )
+                return True
+
+    _reply_liff_prompt(
+        event,
+        conversation_key,
+        line_group_id,
+        line_user_id,
+        user_text,
+    )
+    return True
 
 
 def _get_push_target_id(event: MessageEvent) -> str | None:
@@ -418,6 +587,137 @@ def _reply_from_imported_itinerary(
     return build_itinerary_followup_reply(user_text, itinerary, focused_spot)
 
 
+@app.route("/liff/location", methods=["GET"])
+def serve_liff_location_page():
+    return send_from_directory(LIFF_LOCATION_DIR, "index.html")
+
+
+@app.route("/liff/location/styles.css", methods=["GET"])
+def serve_liff_location_styles():
+    return send_from_directory(
+        LIFF_LOCATION_DIR,
+        "styles.css",
+        mimetype="text/css",
+    )
+
+
+@app.route("/liff/location/images/<path:filename>", methods=["GET"])
+def serve_liff_location_image(filename: str):
+    return send_from_directory(
+        os.path.join(LIFF_LOCATION_DIR, "images"),
+        filename,
+    )
+
+
+@app.route("/favicon.ico", methods=["GET"])
+def serve_favicon():
+    return send_from_directory(
+        os.path.join(LIFF_LOCATION_DIR, "images"),
+        "favicon.svg",
+        mimetype="image/svg+xml",
+    )
+
+
+@app.route("/liff/location/app.js", methods=["GET"])
+def serve_liff_location_script():
+    return send_from_directory(
+        LIFF_LOCATION_DIR,
+        "location.js",
+        mimetype="application/javascript",
+    )
+
+
+@app.route("/api/liff/location/recommendation", methods=["POST"])
+def receive_liff_location_recommendation():
+    payload = request.get_json(silent=True) or {}
+    session_token = str(payload.get("session_token") or "").strip()
+    latitude = payload.get("latitude")
+    longitude = payload.get("longitude")
+    accuracy = payload.get("accuracy")
+
+    if not session_token:
+        return jsonify({"ok": False, "error": "Missing session token."}), 400
+
+    session = get_recommendation_session(session_token)
+    if session is None:
+        return jsonify(
+            {
+                "ok": False,
+                "error": "This LIFF session has expired. Please reopen it from LINE.",
+            }
+        ), 410
+
+    if session.status == "completed" and session.result is not None:
+        cached_payload = dict(session.result)
+        cached_payload["ok"] = True
+        cached_payload["cached"] = True
+        return jsonify(cached_payload)
+
+    if session.status == "processing":
+        return jsonify(
+            {
+                "ok": False,
+                "error": "This recommendation request is already in progress.",
+            }
+        ), 409
+
+    try:
+        latitude = float(latitude)
+        longitude = float(longitude)
+        accuracy_value = float(accuracy) if accuracy is not None else None
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "Invalid latitude or longitude."}), 400
+
+    session.status = "processing"
+
+    try:
+        result = run_location_recommendation(
+            line_user_id=session.line_user_id,
+            line_group_id=session.line_group_id,
+            query_text=session.query_text,
+            latitude=latitude,
+            longitude=longitude,
+            accuracy=accuracy_value,
+            location_source="liff",
+            beacon_context=None,
+        )
+    except Exception as exc:
+        failure_result = {
+            "group_message": "",
+            "results": [],
+            "location_source": "liff",
+            "query_text": session.query_text,
+            "synced_to_group": False,
+            "error": str(exc),
+        }
+        mark_session_failed(session_token, failure_result)
+        return jsonify({"ok": False, "error": str(exc)}), 502
+
+    group_message = str(result.get("group_message") or "").strip()
+    synced_to_group = False
+    push_error = ""
+    if group_message:
+        try:
+            _push_text(session.push_target_id, group_message)
+            _mark_reply_sent(
+                session.conversation_key,
+                "liff_location_recommendation",
+                group_message,
+            )
+            synced_to_group = True
+        except Exception as exc:
+            push_error = str(exc)
+
+    response_payload = dict(result)
+    response_payload["synced_to_group"] = synced_to_group
+    if push_error:
+        response_payload["push_error"] = push_error
+
+    finalize_session_result(session_token, response_payload)
+
+    return jsonify({"ok": True, **response_payload})
+
+
 @app.route("/callback", methods=["POST"])
 def callback() -> str:
     signature = request.headers["X-Line-Signature"]
@@ -431,6 +731,73 @@ def callback() -> str:
         abort(400)
 
     return "OK"
+
+
+@handler.add(BeaconEvent)
+def handle_beacon_event(event: BeaconEvent) -> None:
+    source = getattr(event, "source", None)
+    line_user_id = getattr(source, "user_id", None) or ""
+    if not line_user_id:
+        return
+
+    beacon = getattr(event, "beacon", None)
+    if beacon is None:
+        return
+
+    try:
+        context = register_beacon_event(
+            line_user_id=line_user_id,
+            hwid=str(getattr(beacon, "hwid", "") or "").strip(),
+            beacon_type=str(getattr(beacon, "type", "enter") or "enter").strip(),
+            device_message=str(getattr(beacon, "dm", "") or "").strip(),
+        )
+        print(
+            "Beacon context updated: "
+            f"user_id={line_user_id}, hwid={context.hwid}, name={context.name or 'unmapped'}"
+        )
+    except Exception as exc:
+        print(f"Failed to register beacon context: {exc}")
+
+
+@handler.add(MessageEvent, message=LocationMessageContent)
+def handle_location_message(event: MessageEvent) -> None:
+    source = getattr(event, "source", None)
+    line_group_id = getattr(source, "group_id", None) or ""
+    line_user_id = getattr(source, "user_id", None) or ""
+    conversation_key = _get_conversation_key(event)
+    location_message = event.message
+
+    try:
+        result = run_location_recommendation(
+            line_user_id=line_user_id,
+            line_group_id=line_group_id,
+            query_text="根據這個位置幫我整理附近推薦",
+            latitude=float(location_message.latitude),
+            longitude=float(location_message.longitude),
+            accuracy=None,
+            location_source="manual_location",
+            beacon_context=None,
+        )
+    except Exception as exc:
+        print(f"Manual location recommendation failed: {exc}")
+        _reply_text_and_mark(
+            event,
+            conversation_key,
+            "manual_location_recommendation_error",
+            "收到你分享的位置了，但推薦服務暫時忙碌，請稍後再試一次。",
+        )
+        return
+
+    group_message = str(result.get("group_message") or "").strip()
+    if not group_message:
+        group_message = "收到你分享的位置了，但目前沒有拿到推薦結果。"
+
+    _reply_text_and_mark(
+        event,
+        conversation_key,
+        "manual_location_recommendation",
+        group_message,
+    )
 
 
 @handler.add(MessageEvent, message=TextMessageContent)
@@ -485,6 +852,19 @@ def handle_message(event: MessageEvent) -> None:
         except Exception as exc:
             print(f"LINE 匯入成功回覆失敗：{exc}")
         return
+
+    try:
+        if _handle_location_recommendation_request(
+            event,
+            conversation_key,
+            line_group_id,
+            line_user_id,
+            user_text,
+        ):
+            print("Location recommendation flow handled in app.py")
+            return
+    except Exception as exc:
+        print(f"Location recommendation flow error: {exc}")
 
     try:
         print("\n" + "=" * 50)

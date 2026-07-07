@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover"
+    />
+    <title>附近推薦定位</title>
+    <link rel="icon" href="/liff/location/images/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/liff/location/styles.css" />
+  </head>
+  <body>
+    <main>
+      <section class="hero">
+        <p class="eyebrow">LIFF Location</p>
+        <h1>正在幫你抓附近推薦</h1>
+        <p>
+          允許定位後，我們會把結果顯示在這裡，同時同步一份精簡版到原本的 LINE 群組。
+        </p>
+      </section>
+
+      <section class="panel">
+        <p id="statusLine" class="status-line">正在初始化 LINE LIFF...</p>
+        <p id="statusHint" class="status-hint">
+          如果系統要求定位權限，請點選允許。
+        </p>
+        <div class="actions">
+          <button id="retryButton" class="primary hidden" type="button">
+            重新取得定位
+          </button>
+          <button id="closeButton" class="secondary hidden" type="button">
+            關閉頁面
+          </button>
+        </div>
+        <p id="syncNote" class="sync-note hidden"></p>
+      </section>
+
+      <section id="results" class="results" aria-live="polite"></section>
+    </main>
+
+    <script src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
+    <script src="/liff/location/app.js"></script>
+  </body>
+</html>
