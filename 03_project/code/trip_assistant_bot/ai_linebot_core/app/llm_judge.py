@@ -360,6 +360,8 @@ reply_trigger 必須是以下其中一種：
 - 若情境需要查詢外部資訊，例如附近餐廳、電影場次、天氣、餐廳推薦、路線或交通查詢，requires_external_search 必須為 true。
 - 若情境不需要外部查詢，例如討論停滯、投票決策、時間衝突提醒，requires_external_search 應為 false。
 - 這一階段不要生成 intermediate_reply 或 suggested_reply，兩者皆輸出空字串。
+- 若群組對話仍處於剛開始討論階段，成員還在提出初步想法、補充條件或交換意見，應優先持續觀察，不要太早介入。
+- functional_question 雖表示存在功能性需求，但若對話仍在早期發散階段、條件尚未收斂成較明確方向，應優先判定為 no_reply，而不是立即介入。
 
 extracted_info 欄位必須包含以下欄位：
 - time
