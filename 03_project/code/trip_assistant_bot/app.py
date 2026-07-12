@@ -85,6 +85,23 @@ MIN_NEW_MESSAGES_BEFORE_REPEAT_REPLY = max(
 )
 DEFAULT_FINAL_REPLY = "我先整理一個方向給大家參考。"
 LIFF_LOCATION_DIR = os.path.join(app.root_path, "liff_app")
+CURRENT_LOCATION_TRIGGER_KEYWORDS = (
+    "附近",
+    "周邊",
+    "這附近",
+    "這邊",
+    "這裡",
+    "我附近",
+    "我現在",
+    "現在位置",
+    "目前位置",
+    "當前位置",
+    "離我近",
+    "離這裡近",
+    "靠近我",
+    "定位",
+    "分享位置",
+)
 LOCATION_TRIGGER_KEYWORDS = (
     "附近",
     "好吃",
@@ -248,7 +265,26 @@ def _is_location_recommendation_request(text: str) -> bool:
     normalized_text = text.strip()
     if not normalized_text:
         return False
-    return any(keyword in normalized_text for keyword in LOCATION_TRIGGER_KEYWORDS)
+    return any(
+        keyword in normalized_text for keyword in CURRENT_LOCATION_TRIGGER_KEYWORDS
+    )
+
+
+def _should_route_to_location_flow(
+    user_text: str,
+    analysis_result: dict[str, Any],
+) -> bool:
+    if not _is_location_recommendation_request(user_text):
+        return False
+
+    if bool(analysis_result.get("requires_external_search")):
+        return True
+
+    if not bool(analysis_result.get("should_intervene")):
+        return False
+
+    reply_trigger = str(analysis_result.get("reply_trigger") or "").strip()
+    return reply_trigger in {"functional_question", "explicit_request"}
 
 
 def _build_liff_prompt_message(liff_url: str) -> TextMessage:
@@ -327,11 +363,14 @@ def _handle_location_recommendation_request(
     line_group_id: str,
     line_user_id: str,
     user_text: str,
+    *,
+    record_user_message: bool = True,
 ) -> bool:
     if not _is_location_recommendation_request(user_text):
         return False
 
-    _note_user_message(conversation_key, user_text)
+    if record_user_message:
+        _note_user_message(conversation_key, user_text)
 
     beacon_context = get_recent_beacon_context(line_user_id) if line_user_id else None
     if beacon_context and beacon_context.has_coordinates:
@@ -853,18 +892,6 @@ def handle_message(event: MessageEvent) -> None:
             print(f"LINE 匯入成功回覆失敗：{exc}")
         return
 
-    try:
-        if _handle_location_recommendation_request(
-            event,
-            conversation_key,
-            line_group_id,
-            line_user_id,
-            user_text,
-        ):
-            print("Location recommendation flow handled in app.py")
-            return
-    except Exception as exc:
-        print(f"Location recommendation flow error: {exc}")
 
     try:
         print("\n" + "=" * 50)
@@ -915,6 +942,22 @@ def handle_message(event: MessageEvent) -> None:
         confidence_score = float(result.get("confidence_score", 0))
     except (TypeError, ValueError):
         confidence_score = 0.0
+
+    try:
+        if _should_route_to_location_flow(user_text, result):
+            if _handle_location_recommendation_request(
+                event,
+                conversation_key,
+                line_group_id,
+                line_user_id,
+                user_text,
+                record_user_message=False,
+            ):
+                print("Location recommendation flow handled after AI decision")
+                print("=" * 50 + "\n")
+                return
+    except Exception as exc:
+        print(f"Location recommendation flow error: {exc}")
 
     if not should_intervene:
         print("AI 判斷不介入。")
