@@ -122,6 +122,8 @@ class ConversationState:
     history: deque[str] = field(
         default_factory=lambda: deque(maxlen=CONVERSATION_WINDOW_SIZE)
     )
+    # 只保存能明確辨識的主題；模糊訊息不會覆蓋它。
+    current_topic: str = ""
     user_message_count: int = 0
     # 保存 Bot 上一次回覆，用來避免短時間重複講相近內容。
     last_reply_text: str = ""
@@ -436,6 +438,22 @@ def _reply_topic(text: str) -> str:
     return ""
 
 
+def _detect_conversation_topic(text: str) -> str:
+    """保守判斷訊息主題；同時命中多類或未命中時視為不明確。"""
+    lowered = text.lower().strip()
+    if not lowered:
+        return ""
+
+    matched_topics = {
+        topic
+        for topic, keywords in SEMANTIC_TOPICS.items()
+        if any(keyword.lower() in lowered for keyword in keywords)
+    }
+    if len(matched_topics) != 1:
+        return ""
+    return next(iter(matched_topics))
+
+
 def semantic_duplicate_check(new_reply: str, previous_reply: str) -> bool:
     normalized_new = _normalize_text_for_compare(new_reply)
     normalized_previous = _normalize_text_for_compare(previous_reply)
@@ -466,6 +484,11 @@ def _build_conversation_context(
 
     with conversation_lock:
         state = _get_or_create_state(conversation_key)
+        new_topic = _detect_conversation_topic(normalized_text)
+        if new_topic:
+            if state.current_topic and new_topic != state.current_topic:
+                state.history.clear()
+            state.current_topic = new_topic
         state.history.append(normalized_text)
         state.user_message_count += 1
         history_snapshot = list(state.history)
