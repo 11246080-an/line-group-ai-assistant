@@ -361,7 +361,10 @@ reply_trigger 必須是以下其中一種：
 - 若情境不需要外部查詢，例如討論停滯、投票決策、時間衝突提醒，requires_external_search 應為 false。
 - 這一階段不要生成 intermediate_reply 或 suggested_reply，兩者皆輸出空字串。
 - 若群組對話仍處於剛開始討論階段，成員還在提出初步想法、補充條件或交換意見，應優先持續觀察，不要太早介入。
-- functional_question 雖表示存在功能性需求，但若對話仍在早期發散階段、條件尚未收斂成較明確方向，應優先判定為 no_reply，而不是立即介入。
+- functional_question 雖表示存在功能性需求，但若對話仍在早期發散階段，且只出現單一模糊問題、缺少明確條件時，才應優先判定為 no_reply。
+- 若對話中已累積 2 個以上明確條件，例如時間、地點、預算、人數、飲食限制、活動偏好，且又出現查詢、推薦、比較、安排、或「有沒有適合...」這類功能性提問，應優先判定為 functional_question，不應繼續判為 no_reply。
+- 若情境是在詢問符合條件的餐廳、景點、行程、路線、天氣、電影場次或其他候選選項，即使使用者沒有直接說「幫我」，只要需求已具體，也應視為 functional_question。
+- 若使用者是在問「有沒有適合 4 個人一起吃的店」、「學校附近有沒有預算 400 內的餐廳」這類已具備多個限制條件的問題，should_intervene 應為 true，requires_external_search 應為 true。
 
 extracted_info 欄位必須包含以下欄位：
 - time
