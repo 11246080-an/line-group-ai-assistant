@@ -87,37 +87,20 @@ MIN_NEW_MESSAGES_BEFORE_REPEAT_REPLY = max(
 RAG_RETRIEVAL_LIMIT = max(1, int(os.getenv("RAG_RETRIEVAL_LIMIT", "3")))
 RAG_MIN_SIMILARITY_SCORE = float(os.getenv("RAG_MIN_SIMILARITY_SCORE", "0.78"))
 OPENAI_EMBEDDING_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
+OPENAI_TOPIC_JUDGE_MODEL = os.getenv("OPENAI_TOPIC_JUDGE_MODEL", "gpt-4.1-mini")
+OPENAI_LOCATION_JUDGE_MODEL = os.getenv(
+    "OPENAI_LOCATION_JUDGE_MODEL",
+    OPENAI_TOPIC_JUDGE_MODEL,
+)
+TOPIC_SWITCH_SIMILARITY_THRESHOLD = float(
+    os.getenv("TOPIC_SWITCH_SIMILARITY_THRESHOLD", "0.72")
+)
+SEMANTIC_DUPLICATE_SIMILARITY_THRESHOLD = float(
+    os.getenv("SEMANTIC_DUPLICATE_SIMILARITY_THRESHOLD", "0.88")
+)
+TOPIC_JUDGE_HISTORY_LIMIT = max(1, int(os.getenv("TOPIC_JUDGE_HISTORY_LIMIT", "6")))
 DEFAULT_FINAL_REPLY = "我先整理一個方向給大家參考。"
 LIFF_LOCATION_DIR = os.path.join(app.root_path, "liff_app")
-CURRENT_LOCATION_TRIGGER_KEYWORDS = (
-    "附近",
-    "周邊",
-    "這附近",
-    "這邊",
-    "這裡",
-    "我附近",
-    "我現在",
-    "現在位置",
-    "目前位置",
-    "當前位置",
-    "離我近",
-    "離這裡近",
-    "靠近我",
-    "定位",
-    "分享位置",
-)
-LOCATION_TRIGGER_KEYWORDS = (
-    "附近",
-    "好吃",
-    "吃什麼",
-    "餐廳",
-    "美食",
-    "下一站",
-    "下一個點",
-    "下一個景點",
-    "接下來去哪",
-    "附近有什麼",
-)
 
 
 @dataclass
@@ -140,18 +123,6 @@ class ConversationState:
 
 conversation_states: dict[str, ConversationState] = {}
 conversation_lock = threading.Lock()
-
-SEMANTIC_TOPICS = {
-    "booking": ("訂房", "住宿", "飯店", "旅館", "民宿"),
-    "budget": ("預算", "太貴", "省一點", "花費", "負擔"),
-    "vote": ("投票", "表決", "選哪個", "票選"),
-    "time": ("日期", "時間", "幾點", "改天", "喬時間"),
-    "location": ("地點", "去哪", "景點", "餐廳", "位置"),
-    "route": ("路線", "交通", "順路", "移動", "行程順序"),
-    "weather": ("天氣", "下雨", "溫度"),
-    "dining": ("吃什麼", "午餐", "晚餐", "早餐", "美食"),
-}
-
 
 def _get_or_create_state(conversation_key: str) -> ConversationState:
     state = conversation_states.get(conversation_key)
@@ -267,30 +238,53 @@ def _reply_message_object(
     )
 
 
-def _is_location_recommendation_request(text: str) -> bool:
+def _is_location_recommendation_request(
+    text: str,
+    analysis_result: dict[str, Any] | None = None,
+) -> bool:
     normalized_text = text.strip()
     if not normalized_text:
         return False
-    return any(
-        keyword in normalized_text for keyword in CURRENT_LOCATION_TRIGGER_KEYWORDS
+
+    result = _call_small_json_model(
+        model=OPENAI_LOCATION_JUDGE_MODEL,
+        purpose="Location routing judge",
+        system_prompt=(
+            "你是 LINE 群組助理的定位需求判斷器。"
+            "請判斷這則訊息是否『一定需要使用者目前的即時位置』才能繼續處理。"
+            "只有像『用我現在的位置推薦附近餐廳、景點、路線』這類需求才算 true。"
+            "若只是一般問餐廳、一般問行程、提到某個已知地點，或還在初步討論，都應該是 false。"
+            "只輸出 JSON，格式必須是 {\"needs_current_location\": true/false}。"
+        ),
+        user_prompt=json.dumps(
+            {
+                "user_text": normalized_text,
+                "analysis_result": analysis_result or {},
+            },
+            ensure_ascii=False,
+        ),
     )
+    if isinstance(result, dict) and "needs_current_location" in result:
+        return bool(result.get("needs_current_location"))
+
+    return False
 
 
 def _should_route_to_location_flow(
     user_text: str,
     analysis_result: dict[str, Any],
 ) -> bool:
-    if not _is_location_recommendation_request(user_text):
+    if not bool(analysis_result.get("requires_external_search")):
         return False
-
-    if bool(analysis_result.get("requires_external_search")):
-        return True
 
     if not bool(analysis_result.get("should_intervene")):
         return False
 
     reply_trigger = str(analysis_result.get("reply_trigger") or "").strip()
-    return reply_trigger in {"functional_question", "explicit_request"}
+    if reply_trigger not in {"functional_question", "explicit_request"}:
+        return False
+
+    return _is_location_recommendation_request(user_text, analysis_result)
 
 
 def _build_liff_prompt_message(liff_url: str) -> TextMessage:
@@ -372,9 +366,6 @@ def _handle_location_recommendation_request(
     *,
     record_user_message: bool = True,
 ) -> bool:
-    if not _is_location_recommendation_request(user_text):
-        return False
-
     if record_user_message:
         _note_user_message(conversation_key, user_text)
 
@@ -434,28 +425,133 @@ def _normalize_text_for_compare(text: str) -> str:
     return "".join(char.lower() for char in text if char.isalnum())
 
 
-def _reply_topic(text: str) -> str:
-    lowered = text.lower()
-    for topic, keywords in SEMANTIC_TOPICS.items():
-        if any(keyword.lower() in lowered for keyword in keywords):
-            return topic
-    return ""
+def _get_openai_client() -> Any | None:
+    api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    if not api_key:
+        return None
+
+    try:
+        from openai import OpenAI
+    except ImportError:
+        return None
+
+    return OpenAI(api_key=api_key)
 
 
-def _detect_conversation_topic(text: str) -> str:
-    """保守判斷訊息主題；同時命中多類或未命中時視為不明確。"""
-    lowered = text.lower().strip()
-    if not lowered:
-        return ""
+def _extract_json_object(text: str) -> dict[str, Any] | None:
+    payload = text.strip()
+    if payload.startswith("```"):
+        parts = payload.split("```")
+        for part in parts:
+            part = part.strip()
+            if part.startswith("{") and part.endswith("}"):
+                payload = part
+                break
 
-    matched_topics = {
-        topic
-        for topic, keywords in SEMANTIC_TOPICS.items()
-        if any(keyword.lower() in lowered for keyword in keywords)
-    }
-    if len(matched_topics) != 1:
-        return ""
-    return next(iter(matched_topics))
+    start = payload.find("{")
+    end = payload.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        return None
+
+    try:
+        return json.loads(payload[start : end + 1])
+    except json.JSONDecodeError:
+        return None
+
+
+def _call_small_json_model(
+    *,
+    model: str,
+    purpose: str,
+    system_prompt: str,
+    user_prompt: str,
+) -> dict[str, Any] | None:
+    client = _get_openai_client()
+    if client is None:
+        return None
+
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            temperature=0,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+        )
+        content = response.choices[0].message.content or "{}"
+        return _extract_json_object(content)
+    except Exception as exc:
+        print(f"{purpose} failed: {exc}")
+        return None
+
+
+def _cosine_similarity(vector_a: list[float], vector_b: list[float]) -> float:
+    if not vector_a or not vector_b or len(vector_a) != len(vector_b):
+        return 0.0
+
+    dot_product = sum(a * b for a, b in zip(vector_a, vector_b))
+    norm_a = sum(a * a for a in vector_a) ** 0.5
+    norm_b = sum(b * b for b in vector_b) ** 0.5
+    if norm_a == 0 or norm_b == 0:
+        return 0.0
+    return dot_product / (norm_a * norm_b)
+
+
+def _judge_same_topic_with_llm(
+    recent_messages: list[str],
+    new_message: str,
+) -> bool | None:
+    trimmed_history = [message.strip() for message in recent_messages if message.strip()]
+    normalized_text = new_message.strip()
+    if not trimmed_history or not normalized_text:
+        return None
+
+    history_text = "\n".join(trimmed_history[-TOPIC_JUDGE_HISTORY_LIMIT:])
+    result = _call_small_json_model(
+        model=OPENAI_TOPIC_JUDGE_MODEL,
+        purpose="Topic judge",
+        system_prompt=(
+            "你是群組對話主題判斷器。"
+            "請判斷『新訊息』和『最近對話』是否仍屬於同一個討論主題。"
+            "只輸出 JSON，格式必須是 {\"same_topic\": true/false, \"reason\": \"...\"}。"
+        ),
+        user_prompt=(
+            f"最近對話：\n{history_text}\n\n"
+            f"新訊息：\n{normalized_text}\n\n"
+            "如果新訊息明顯延續原本討論，same_topic=true；"
+            "如果新訊息已切到新的安排、新的地點、新的活動或新的決策方向，same_topic=false。"
+        ),
+    )
+    if not isinstance(result, dict) or "same_topic" not in result:
+        return None
+    return bool(result.get("same_topic"))
+
+
+def _should_reset_history_by_topic(
+    recent_messages: list[str],
+    new_message: str,
+    query_embedding: list[float] | None = None,
+) -> bool:
+    trimmed_history = [message.strip() for message in recent_messages if message.strip()]
+    normalized_text = new_message.strip()
+    if not trimmed_history or not normalized_text:
+        return False
+
+    llm_result = _judge_same_topic_with_llm(trimmed_history, normalized_text)
+    if llm_result is not None:
+        return not llm_result
+
+    if query_embedding:
+        history_embedding = _build_text_embedding(
+            "\n".join(trimmed_history[-TOPIC_JUDGE_HISTORY_LIMIT:])
+        )
+        if history_embedding:
+            similarity = _cosine_similarity(history_embedding, query_embedding)
+            print(f"Topic similarity fallback score={similarity:.3f}")
+            return similarity < TOPIC_SWITCH_SIMILARITY_THRESHOLD
+
+    return False
 
 
 def semantic_duplicate_check(new_reply: str, previous_reply: str) -> bool:
@@ -471,10 +567,29 @@ def semantic_duplicate_check(new_reply: str, previous_reply: str) -> bool:
     if normalized_new in normalized_previous or normalized_previous in normalized_new:
         return True
 
-    new_topic = _reply_topic(new_reply)
-    previous_topic = _reply_topic(previous_reply)
-    if new_topic and new_topic == previous_topic:
-        return True
+    result = _call_small_json_model(
+        model=OPENAI_TOPIC_JUDGE_MODEL,
+        purpose="Reply duplicate judge",
+        system_prompt=(
+            "你是回覆重複判斷器。"
+            "請判斷兩句回覆在群組中是否屬於語意上幾乎相同、重複插嘴的內容。"
+            "只輸出 JSON，格式必須是 {\"is_duplicate\": true/false}。"
+        ),
+        user_prompt=(
+            f"回覆A：{new_reply.strip()}\n"
+            f"回覆B：{previous_reply.strip()}\n\n"
+            "如果兩句話表達的建議幾乎一樣，只是換句話說，請回傳 true。"
+        ),
+    )
+    if isinstance(result, dict) and "is_duplicate" in result:
+        return bool(result.get("is_duplicate"))
+
+    new_embedding = _build_text_embedding(new_reply)
+    previous_embedding = _build_text_embedding(previous_reply)
+    if new_embedding and previous_embedding:
+        similarity = _cosine_similarity(new_embedding, previous_embedding)
+        print(f"Reply similarity fallback score={similarity:.3f}")
+        return similarity >= SEMANTIC_DUPLICATE_SIMILARITY_THRESHOLD
 
     return False
 
@@ -529,6 +644,7 @@ def _build_conversation_context(
     user_text: str,
     line_group_id: str = "",
     query_embedding: list[float] | None = None,
+    exclude_message_id: Any = None,
 ) -> tuple[list[str], str]:
     normalized_text = user_text.strip()
     imported_context = ""
@@ -536,11 +652,19 @@ def _build_conversation_context(
 
     with conversation_lock:
         state = _get_or_create_state(conversation_key)
-        new_topic = _detect_conversation_topic(normalized_text)
-        if new_topic:
-            if state.current_topic and new_topic != state.current_topic:
-                state.history.clear()
-            state.current_topic = new_topic
+        previous_history = list(state.history)
+
+    should_reset_history = _should_reset_history_by_topic(
+        previous_history,
+        normalized_text,
+        query_embedding=query_embedding,
+    )
+
+    with conversation_lock:
+        state = _get_or_create_state(conversation_key)
+        if should_reset_history:
+            state.history.clear()
+            state.current_topic = ""
         state.history.append(normalized_text)
         state.user_message_count += 1
         history_snapshot = list(state.history)
@@ -555,6 +679,7 @@ def _build_conversation_context(
             similar_messages = get_similar_messages(
                 line_group_id=line_group_id,
                 query_embedding=query_embedding,
+                exclude_message_id=exclude_message_id,
                 limit=RAG_RETRIEVAL_LIMIT,
                 min_score=RAG_MIN_SIMILARITY_SCORE,
             )
@@ -944,15 +1069,16 @@ def handle_message(event: MessageEvent) -> None:
     line_group_id = getattr(source, "group_id", None) or ""
     line_user_id  = getattr(source, "user_id",  None) or ""
     conversation_key = _get_conversation_key(event)
-    topic_hint = _detect_conversation_topic(user_text) or None
+    topic_hint = None
     query_embedding = _build_text_embedding(user_text)
+    saved_message_id = None
 
     # ── DB：儲存訊息與群組資訊（失敗不中斷主流程）─────────────
     try:
         if line_group_id:
             upsert_group(line_group_id)
             upsert_member(line_group_id, line_user_id)
-        save_message(
+        saved_message_id = save_message(
             line_group_id,
             line_user_id,
             user_text,
@@ -1004,6 +1130,7 @@ def handle_message(event: MessageEvent) -> None:
             user_text,
             line_group_id=line_group_id,
             query_embedding=query_embedding,
+            exclude_message_id=saved_message_id,
         )
         print(
             f"DEBUG 對話視窗 key={conversation_key}, "
