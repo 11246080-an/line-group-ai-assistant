@@ -46,6 +46,7 @@ from ai_linebot_core.app.line_import import (
 )
 from db import (
     ensure_indexes,
+    get_similar_messages,
     save_message,
     save_summary,
     upsert_group,
@@ -83,6 +84,9 @@ MIN_NEW_MESSAGES_BEFORE_REPEAT_REPLY = max(
     1,
     int(os.getenv("MIN_NEW_MESSAGES_BEFORE_REPEAT_REPLY", "4")),
 )
+RAG_RETRIEVAL_LIMIT = max(1, int(os.getenv("RAG_RETRIEVAL_LIMIT", "3")))
+RAG_MIN_SIMILARITY_SCORE = float(os.getenv("RAG_MIN_SIMILARITY_SCORE", "0.78"))
+OPENAI_EMBEDDING_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
 DEFAULT_FINAL_REPLY = "我先整理一個方向給大家參考。"
 LIFF_LOCATION_DIR = os.path.join(app.root_path, "liff_app")
 CURRENT_LOCATION_TRIGGER_KEYWORDS = (
@@ -475,12 +479,60 @@ def semantic_duplicate_check(new_reply: str, previous_reply: str) -> bool:
     return False
 
 
+def _build_text_embedding(text: str) -> list[float] | None:
+    normalized_text = text.strip()
+    if not normalized_text:
+        return None
+
+    api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    if not api_key:
+        return None
+
+    try:
+        from openai import OpenAI
+    except ImportError:
+        return None
+
+    try:
+        client = OpenAI(api_key=api_key)
+        response = client.embeddings.create(
+            model=OPENAI_EMBEDDING_MODEL,
+            input=normalized_text,
+        )
+        embedding = response.data[0].embedding
+        return list(embedding) if embedding else None
+    except Exception as exc:
+        print(f"Embedding generation failed: {exc}")
+        return None
+
+
+def _format_retrieved_messages(similar_messages: list[dict[str, Any]]) -> list[str]:
+    formatted_messages: list[str] = []
+    seen_texts: set[str] = set()
+
+    for doc in similar_messages:
+        message_text = str(doc.get("message_text") or "").strip()
+        if not message_text or message_text in seen_texts:
+            continue
+
+        display_name = str(doc.get("display_name") or "").strip()
+        message_role = str(doc.get("message_role") or "user").strip()
+        prefix = display_name or ("Bot" if message_role == "bot" else "使用者")
+        formatted_messages.append(f"{prefix}：{message_text}")
+        seen_texts.add(message_text)
+
+    return formatted_messages
+
+
 def _build_conversation_context(
     conversation_key: str,
     user_text: str,
+    line_group_id: str = "",
+    query_embedding: list[float] | None = None,
 ) -> tuple[list[str], str]:
     normalized_text = user_text.strip()
     imported_context = ""
+    retrieved_messages: list[str] = []
 
     with conversation_lock:
         state = _get_or_create_state(conversation_key)
@@ -498,9 +550,28 @@ def _build_conversation_context(
                 state.focused_spot,
             )
 
-    context_text = "\n".join(history_snapshot)
+    if line_group_id and query_embedding:
+        try:
+            similar_messages = get_similar_messages(
+                line_group_id=line_group_id,
+                query_embedding=query_embedding,
+                limit=RAG_RETRIEVAL_LIMIT,
+                min_score=RAG_MIN_SIMILARITY_SCORE,
+            )
+            retrieved_messages = _format_retrieved_messages(similar_messages)
+        except Exception as exc:
+            print(f"RAG retrieval failed: {exc}")
+
+    recent_context = "\n".join(history_snapshot)
+    retrieved_context = "\n".join(retrieved_messages)
+    context_text = f"[目前最近對話]\n{recent_context}"
+    if retrieved_context:
+        context_text = (
+            f"[目前最近對話]\n{recent_context}\n\n"
+            f"[歷史相關對話]\n{retrieved_context}"
+        )
     if imported_context:
-        context_text = f"{imported_context}\n\n[群組最近訊息]\n{context_text}"
+        context_text = f"{imported_context}\n\n{context_text}"
     return history_snapshot, context_text
 
 
@@ -872,17 +943,25 @@ def handle_message(event: MessageEvent) -> None:
     source = getattr(event, "source", None)
     line_group_id = getattr(source, "group_id", None) or ""
     line_user_id  = getattr(source, "user_id",  None) or ""
+    conversation_key = _get_conversation_key(event)
+    topic_hint = _detect_conversation_topic(user_text) or None
+    query_embedding = _build_text_embedding(user_text)
 
     # ── DB：儲存訊息與群組資訊（失敗不中斷主流程）─────────────
     try:
         if line_group_id:
             upsert_group(line_group_id)
             upsert_member(line_group_id, line_user_id)
-        save_message(line_group_id, line_user_id, user_text)
+        save_message(
+            line_group_id,
+            line_user_id,
+            user_text,
+            conversation_key=conversation_key,
+            embedding=query_embedding,
+            topic_hint=topic_hint,
+        )
     except Exception as _db_exc:
         print(f"DB 寫入訊息失敗（繼續處理）：{_db_exc}")
-
-    conversation_key = _get_conversation_key(event)
 
     # 先處理網站分享進來的行程 / 景點匯入訊息。
     try:
@@ -923,6 +1002,8 @@ def handle_message(event: MessageEvent) -> None:
         recent_messages, context_text = _build_conversation_context(
             conversation_key,
             user_text,
+            line_group_id=line_group_id,
+            query_embedding=query_embedding,
         )
         print(
             f"DEBUG 對話視窗 key={conversation_key}, "
