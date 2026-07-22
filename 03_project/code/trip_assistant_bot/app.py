@@ -165,6 +165,11 @@ def _get_imported_itinerary_state(
         return state.imported_itinerary, state.focused_spot
 
 
+def _reset_conversation_state(conversation_key: str) -> None:
+    with conversation_lock:
+        conversation_states.pop(conversation_key, None)
+
+
 def _reply_text(line_bot_api: MessagingApi, reply_token: str, text: str) -> None:
     line_bot_api.reply_message(
         ReplyMessageRequest(
@@ -1069,6 +1074,20 @@ def handle_message(event: MessageEvent) -> None:
     line_group_id = getattr(source, "group_id", None) or ""
     line_user_id  = getattr(source, "user_id",  None) or ""
     conversation_key = _get_conversation_key(event)
+
+    if user_text.lower() == "#reset":
+        _reset_conversation_state(conversation_key)
+        try:
+            _reply_text_and_mark(
+                event,
+                conversation_key,
+                "manual_reset",
+                "已清空這個群組目前的對話狀態，可以重新開始測試。",
+            )
+        except Exception as exc:
+            print(f"Reset reply failed: {exc}")
+        return
+
     topic_hint = None
     query_embedding = _build_text_embedding(user_text)
     saved_message_id = None
