@@ -61,6 +61,7 @@ from location_flow import (
     mark_session_failed,
     register_beacon_event,
     run_location_recommendation,
+    run_text_location_recommendation,
 )
 
 load_dotenv()
@@ -290,6 +291,90 @@ def _should_route_to_location_flow(
         return False
 
     return _is_location_recommendation_request(user_text, analysis_result)
+
+
+def _extract_text_location_query_payload(
+    user_text: str,
+    analysis_result: dict[str, Any],
+) -> dict[str, Any] | None:
+    if not bool(analysis_result.get("requires_external_search")):
+        return None
+
+    if not bool(analysis_result.get("should_intervene")):
+        return None
+
+    extracted_info = analysis_result.get("extracted_info") or {}
+    locations = extracted_info.get("location") or []
+    constraints = extracted_info.get("constraints") or []
+    activity_types = extracted_info.get("activity_types") or []
+
+    if not isinstance(locations, list):
+        locations = [locations]
+    if not isinstance(constraints, list):
+        constraints = [constraints]
+    if not isinstance(activity_types, list):
+        activity_types = [activity_types]
+
+    normalized_locations = [
+        str(item).strip()
+        for item in locations
+        if str(item).strip()
+    ]
+    if not normalized_locations:
+        return None
+
+    location_text = normalized_locations[0]
+    if location_text in {"目前位置", "現在位置", "當前位置"}:
+        return None
+
+    return {
+        "query_text": user_text.strip(),
+        "location_text": location_text,
+        "constraints": [str(item).strip() for item in constraints if str(item).strip()],
+        "activity_types": [str(item).strip() for item in activity_types if str(item).strip()],
+    }
+
+
+def _handle_text_location_recommendation_request(
+    event: MessageEvent,
+    conversation_key: str,
+    scenario_code: str,
+    *,
+    query_text: str,
+    location_text: str,
+    constraints: list[str],
+    activity_types: list[str],
+) -> bool:
+    result = run_text_location_recommendation(
+        query_text=query_text,
+        location_text=location_text,
+        constraints=constraints,
+        activity_types=activity_types,
+    )
+    group_message = str(result.get("group_message") or "").strip()
+    if not group_message:
+        return False
+
+    current_user_message_count = _get_user_message_count(conversation_key)
+    if _should_suppress_duplicate_reply(
+        conversation_key,
+        scenario_code,
+        group_message,
+        current_user_message_count,
+    ):
+        print(
+            "略過語意相近的重複回覆。"
+            f" (scenario_code={scenario_code}, text={group_message})"
+        )
+        return True
+
+    _reply_text_and_mark(
+        event,
+        conversation_key,
+        scenario_code,
+        group_message,
+    )
+    return True
 
 
 def _build_liff_prompt_message(liff_url: str) -> TextMessage:
@@ -1208,6 +1293,24 @@ def handle_message(event: MessageEvent) -> None:
                 return
     except Exception as exc:
         print(f"Location recommendation flow error: {exc}")
+
+    try:
+        text_location_payload = _extract_text_location_query_payload(user_text, result)
+        if text_location_payload:
+            if _handle_text_location_recommendation_request(
+                event,
+                conversation_key,
+                scenario_code,
+                query_text=str(text_location_payload["query_text"]),
+                location_text=str(text_location_payload["location_text"]),
+                constraints=list(text_location_payload["constraints"]),
+                activity_types=list(text_location_payload["activity_types"]),
+            ):
+                print("Text location recommendation flow handled after AI decision")
+                print("=" * 50 + "\n")
+                return
+    except Exception as exc:
+        print(f"Text location recommendation flow error: {exc}")
 
     if not should_intervene:
         print("AI 判斷不介入。")

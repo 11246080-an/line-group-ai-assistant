@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 import json
 import math
 import os
@@ -11,6 +12,7 @@ from typing import Any
 from urllib.parse import urlencode
 
 import requests
+from db import get_api_query_cache, save_api_query_cache
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -112,6 +114,22 @@ FOOD_CONTENT_KEYWORDS = FOOD_QUERY_KEYWORDS + (
 FOOD_ITINERARY_ID_KEYWORDS = ("food", "cafe", "market")
 OPENAI_FALLBACK_LOCAL_RADIUS_KM = 15.0
 OPENAI_FALLBACK_CANDIDATE_LIMIT = max(10, LIFF_RESULT_LIMIT)
+GOOGLE_PLACES_TEXT_SEARCH_URL = "https://places.googleapis.com/v1/places:searchText"
+GOOGLE_PLACES_SEARCH_RADIUS_METERS = max(
+    500,
+    _env_int("GOOGLE_PLACES_SEARCH_RADIUS_METERS", 5000),
+)
+GOOGLE_PLACES_CACHE_TTL_SECONDS = max(
+    60,
+    _env_int("GOOGLE_PLACES_CACHE_TTL_SECONDS", 900),
+)
+LOCATION_TEXT_ALIASES = {
+    "北車": "台北車站",
+    "台北車站": "台北車站",
+    "西門": "西門町",
+    "台大": "台灣大學",
+    "師大": "師大夜市",
+}
 
 
 def _coerce_float(value: Any) -> float | None:
@@ -137,6 +155,324 @@ def _detect_query_intent(query_text: str) -> str:
     if _contains_any_keyword(query_text, FOOD_QUERY_KEYWORDS):
         return "food"
     return "general"
+
+
+def _normalize_location_text(location_text: str) -> str:
+    normalized = location_text.strip()
+    if not normalized:
+        return ""
+    for alias, canonical in LOCATION_TEXT_ALIASES.items():
+        if alias in normalized:
+            return normalized.replace(alias, canonical)
+    return normalized
+
+
+def _build_google_places_cache_key(
+    *,
+    query_text: str,
+    latitude: float,
+    longitude: float,
+    location_source: str,
+) -> str:
+    raw_key = "|".join(
+        [
+            query_text.strip(),
+            f"{latitude:.5f}",
+            f"{longitude:.5f}",
+            location_source.strip(),
+        ]
+    )
+    return hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
+
+
+def _format_google_place_description(place: dict[str, Any]) -> str:
+    parts: list[str] = []
+
+    rating = place.get("rating")
+    if isinstance(rating, (int, float)):
+        parts.append(f"評分 {rating:.1f}")
+
+    price_level = str(place.get("priceLevel") or "").strip()
+    if price_level:
+        price_map = {
+            "PRICE_LEVEL_FREE": "免費",
+            "PRICE_LEVEL_INEXPENSIVE": "平價",
+            "PRICE_LEVEL_MODERATE": "中價位",
+            "PRICE_LEVEL_EXPENSIVE": "偏高",
+            "PRICE_LEVEL_VERY_EXPENSIVE": "高價位",
+        }
+        parts.append(price_map.get(price_level, price_level))
+
+    primary_type = (
+        ((place.get("primaryTypeDisplayName") or {}).get("text"))
+        if isinstance(place.get("primaryTypeDisplayName"), dict)
+        else ""
+    )
+    if primary_type:
+        parts.append(str(primary_type).strip())
+
+    return "｜".join(part for part in parts if part)
+
+
+def _google_place_to_result(place: dict[str, Any], latitude: float, longitude: float) -> dict[str, Any]:
+    display_name = place.get("displayName") or {}
+    place_location = place.get("location") or {}
+    place_latitude = _coerce_float(place_location.get("latitude"))
+    place_longitude = _coerce_float(place_location.get("longitude"))
+
+    distance_km = None
+    if place_latitude is not None and place_longitude is not None:
+        distance_km = _haversine_km(latitude, longitude, place_latitude, place_longitude)
+
+    return {
+        "name": str(display_name.get("text") or "未命名地點").strip(),
+        "subtitle": str(place.get("formattedAddress") or "").strip(),
+        "description": _format_google_place_description(place),
+        "distance_km": round(distance_km, 2) if distance_km is not None else None,
+        "address": str(place.get("formattedAddress") or "").strip(),
+        "maps_url": str(place.get("googleMapsUri") or "").strip(),
+        "latitude": place_latitude,
+        "longitude": place_longitude,
+    }
+
+
+def _build_google_places_request_body(
+    *,
+    query_text: str,
+    latitude: float,
+    longitude: float,
+) -> dict[str, Any]:
+    body: dict[str, Any] = {
+        "textQuery": query_text.strip(),
+        "pageSize": LIFF_RESULT_LIMIT,
+        "languageCode": "zh-TW",
+        "regionCode": "TW",
+        "locationBias": {
+            "circle": {
+                "center": {
+                    "latitude": latitude,
+                    "longitude": longitude,
+                },
+                "radius": float(GOOGLE_PLACES_SEARCH_RADIUS_METERS),
+            }
+        },
+    }
+
+    if _detect_query_intent(query_text) == "food":
+        body["includedType"] = "restaurant"
+        body["strictTypeFiltering"] = False
+
+    return body
+
+
+def _build_google_places_text_request_body(
+    *,
+    text_query: str,
+) -> dict[str, Any]:
+    return {
+        "textQuery": text_query.strip(),
+        "pageSize": LIFF_RESULT_LIMIT,
+        "languageCode": "zh-TW",
+        "regionCode": "TW",
+    }
+
+
+def _build_text_search_query(
+    *,
+    query_text: str,
+    location_text: str,
+    constraints: list[str] | None = None,
+    activity_types: list[str] | None = None,
+) -> str:
+    normalized_location = _normalize_location_text(location_text)
+    parts: list[str] = []
+
+    cleaned_query = query_text.strip()
+    if cleaned_query:
+        parts.append(cleaned_query)
+
+    for value in constraints or []:
+        stripped = str(value).strip()
+        if stripped and stripped not in parts:
+            parts.append(stripped)
+
+    for value in activity_types or []:
+        stripped = str(value).strip()
+        if stripped and stripped not in parts:
+            parts.append(stripped)
+
+    if normalized_location and normalized_location not in " ".join(parts):
+        parts.append(normalized_location)
+
+    if _detect_query_intent(query_text) == "food":
+        joined = " ".join(parts)
+        if "餐廳" not in joined and "美食" not in joined and "吃" not in joined:
+            parts.append("餐廳")
+
+    return " ".join(part for part in parts if part).strip()
+
+
+def _build_google_places_recommendation(
+    *,
+    query_text: str,
+    latitude: float,
+    longitude: float,
+    location_source: str,
+) -> dict[str, Any]:
+    api_key = os.getenv("GOOGLE_PLACES_API_KEY", "").strip()
+    if not api_key:
+        raise RuntimeError("GOOGLE_PLACES_API_KEY is not configured.")
+
+    cache_key = _build_google_places_cache_key(
+        query_text=query_text,
+        latitude=latitude,
+        longitude=longitude,
+        location_source=location_source,
+    )
+    cached = get_api_query_cache("google_places_text_search", cache_key)
+    if isinstance(cached, dict):
+        return cached
+
+    headers = {
+        "Content-Type": "application/json",
+        "X-Goog-Api-Key": api_key,
+        "X-Goog-FieldMask": ",".join(
+            [
+                "places.displayName",
+                "places.formattedAddress",
+                "places.googleMapsUri",
+                "places.location",
+                "places.primaryTypeDisplayName",
+                "places.rating",
+                "places.priceLevel",
+            ]
+        ),
+    }
+    request_body = _build_google_places_request_body(
+        query_text=query_text,
+        latitude=latitude,
+        longitude=longitude,
+    )
+
+    response = requests.post(
+        GOOGLE_PLACES_TEXT_SEARCH_URL,
+        headers=headers,
+        json=request_body,
+        timeout=LOCATION_RECOMMENDATION_API_TIMEOUT_SECONDS,
+    )
+    response.raise_for_status()
+    raw = response.json()
+
+    places = raw.get("places") or []
+    if not isinstance(places, list):
+        places = []
+
+    results = [
+        _google_place_to_result(place, latitude, longitude)
+        for place in places[:LIFF_RESULT_LIMIT]
+        if isinstance(place, dict)
+    ]
+    results = [item for item in results if item.get("name")]
+
+    payload = {
+        "group_message": _format_group_message(results, query_text, location_source),
+        "results": results,
+        "location_source": location_source,
+        "query_text": query_text,
+        "provider": "google_places",
+    }
+    save_api_query_cache(
+        "google_places_text_search",
+        cache_key,
+        payload,
+        query_params=request_body,
+        ttl_seconds=GOOGLE_PLACES_CACHE_TTL_SECONDS,
+    )
+    return payload
+
+
+def _build_google_places_text_recommendation(
+    *,
+    query_text: str,
+    location_text: str,
+    constraints: list[str] | None = None,
+    activity_types: list[str] | None = None,
+    location_source: str = "text_location",
+) -> dict[str, Any]:
+    api_key = os.getenv("GOOGLE_PLACES_API_KEY", "").strip()
+    if not api_key:
+        raise RuntimeError("GOOGLE_PLACES_API_KEY is not configured.")
+
+    text_query = _build_text_search_query(
+        query_text=query_text,
+        location_text=location_text,
+        constraints=constraints,
+        activity_types=activity_types,
+    )
+    if not text_query:
+        raise RuntimeError("No text query available for Google Places text search.")
+
+    cache_key = hashlib.sha256(text_query.encode("utf-8")).hexdigest()
+    cached = get_api_query_cache("google_places_text_query", cache_key)
+    if isinstance(cached, dict):
+        return cached
+
+    headers = {
+        "Content-Type": "application/json",
+        "X-Goog-Api-Key": api_key,
+        "X-Goog-FieldMask": ",".join(
+            [
+                "places.displayName",
+                "places.formattedAddress",
+                "places.googleMapsUri",
+                "places.location",
+                "places.primaryTypeDisplayName",
+                "places.rating",
+                "places.priceLevel",
+            ]
+        ),
+    }
+    request_body = _build_google_places_text_request_body(text_query=text_query)
+    response = requests.post(
+        GOOGLE_PLACES_TEXT_SEARCH_URL,
+        headers=headers,
+        json=request_body,
+        timeout=LOCATION_RECOMMENDATION_API_TIMEOUT_SECONDS,
+    )
+    response.raise_for_status()
+    raw = response.json()
+
+    places = raw.get("places") or []
+    if not isinstance(places, list):
+        places = []
+
+    results: list[dict[str, Any]] = []
+    for place in places[:LIFF_RESULT_LIMIT]:
+        if not isinstance(place, dict):
+            continue
+        normalized = _google_place_to_result(place, 0.0, 0.0)
+        normalized["distance_km"] = None
+        results.append(normalized)
+
+    payload = {
+        "group_message": _format_group_message(
+            results,
+            text_query,
+            location_source,
+        ),
+        "results": results,
+        "location_source": location_source,
+        "query_text": text_query,
+        "provider": "google_places_text",
+    }
+    save_api_query_cache(
+        "google_places_text_query",
+        cache_key,
+        payload,
+        query_params=request_body,
+        ttl_seconds=GOOGLE_PLACES_CACHE_TTL_SECONDS,
+    )
+    return payload
 
 
 def _build_spot_search_blob(spot: dict[str, Any]) -> str:
@@ -608,6 +944,17 @@ def run_location_recommendation(
             beacon_context=beacon_context,
         )
 
+    if os.getenv("GOOGLE_PLACES_API_KEY", "").strip():
+        try:
+            return _build_google_places_recommendation(
+                query_text=query_text,
+                latitude=latitude,
+                longitude=longitude,
+                location_source=location_source,
+            )
+        except Exception as exc:
+            print(f"Google Places recommendation failed, falling back: {exc}")
+
     if os.getenv("OPENAI_API_KEY", "").strip():
         try:
             return _build_openai_fallback_recommendation(
@@ -625,6 +972,25 @@ def run_location_recommendation(
         longitude=longitude,
         location_source=location_source,
     )
+
+
+def run_text_location_recommendation(
+    *,
+    query_text: str,
+    location_text: str,
+    constraints: list[str] | None = None,
+    activity_types: list[str] | None = None,
+) -> dict[str, Any]:
+    if os.getenv("GOOGLE_PLACES_API_KEY", "").strip():
+        return _build_google_places_text_recommendation(
+            query_text=query_text,
+            location_text=location_text,
+            constraints=constraints,
+            activity_types=activity_types,
+            location_source="text_location",
+        )
+
+    raise RuntimeError("GOOGLE_PLACES_API_KEY is not configured.")
 
 
 def finalize_session_result(session_token: str, result: dict[str, Any]) -> RecommendationSession | None:
