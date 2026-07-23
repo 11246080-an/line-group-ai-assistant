@@ -51,7 +51,7 @@ SCENARIOS: list[ScenarioDefinition] = [
         should_intervene=True,
         intervention_type="顯性介入",
         system_behavior=["生成初步行程", "整合景點與餐廳", "提供順序建議"],
-        suggested_reply="我可以先幫大家整理一版行程草案，包含景點順序跟用餐安排，要不要先看一版？",
+        suggested_reply="我先幫你們整理一版半日行程草案：先早上入園看企鵝等熱門動物，中午附近用餐，下午再補幾個順路區域，這樣時間會比較順。",
         keywords=["排行程", "順序", "景點", "餐廳", "一日行程"],
         feature_hints=["planning", "has_location"],
     ),
