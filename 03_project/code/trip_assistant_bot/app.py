@@ -351,9 +351,21 @@ def _handle_text_location_recommendation_request(
         constraints=constraints,
         activity_types=activity_types,
     )
+    print(
+        "Text location recommendation payload:",
+        {
+            "query_text": query_text,
+            "location_text": location_text,
+            "constraints": constraints,
+            "activity_types": activity_types,
+            "provider": result.get("provider"),
+            "result_count": len(result.get("results") or []),
+        },
+    )
     group_message = str(result.get("group_message") or "").strip()
     if not group_message:
         return False
+    print(f"Text location group_message: {group_message}")
 
     current_user_message_count = _get_user_message_count(conversation_key)
     if _should_suppress_duplicate_reply(

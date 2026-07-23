@@ -331,6 +331,14 @@ def _build_google_places_recommendation(
     )
     cached = get_api_query_cache("google_places_text_search", cache_key)
     if isinstance(cached, dict):
+        print(
+            "Google Places coordinate cache hit:",
+            {
+                "query_text": query_text,
+                "location_source": location_source,
+                "result_count": len(cached.get("results") or []),
+            },
+        )
         return cached
 
     headers = {
@@ -373,6 +381,15 @@ def _build_google_places_recommendation(
         if isinstance(place, dict)
     ]
     results = [item for item in results if item.get("name")]
+    print(
+        "Google Places coordinate search:",
+        {
+            "query_text": query_text,
+            "location_source": location_source,
+            "result_count": len(results),
+            "first_result": results[0]["name"] if results else "",
+        },
+    )
 
     payload = {
         "group_message": _format_group_message(results, query_text, location_source),
@@ -415,6 +432,14 @@ def _build_google_places_text_recommendation(
     cache_key = hashlib.sha256(text_query.encode("utf-8")).hexdigest()
     cached = get_api_query_cache("google_places_text_query", cache_key)
     if isinstance(cached, dict):
+        print(
+            "Google Places text cache hit:",
+            {
+                "text_query": text_query,
+                "location_text": location_text,
+                "result_count": len(cached.get("results") or []),
+            },
+        )
         return cached
 
     headers = {
@@ -453,6 +478,15 @@ def _build_google_places_text_recommendation(
         normalized = _google_place_to_result(place, 0.0, 0.0)
         normalized["distance_km"] = None
         results.append(normalized)
+    print(
+        "Google Places text search:",
+        {
+            "text_query": text_query,
+            "location_text": location_text,
+            "result_count": len(results),
+            "first_result": results[0]["name"] if results else "",
+        },
+    )
 
     payload = {
         "group_message": _format_group_message(
