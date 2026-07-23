@@ -102,6 +102,18 @@ FOOD_QUERY_KEYWORDS = (
     "\u751c\u9ede",
     "\u98ef",
 )
+ATTRACTION_QUERY_KEYWORDS = (
+    "景點",
+    "玩",
+    "旅遊",
+    "行程",
+    "一日遊",
+    "半日遊",
+    "出遊",
+    "逛",
+    "拍照",
+    "散步",
+)
 FOOD_CONTENT_KEYWORDS = FOOD_QUERY_KEYWORDS + (
     "\u98f2\u6599",
     "\u65e9\u9910",
@@ -155,6 +167,23 @@ def _count_keyword_hits(text: str, keywords: tuple[str, ...]) -> int:
 def _detect_query_intent(query_text: str) -> str:
     if _contains_any_keyword(query_text, FOOD_QUERY_KEYWORDS):
         return "food"
+    if _contains_any_keyword(query_text, ATTRACTION_QUERY_KEYWORDS):
+        return "attraction"
+    return "general"
+
+
+def _infer_intent_from_activity_types(activity_types: list[str] | None) -> str:
+    if not activity_types:
+        return "general"
+
+    joined = " ".join(str(item).strip() for item in activity_types if str(item).strip())
+    if not joined:
+        return "general"
+
+    if _contains_any_keyword(joined, FOOD_QUERY_KEYWORDS):
+        return "food"
+    if _contains_any_keyword(joined, ATTRACTION_QUERY_KEYWORDS):
+        return "attraction"
     return "general"
 
 
@@ -369,10 +398,25 @@ def _build_text_search_query(
     activity_types: list[str] | None = None,
 ) -> str:
     normalized_location = _normalize_location_text(location_text, query_text)
+    query_intent = _detect_query_intent(query_text)
+    activity_intent = _infer_intent_from_activity_types(activity_types)
+    effective_intent = (
+        query_intent
+        if query_intent != "general"
+        else activity_intent
+    )
     parts: list[str] = []
 
     cleaned_query = query_text.strip()
-    if cleaned_query:
+    low_signal_phrases = (
+        "幫我們找",
+        "幫我找",
+        "可以請ai旅遊行程助理幫我們找",
+        "可以請ai幫我們找",
+        "請ai幫我們找",
+        "請幫我們找",
+    )
+    if cleaned_query and not any(phrase in cleaned_query.lower() for phrase in low_signal_phrases):
         parts.append(cleaned_query)
 
     for value in constraints or []:
@@ -388,7 +432,19 @@ def _build_text_search_query(
     if normalized_location and normalized_location not in " ".join(parts):
         parts.append(normalized_location)
 
-    if _detect_query_intent(query_text) == "food":
+    joined = " ".join(parts)
+    if effective_intent == "food":
+        if "餐廳" not in joined and "美食" not in joined and "吃" not in joined:
+            parts.append("餐廳")
+    elif effective_intent == "attraction":
+        if "景點" not in joined and "旅遊" not in joined and "玩的地方" not in joined:
+            parts.append("景點")
+
+    if not parts and normalized_location:
+        parts.append(normalized_location)
+
+    joined = " ".join(parts)
+    if effective_intent == "food":
         joined = " ".join(parts)
         if "餐廳" not in joined and "美食" not in joined and "吃" not in joined:
             parts.append("餐廳")
@@ -1449,19 +1505,30 @@ def _format_group_message(
     if prefix:
         lines.append(prefix)
 
-    if location_source == "beacon":
-        source_label = "Beacon 定位"
-    elif location_source in {"liff", "manual_location"}:
-        source_label = "手機定位"
-    else:
-        source_label = "定位"
+    intent = _detect_query_intent(query_text)
+    is_text_location = location_source == "text_location"
 
-    if query_text:
-        lines.append(
-            f'根據您的原始需求：「{query_text}」，結合本次{source_label}結果，為您推薦以下行程：'
-        )
+    if intent == "food":
+        if query_text:
+            lines.append(f"依照「{query_text}」幫你整理幾個可以參考的餐廳：")
+        else:
+            lines.append("幫你整理幾個可以參考的餐廳：")
     else:
-        lines.append(f"結合本次{source_label}結果，為您推薦以下行程：")
+        if location_source == "beacon":
+            source_label = "Beacon 定位"
+        elif location_source in {"liff", "manual_location"}:
+            source_label = "手機定位"
+        elif is_text_location:
+            source_label = "文字地點查詢"
+        else:
+            source_label = "定位"
+
+        if query_text:
+            lines.append(
+                f'根據您的原始需求：「{query_text}」，結合本次{source_label}結果，為您整理以下推薦：'
+            )
+        else:
+            lines.append(f"結合本次{source_label}結果，為您整理以下推薦：")
 
     if not results:
         lines.append("目前沒有拿到合適的推薦結果，請稍後再試一次。")
@@ -1473,12 +1540,20 @@ def _format_group_message(
             distance_km = item.get("distance_km")
             description = str(item.get("description") or "").strip()
 
-            if subtitle and distance_km is not None:
-                lines.append(f"所屬行程：{subtitle}（約 {distance_km:.2f} 公里）")
-            elif subtitle:
-                lines.append(f"所屬行程：{subtitle}")
-            elif distance_km is not None:
-                lines.append(f"距離：約 {distance_km:.2f} 公里")
+            if intent == "food":
+                if subtitle and distance_km is not None:
+                    lines.append(f"地址：{subtitle}（約 {distance_km:.2f} 公里）")
+                elif subtitle:
+                    lines.append(f"地址：{subtitle}")
+                elif distance_km is not None:
+                    lines.append(f"距離：約 {distance_km:.2f} 公里")
+            else:
+                if subtitle and distance_km is not None:
+                    lines.append(f"地點資訊：{subtitle}（約 {distance_km:.2f} 公里）")
+                elif subtitle:
+                    lines.append(f"地點資訊：{subtitle}")
+                elif distance_km is not None:
+                    lines.append(f"距離：約 {distance_km:.2f} 公里")
 
             if description:
                 lines.append(f"特點：{description}")
