@@ -158,6 +158,45 @@ def _default_suggested_reply_for_scenario(scenario_code: str) -> str:
     return scenario.suggested_reply
 
 
+def _repair_scenario_code(
+    raw_scenario_code: Any,
+    reply_trigger: str,
+    merged_info: dict[str, Any],
+) -> str:
+    normalized_code = _normalize_scenario_code_value(raw_scenario_code)
+    if _find_scenario_definition(normalized_code) is not None:
+        return normalized_code
+
+    activity_types = merged_info.get("activity_types") or []
+    if not isinstance(activity_types, list):
+        activity_types = [activity_types]
+    activity_text = " ".join(str(item).strip() for item in activity_types if str(item).strip())
+
+    locations = merged_info.get("location") or []
+    if not isinstance(locations, list):
+        locations = [locations]
+    location_text = " ".join(str(item).strip() for item in locations if str(item).strip())
+
+    budget = merged_info.get("budget") or []
+    if not isinstance(budget, list):
+        budget = [budget]
+    constraints = merged_info.get("constraints") or []
+    if not isinstance(constraints, list):
+        constraints = [constraints]
+
+    if reply_trigger == "stuck_discussion":
+        return "劇本八"
+
+    if reply_trigger in {"explicit_request", "functional_question"}:
+        if any(token in activity_text for token in ("行程", "半日", "一日", "動物園參觀")):
+            return "劇本四"
+        if locations and ("附近" in location_text or budget or constraints):
+            return "劇本六"
+        return "劇本十六"
+
+    return normalized_code
+
+
 def _extract_json(text: str) -> dict[str, Any]:
     payload = text.strip()
     if payload.startswith("```"):
@@ -287,8 +326,14 @@ def _normalize_result(data: dict[str, Any], fallback_info: ExtractedInfo) -> Ana
     elif reply_trigger in {"explicit_request", "functional_question", "stuck_discussion"}:
         should_intervene = True
 
+    repaired_scenario_code = _repair_scenario_code(
+        data["scenario_code"],
+        reply_trigger,
+        merged_info,
+    )
+
     normalized = {
-        "scenario_code": _normalize_scenario_code_value(data["scenario_code"]),
+        "scenario_code": repaired_scenario_code,
         "scenario_name": str(data["scenario_name"]),
         "stage": str(data["stage"]),
         "should_intervene": bool(should_intervene),
@@ -304,7 +349,7 @@ def _normalize_result(data: dict[str, Any], fallback_info: ExtractedInfo) -> Ana
         ),
         "suggested_reply": _normalize_suggested_reply(
             data.get("suggested_reply", ""),
-            _normalize_scenario_code_value(data["scenario_code"]),
+            repaired_scenario_code,
             bool(should_intervene),
         ),
         "extracted_info": merged_info,

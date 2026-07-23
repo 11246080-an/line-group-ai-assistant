@@ -276,6 +276,23 @@ def _is_location_recommendation_request(
     return False
 
 
+def _has_explicit_current_location_signal(analysis_result: dict[str, Any]) -> bool:
+    extracted_info = analysis_result.get("extracted_info") or {}
+    locations = extracted_info.get("location") or []
+    if not isinstance(locations, list):
+        locations = [locations]
+
+    normalized_locations = {
+        str(item).strip()
+        for item in locations
+        if str(item).strip()
+    }
+    return bool(
+        normalized_locations
+        & {"目前位置", "現在位置", "當前位置", "我的位置", "我附近", "這裡附近"}
+    )
+
+
 def _should_route_to_location_flow(
     user_text: str,
     analysis_result: dict[str, Any],
@@ -288,6 +305,9 @@ def _should_route_to_location_flow(
 
     reply_trigger = str(analysis_result.get("reply_trigger") or "").strip()
     if reply_trigger not in {"functional_question", "explicit_request"}:
+        return False
+
+    if not _has_explicit_current_location_signal(analysis_result):
         return False
 
     return _is_location_recommendation_request(user_text, analysis_result)
@@ -325,6 +345,8 @@ def _extract_text_location_query_payload(
 
     location_text = normalized_locations[0]
     if location_text in {"目前位置", "現在位置", "當前位置"}:
+        return None
+    if location_text == "附近":
         return None
 
     return {
