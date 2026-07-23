@@ -123,6 +123,7 @@ GOOGLE_PLACES_CACHE_TTL_SECONDS = max(
     60,
     _env_int("GOOGLE_PLACES_CACHE_TTL_SECONDS", 900),
 )
+LOCATION_NORMALIZER_MODEL = os.getenv("LOCATION_NORMALIZER_MODEL", "gpt-4.1-mini")
 LOCATION_TEXT_ALIASES = {
     "北車": "台北車站",
     "台北車站": "台北車站",
@@ -157,10 +158,93 @@ def _detect_query_intent(query_text: str) -> str:
     return "general"
 
 
-def _normalize_location_text(location_text: str) -> str:
+def _get_openai_client() -> Any | None:
+    api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    if not api_key:
+        return None
+
+    try:
+        from openai import OpenAI
+    except ImportError:
+        return None
+
+    return OpenAI(api_key=api_key)
+
+
+def _extract_json_object(text: str) -> dict[str, Any] | None:
+    payload = text.strip()
+    if payload.startswith("```"):
+        parts = payload.split("```")
+        for part in parts:
+            part = part.strip()
+            if part.startswith("{") and part.endswith("}"):
+                payload = part
+                break
+
+    start = payload.find("{")
+    end = payload.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        return None
+
+    try:
+        return json.loads(payload[start : end + 1])
+    except json.JSONDecodeError:
+        return None
+
+
+def _normalize_location_text_with_llm(location_text: str, query_text: str) -> str:
+    client = _get_openai_client()
+    if client is None:
+        return ""
+
+    try:
+        response = client.chat.completions.create(
+            model=LOCATION_NORMALIZER_MODEL,
+            temperature=0,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "你是台灣地點名稱正規化助手。"
+                        "請把使用者口語中的地點，轉成最適合拿去查 Google Places 的正式地點名稱。"
+                        "例如北車 -> 台北車站，北商 -> 國立臺北商業大學。"
+                        "只輸出 JSON，格式必須是 {\"normalized_location\": \"...\"}。"
+                        "如果無法更正規化，就原樣輸出。"
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": json.dumps(
+                        {
+                            "location_text": location_text,
+                            "query_text": query_text,
+                        },
+                        ensure_ascii=False,
+                    ),
+                },
+            ],
+            response_format={"type": "json_object"},
+        )
+        content = response.choices[0].message.content or "{}"
+        data = _extract_json_object(content)
+        if not isinstance(data, dict):
+            return ""
+        normalized = str(data.get("normalized_location") or "").strip()
+        return normalized
+    except Exception as exc:
+        print(f"Location normalization failed: {exc}")
+        return ""
+
+
+def _normalize_location_text(location_text: str, query_text: str = "") -> str:
     normalized = location_text.strip()
     if not normalized:
         return ""
+
+    llm_normalized = _normalize_location_text_with_llm(normalized, query_text)
+    if llm_normalized:
+        return llm_normalized
+
     for alias, canonical in LOCATION_TEXT_ALIASES.items():
         if alias in normalized:
             return normalized.replace(alias, canonical)
@@ -284,7 +368,7 @@ def _build_text_search_query(
     constraints: list[str] | None = None,
     activity_types: list[str] | None = None,
 ) -> str:
-    normalized_location = _normalize_location_text(location_text)
+    normalized_location = _normalize_location_text(location_text, query_text)
     parts: list[str] = []
 
     cleaned_query = query_text.strip()
