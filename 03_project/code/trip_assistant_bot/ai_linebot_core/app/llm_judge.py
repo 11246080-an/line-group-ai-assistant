@@ -319,6 +319,12 @@ def _normalize_category_reply(text: str) -> str:
         "景點吧": "景點",
         "景點喔": "景點",
         "玩的": "景點",
+        "逛街": "購物",
+        "商場": "購物",
+        "百貨公司": "購物",
+        "購物": "購物",
+        "商圈": "購物",
+        "夜市": "購物",
     }
     return category_map.get(normalized_text, "")
 
@@ -417,7 +423,7 @@ def _apply_clarifying_question_override(
         normalized["intervention_type"] = "顯性介入"
         normalized["requires_external_search"] = False
         normalized["intermediate_reply"] = ""
-        normalized["suggested_reply"] = "你是想找餐廳、景點，還是其他類型呢？"
+        normalized["suggested_reply"] = "你們是想找吃的，還是想找可以逛的地方呀？"
         normalized["confidence_score"] = max(
             float(normalized.get("confidence_score", 0.0)),
             0.8,
