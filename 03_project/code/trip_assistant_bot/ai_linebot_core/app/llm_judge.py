@@ -344,7 +344,7 @@ def _normalize_category_reply(text: str) -> str:
         "餐廳": ("吃", "餐廳", "美食", "用餐", "晚餐", "午餐", "宵夜"),
         "咖啡廳": ("咖啡", "咖啡廳", "喝咖啡"),
         "景點": ("景點", "走走", "出去玩", "玩", "散步"),
-        "購物": ("逛街", "百貨", "購物", "商圈", "夜市"),
+        "購物": ("逛街", "百貨", "購物", "商圈", "夜市", "可以逛", "能逛", "逛的地方"),
     }
     for category, keywords in keyword_groups.items():
         if any(keyword in normalized_text for keyword in keywords):
