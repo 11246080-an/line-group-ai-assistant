@@ -438,29 +438,29 @@ def _apply_clarifying_question_override(
     if any((locations, activity_types, constraints)):
         return normalized
 
-    if normalized.get("reply_trigger") == "no_reply":
-        normalized["scenario_code"] = "劇本十六"
-        normalized["scenario_name"] = "臨時決定（即時需求型）"
-        normalized["stage"] = "特殊情境"
-        normalized["reply_trigger"] = "functional_question"
-        normalized["should_intervene"] = True
-        normalized["intervention_type"] = "顯性介入"
-        normalized["requires_external_search"] = False
-        normalized["intermediate_reply"] = ""
-        normalized["suggested_reply"] = "你們比較想找吃的，還是想找附近可以逛的地方？"
-        normalized["confidence_score"] = max(
-            float(normalized.get("confidence_score", 0.0)),
-            0.8,
-        )
+    normalized["scenario_code"] = "劇本十六"
+    normalized["scenario_name"] = "臨時決定（即時需求型）"
+    normalized["stage"] = "特殊情境"
+    normalized["reply_trigger"] = "functional_question"
+    normalized["should_intervene"] = True
+    normalized["intervention_type"] = "顯性介入"
+    normalized["requires_external_search"] = False
+    normalized["intermediate_reply"] = ""
+    normalized["suggested_reply"] = "你們比較想找吃的，還是想找附近可以逛的地方？"
+    normalized["confidence_score"] = max(
+        float(normalized.get("confidence_score", 0.0)),
+        0.8,
+    )
 
-        evidence = list(normalized.get("evidence") or [])
-        evidence.append("使用者有附近查詢意圖，若前文沒有其他地點，預設是以目前位置附近為查詢範圍。")
-        normalized["evidence"] = evidence
+    evidence = list(normalized.get("evidence") or [])
+    evidence.append("使用者有附近查詢意圖，但目前仍缺少查詢類型，因此先補問需求方向。")
+    normalized["evidence"] = evidence
 
-        behavior = list(normalized.get("system_behavior") or [])
-        behavior.extend(["先補問需求類型", "將附近預設理解為目前位置附近"])
-        normalized["system_behavior"] = behavior
+    behavior = list(normalized.get("system_behavior") or [])
+    behavior.extend(["先補問需求類型", "將附近預設理解為目前位置附近"])
+    normalized["system_behavior"] = behavior
 
+    normalized["suggested_reply"] = "你們比較想找吃的，還是想找附近可以逛的地方？"
     return normalized
 
 
