@@ -304,6 +304,18 @@ def _latest_message_text(text: str) -> str:
     lines = [line.strip() for line in str(text or "").splitlines() if line.strip()]
     if not lines:
         return ""
+
+    for line in reversed(lines):
+        if line.startswith("[") and line.endswith("]"):
+            continue
+        normalized_line = line
+        for prefix in ("使用者：", "使用者:", "A：", "A:", "B：", "B:", "C：", "C:", "D：", "D:", "E：", "E:"):
+            if normalized_line.startswith(prefix):
+                normalized_line = normalized_line[len(prefix) :].strip()
+                break
+        if normalized_line:
+            return normalized_line
+
     return lines[-1]
 
 
