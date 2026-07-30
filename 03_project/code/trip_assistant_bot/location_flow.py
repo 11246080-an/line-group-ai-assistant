@@ -1613,21 +1613,42 @@ def _format_group_message(
 
             if intent == "food":
                 if subtitle and distance_km is not None:
-                    lines.append(f"地址：{subtitle}（約 {distance_km:.2f} 公里）")
+                    lines.append(f"地址：{subtitle}")
+                    lines.append(f"距離：約 {distance_km:.2f} 公里")
                 elif subtitle:
                     lines.append(f"地址：{subtitle}")
                 elif distance_km is not None:
                     lines.append(f"距離：約 {distance_km:.2f} 公里")
             else:
                 if subtitle and distance_km is not None:
-                    lines.append(f"地點資訊：{subtitle}（約 {distance_km:.2f} 公里）")
+                    lines.append(f"地址：{subtitle}")
+                    lines.append(f"距離：約 {distance_km:.2f} 公里")
                 elif subtitle:
-                    lines.append(f"地點資訊：{subtitle}")
+                    lines.append(f"地址：{subtitle}")
                 elif distance_km is not None:
                     lines.append(f"距離：約 {distance_km:.2f} 公里")
 
             if description:
-                lines.append(f"特點：{description}")
+                detail_line = description
+                if "｜" in description:
+                    parts = [part.strip() for part in description.split("｜") if part.strip()]
+                    normalized_parts: list[str] = []
+                    for part in parts:
+                        if part.startswith("評分"):
+                            normalized_parts.append(
+                                part if "：" in part else part.replace("評分", "評分：", 1)
+                            )
+                        elif part.startswith("類型"):
+                            normalized_parts.append(
+                                part if "：" in part else part.replace("類型", "類型：", 1)
+                            )
+                        else:
+                            normalized_parts.append(f"類型：{part}")
+                    detail_line = "｜".join(normalized_parts)
+                lines.append(detail_line)
+
+            if index != min(len(results), GROUP_RESULT_LIMIT):
+                lines.append("")
 
     return "\n".join(lines).strip()
 
