@@ -447,7 +447,7 @@ def _apply_clarifying_question_override(
         normalized["intervention_type"] = "顯性介入"
         normalized["requires_external_search"] = False
         normalized["intermediate_reply"] = ""
-        normalized["suggested_reply"] = "你們是想找吃的，還是想找可以逛的地方呀？"
+        normalized["suggested_reply"] = "你們比較想找吃的，還是想找附近可以逛的地方？"
         normalized["confidence_score"] = max(
             float(normalized.get("confidence_score", 0.0)),
             0.8,

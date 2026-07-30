@@ -1579,9 +1579,9 @@ def _format_group_message(
 
     if intent == "food":
         if query_text:
-            lines.append(f"依照「{query_text}」幫你整理幾個可以參考的餐廳：")
+            lines.append(f"我幫你看了一下，這幾家餐廳可以先參考：")
         else:
-            lines.append("幫你整理幾個可以參考的餐廳：")
+            lines.append("我幫你看了一下，這幾家餐廳可以先參考：")
     else:
         if location_source == "beacon":
             source_label = "Beacon 定位"
@@ -1592,15 +1592,17 @@ def _format_group_message(
         else:
             source_label = "定位"
 
-        if query_text:
-            lines.append(
-                f'根據您的原始需求：「{query_text}」，結合本次{source_label}結果，為您整理以下推薦：'
-            )
+        if intent == "attraction":
+            lines.append("我幫你看了一下，附近有幾個可以去走走的地方：")
+        elif "購物" in query_text or "逛" in query_text or "百貨" in query_text or "夜市" in query_text:
+            lines.append("我幫你找了幾個附近可以逛的地方：")
+        elif query_text:
+            lines.append(f"我幫你看了一下，這幾個{source_label}附近的選項可以先參考：")
         else:
-            lines.append(f"結合本次{source_label}結果，為您整理以下推薦：")
+            lines.append(f"我幫你看了一下，這幾個{source_label}附近的選項可以先參考：")
 
     if not results:
-        lines.append("目前沒有拿到合適的推薦結果，請稍後再試一次。")
+        lines.append("我這次沒有找到比較適合的結果，要不要換個類型試試看？")
     else:
         for index, item in enumerate(results[:GROUP_RESULT_LIMIT], start=1):
             lines.append(f"{index}. {item.get('name', '未命名推薦')}")

@@ -475,9 +475,9 @@ def _handle_text_location_recommendation_request(
 
 def _build_liff_prompt_message(liff_url: str) -> TextMessage:
     prompt_text = (
-        "目前系統無法偵測到您當前的位置，\n"
-        "請您點選下方的定位按鈕分享您當前的位置，系統會依照您現在的位置整理推薦，"
-        "並同步一份摘要回到原本的群組。\n"
+        "我這邊需要你目前的位置，\n"
+        "點一下下面的定位按鈕，分享位置後我就能直接幫你整理附近的推薦，"
+        "也會把結果同步回原本的群組。\n"
     )
     return TextMessage(
         text=prompt_text,
