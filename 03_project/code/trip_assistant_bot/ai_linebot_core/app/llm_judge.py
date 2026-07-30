@@ -281,7 +281,164 @@ def _normalize_suggested_reply(value: Any, scenario_code: str, should_intervene:
     return _default_suggested_reply_for_scenario(scenario_code)
 
 
-def _normalize_result(data: dict[str, Any], fallback_info: ExtractedInfo) -> AnalysisResult:
+def _looks_like_vague_nearby_query(text: str) -> bool:
+    normalized_text = str(text or "").strip().replace(" ", "")
+    if not normalized_text:
+        return False
+
+    query_signals = (
+        "附近有什麼",
+        "附近有甚麼",
+        "附近有什麼嗎",
+        "附近有甚麼嗎",
+        "附近有推薦嗎",
+        "附近有推薦的嗎",
+    )
+    if any(signal in normalized_text for signal in query_signals):
+        return True
+
+    return "附近" in normalized_text and "有沒有" in normalized_text
+
+
+def _latest_message_text(text: str) -> str:
+    lines = [line.strip() for line in str(text or "").splitlines() if line.strip()]
+    if not lines:
+        return ""
+    return lines[-1]
+
+
+def _normalize_category_reply(text: str) -> str:
+    normalized_text = str(text or "").strip().replace(" ", "")
+    category_map = {
+        "餐廳": "餐廳",
+        "吃的": "餐廳",
+        "美食": "餐廳",
+        "咖啡廳": "咖啡廳",
+        "咖啡店": "咖啡廳",
+        "景點": "景點",
+        "景點吧": "景點",
+        "景點喔": "景點",
+        "玩的": "景點",
+    }
+    return category_map.get(normalized_text, "")
+
+
+def _apply_clarifying_question_override(
+    text: str,
+    normalized: dict[str, Any],
+) -> dict[str, Any]:
+    latest_message = _latest_message_text(text)
+    requested_category = _normalize_category_reply(latest_message)
+    extracted_info = normalized.get("extracted_info") or {}
+    locations = extracted_info.get("location") or []
+    if not isinstance(locations, list):
+        locations = [locations]
+    normalized_locations = [str(item).strip() for item in locations if str(item).strip()]
+    usable_locations = [
+        item
+        for item in normalized_locations
+        if item not in {"附近", "目前位置", "現在位置", "當前位置"}
+    ]
+
+    if requested_category and _looks_like_vague_nearby_query(text):
+        if usable_locations:
+            normalized["scenario_code"] = "劇本十六"
+            normalized["scenario_name"] = "臨時決定（即時需求型）"
+            normalized["stage"] = "特殊情境"
+            normalized["reply_trigger"] = "functional_question"
+            normalized["should_intervene"] = True
+            normalized["intervention_type"] = "顯性介入"
+            normalized["requires_external_search"] = True
+            normalized["intermediate_reply"] = "我先幫你們看一下，等等整理給你們～"
+            normalized["suggested_reply"] = ""
+            normalized["confidence_score"] = max(
+                float(normalized.get("confidence_score", 0.0)),
+                0.85,
+            )
+
+            evidence = list(normalized.get("evidence") or [])
+            evidence.append(
+                f"已沿用前文地點「{usable_locations[0]}」，並補上查詢類型為{requested_category}。"
+            )
+            normalized["evidence"] = evidence
+
+            behavior = list(normalized.get("system_behavior") or [])
+            behavior.extend(["沿用前文地點", "依補充的查詢類型啟動外部查詢"])
+            normalized["system_behavior"] = behavior
+
+            extracted_info["activity_types"] = [requested_category]
+            normalized["extracted_info"] = extracted_info
+            return normalized
+
+        normalized["scenario_code"] = "劇本十六"
+        normalized["scenario_name"] = "臨時決定（即時需求型）"
+        normalized["stage"] = "特殊情境"
+        normalized["reply_trigger"] = "functional_question"
+        normalized["should_intervene"] = True
+        normalized["intervention_type"] = "顯性介入"
+        normalized["requires_external_search"] = True
+        normalized["intermediate_reply"] = "我先幫你們看一下，等等整理給你們～"
+        normalized["suggested_reply"] = ""
+        normalized["confidence_score"] = max(
+            float(normalized.get("confidence_score", 0.0)),
+            0.85,
+        )
+
+        evidence = list(normalized.get("evidence") or [])
+        evidence.append(
+            f"使用者已補充查詢類型為{requested_category}，且未提供其他地點，因此沿用目前位置作為附近查詢基準。"
+        )
+        normalized["evidence"] = evidence
+
+        behavior = list(normalized.get("system_behavior") or [])
+        behavior.extend(["確認查詢類型", "預設以目前位置作為附近查詢基準"])
+        normalized["system_behavior"] = behavior
+
+        extracted_info["location"] = ["目前位置"]
+        extracted_info["activity_types"] = [requested_category]
+        normalized["extracted_info"] = extracted_info
+        return normalized
+
+    if not _looks_like_vague_nearby_query(text):
+        return normalized
+
+    activity_types = extracted_info.get("activity_types") or []
+    constraints = extracted_info.get("constraints") or []
+
+    if any((locations, activity_types, constraints)):
+        return normalized
+
+    if normalized.get("reply_trigger") == "no_reply":
+        normalized["scenario_code"] = "劇本十六"
+        normalized["scenario_name"] = "臨時決定（即時需求型）"
+        normalized["stage"] = "特殊情境"
+        normalized["reply_trigger"] = "functional_question"
+        normalized["should_intervene"] = True
+        normalized["intervention_type"] = "顯性介入"
+        normalized["requires_external_search"] = False
+        normalized["intermediate_reply"] = ""
+        normalized["suggested_reply"] = "你是想找餐廳、景點，還是其他類型呢？"
+        normalized["confidence_score"] = max(
+            float(normalized.get("confidence_score", 0.0)),
+            0.8,
+        )
+
+        evidence = list(normalized.get("evidence") or [])
+        evidence.append("使用者有附近查詢意圖，若前文沒有其他地點，預設是以目前位置附近為查詢範圍。")
+        normalized["evidence"] = evidence
+
+        behavior = list(normalized.get("system_behavior") or [])
+        behavior.extend(["先補問需求類型", "將附近預設理解為目前位置附近"])
+        normalized["system_behavior"] = behavior
+
+    return normalized
+
+
+def _normalize_result(
+    data: dict[str, Any],
+    fallback_info: ExtractedInfo,
+    source_text: str,
+) -> AnalysisResult:
     required_fields = {
         "scenario_code",
         "scenario_name",
@@ -354,6 +511,7 @@ def _normalize_result(data: dict[str, Any], fallback_info: ExtractedInfo) -> Ana
         ),
         "extracted_info": merged_info,
     }
+    normalized = _apply_clarifying_question_override(source_text, normalized)
     return AnalysisResult.from_dict(normalized)
 
 
@@ -599,7 +757,7 @@ def judge_with_llm(text: str, extracted_info: ExtractedInfo) -> AnalysisResult:
         judgment_messages,
         purpose="情境判斷",
     )
-    judgment_result = _normalize_result(judgment_data, extracted_info)
+    judgment_result = _normalize_result(judgment_data, extracted_info, text)
 
     if not judgment_result.should_intervene:
         return judgment_result
