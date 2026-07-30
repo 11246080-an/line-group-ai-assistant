@@ -36,6 +36,10 @@ def _env_int(name: str, default: int) -> int:
 
 BEACON_CONTEXT_TTL_SECONDS = _env_float("BEACON_CONTEXT_TTL_MINUTES", 10.0) * 60
 LIFF_SESSION_TTL_SECONDS = _env_float("LIFF_SESSION_TTL_MINUTES", 15.0) * 60
+RECENT_LOCATION_CONTEXT_TTL_SECONDS = _env_float(
+    "RECENT_LOCATION_CONTEXT_TTL_MINUTES",
+    15.0,
+) * 60
 LOCATION_RECOMMENDATION_API_TIMEOUT_SECONDS = _env_float(
     "LOCATION_RECOMMENDATION_API_TIMEOUT_SECONDS",
     10.0,
@@ -83,10 +87,23 @@ class RecommendationSession:
     result: dict[str, Any] | None = None
 
 
+@dataclass
+class RecentLocationContext:
+    conversation_key: str
+    line_user_id: str
+    line_group_id: str
+    latitude: float
+    longitude: float
+    accuracy: float | None
+    saved_at: float
+
+
 _beacon_lock = threading.Lock()
 _session_lock = threading.Lock()
+_recent_location_lock = threading.Lock()
 _beacon_contexts: dict[str, BeaconContext] = {}
 _recommendation_sessions: dict[str, RecommendationSession] = {}
+_recent_location_contexts: dict[str, RecentLocationContext] = {}
 _registry_cache: dict[str, Any] = {"path": None, "mtime": None, "data": {}}
 _catalog_cache: dict[str, Any] = {"mtime": None, "data": []}
 
@@ -1078,6 +1095,50 @@ def get_recommendation_session(session_token: str) -> RecommendationSession | No
         return session
 
 
+def save_recent_location_context(
+    *,
+    conversation_key: str,
+    line_user_id: str,
+    line_group_id: str,
+    latitude: float,
+    longitude: float,
+    accuracy: float | None,
+) -> RecentLocationContext:
+    context = RecentLocationContext(
+        conversation_key=conversation_key,
+        line_user_id=line_user_id,
+        line_group_id=line_group_id,
+        latitude=latitude,
+        longitude=longitude,
+        accuracy=accuracy,
+        saved_at=time.time(),
+    )
+    with _recent_location_lock:
+        _prune_state_locked()
+        _recent_location_contexts[conversation_key] = context
+    return context
+
+
+def get_recent_location_context(
+    *,
+    conversation_key: str,
+) -> RecentLocationContext | None:
+    with _recent_location_lock:
+        _prune_state_locked()
+        context = _recent_location_contexts.get(conversation_key)
+        if context is None:
+            return None
+        if (time.time() - context.saved_at) > RECENT_LOCATION_CONTEXT_TTL_SECONDS:
+            _recent_location_contexts.pop(conversation_key, None)
+            return None
+        return context
+
+
+def clear_recent_location_context(conversation_key: str) -> None:
+    with _recent_location_lock:
+        _recent_location_contexts.pop(conversation_key, None)
+
+
 def build_liff_url(session_token: str, request_base_url: str) -> str:
     endpoint = os.getenv("LIFF_LOCATION_ENDPOINT_URL", "").strip()
     if not endpoint:
@@ -1204,6 +1265,14 @@ def _prune_state_locked() -> None:
     ]
     for token in expired_sessions:
         _recommendation_sessions.pop(token, None)
+
+    expired_recent_locations = [
+        conversation_key
+        for conversation_key, context in _recent_location_contexts.items()
+        if (now - context.saved_at) > RECENT_LOCATION_CONTEXT_TTL_SECONDS
+    ]
+    for conversation_key in expired_recent_locations:
+        _recent_location_contexts.pop(conversation_key, None)
 
 
 def _request_backend_recommendation(

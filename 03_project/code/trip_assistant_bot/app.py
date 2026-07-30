@@ -54,14 +54,17 @@ from db import (
 )
 from location_flow import (
     build_liff_url,
+    clear_recent_location_context,
     create_recommendation_session,
     finalize_session_result,
     get_recent_beacon_context,
+    get_recent_location_context,
     get_recommendation_session,
     mark_session_failed,
     register_beacon_event,
     run_location_recommendation,
     run_text_location_recommendation,
+    save_recent_location_context,
 )
 
 load_dotenv()
@@ -169,6 +172,7 @@ def _get_imported_itinerary_state(
 def _reset_conversation_state(conversation_key: str) -> None:
     with conversation_lock:
         conversation_states.pop(conversation_key, None)
+    clear_recent_location_context(conversation_key)
 
 
 def _reply_text(line_bot_api: MessagingApi, reply_token: str, text: str) -> None:
@@ -515,6 +519,34 @@ def _handle_location_recommendation_request(
                     event,
                     conversation_key,
                     "beacon_location_recommendation",
+                    group_message,
+                )
+                return True
+
+    recent_location_context = get_recent_location_context(
+        conversation_key=conversation_key,
+    )
+    if recent_location_context is not None:
+        try:
+            result = run_location_recommendation(
+                line_user_id=line_user_id,
+                line_group_id=line_group_id,
+                query_text=user_text,
+                latitude=recent_location_context.latitude,
+                longitude=recent_location_context.longitude,
+                accuracy=recent_location_context.accuracy,
+                location_source="recent_location",
+                beacon_context=None,
+            )
+        except Exception as exc:
+            print(f"Recent location recommendation failed, falling back to LIFF: {exc}")
+        else:
+            group_message = str(result.get("group_message") or "").strip()
+            if group_message:
+                _reply_text_and_mark(
+                    event,
+                    conversation_key,
+                    "recent_location_recommendation",
                     group_message,
                 )
                 return True
@@ -1063,6 +1095,14 @@ def receive_liff_location_recommendation():
             location_source="liff",
             beacon_context=None,
         )
+        save_recent_location_context(
+            conversation_key=session.conversation_key,
+            line_user_id=session.line_user_id,
+            line_group_id=session.line_group_id,
+            latitude=latitude,
+            longitude=longitude,
+            accuracy=accuracy_value,
+        )
     except Exception as exc:
         failure_result = {
             "group_message": "",
@@ -1159,6 +1199,14 @@ def handle_location_message(event: MessageEvent) -> None:
             accuracy=None,
             location_source="manual_location",
             beacon_context=None,
+        )
+        save_recent_location_context(
+            conversation_key=conversation_key,
+            line_user_id=line_user_id,
+            line_group_id=line_group_id,
+            latitude=float(location_message.latitude),
+            longitude=float(location_message.longitude),
+            accuracy=None,
         )
     except Exception as exc:
         print(f"Manual location recommendation failed: {exc}")
