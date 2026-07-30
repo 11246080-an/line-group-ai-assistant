@@ -361,6 +361,64 @@ def _extract_text_location_query_payload(
     }
 
 
+def _build_location_query_text(
+    user_text: str,
+    analysis_result: dict[str, Any] | None,
+) -> str:
+    normalized_text = user_text.strip()
+    if not normalized_text or not isinstance(analysis_result, dict):
+        return normalized_text
+
+    extracted_info = analysis_result.get("extracted_info") or {}
+    activity_types = extracted_info.get("activity_types") or []
+    constraints = extracted_info.get("constraints") or []
+
+    if not isinstance(activity_types, list):
+        activity_types = [activity_types]
+    if not isinstance(constraints, list):
+        constraints = [constraints]
+
+    normalized_activities = [
+        str(item).strip()
+        for item in activity_types
+        if str(item).strip()
+    ]
+    normalized_constraints = [
+        str(item).strip()
+        for item in constraints
+        if str(item).strip()
+    ]
+
+    activity_map = {
+        "餐廳": "附近餐廳",
+        "咖啡廳": "附近咖啡廳",
+        "景點": "附近景點",
+        "購物": "附近可以逛的地方",
+    }
+
+    if normalized_activities:
+        primary_activity = normalized_activities[0]
+        base_query = activity_map.get(primary_activity, "")
+        if base_query:
+            if normalized_constraints:
+                return f"{base_query} {' '.join(normalized_constraints)}".strip()
+            return base_query
+
+    followup_signals = ("那", "還有", "呢", "嗎")
+    if any(signal in normalized_text for signal in followup_signals):
+        keyword_groups = {
+            "附近餐廳": ("吃", "餐廳", "美食", "用餐", "晚餐", "午餐", "宵夜"),
+            "附近咖啡廳": ("咖啡", "咖啡廳"),
+            "附近景點": ("景點", "走走", "散步", "出去玩"),
+            "附近可以逛的地方": ("逛街", "百貨", "購物", "商圈", "夜市"),
+        }
+        for rewritten_query, keywords in keyword_groups.items():
+            if any(keyword in normalized_text for keyword in keywords):
+                return rewritten_query
+
+    return normalized_text
+
+
 def _handle_text_location_recommendation_request(
     event: MessageEvent,
     conversation_key: str,
@@ -491,11 +549,14 @@ def _handle_location_recommendation_request(
     line_group_id: str,
     line_user_id: str,
     user_text: str,
+    analysis_result: dict[str, Any] | None = None,
     *,
     record_user_message: bool = True,
 ) -> bool:
     if record_user_message:
         _note_user_message(conversation_key, user_text)
+
+    effective_query_text = _build_location_query_text(user_text, analysis_result)
 
     beacon_context = get_recent_beacon_context(line_user_id) if line_user_id else None
     if beacon_context and beacon_context.has_coordinates:
@@ -503,7 +564,7 @@ def _handle_location_recommendation_request(
             result = run_location_recommendation(
                 line_user_id=line_user_id,
                 line_group_id=line_group_id,
-                query_text=user_text,
+                query_text=effective_query_text,
                 latitude=beacon_context.latitude,
                 longitude=beacon_context.longitude,
                 accuracy=None,
@@ -531,7 +592,7 @@ def _handle_location_recommendation_request(
             result = run_location_recommendation(
                 line_user_id=line_user_id,
                 line_group_id=line_group_id,
-                query_text=user_text,
+                query_text=effective_query_text,
                 latitude=recent_location_context.latitude,
                 longitude=recent_location_context.longitude,
                 accuracy=recent_location_context.accuracy,
@@ -556,7 +617,7 @@ def _handle_location_recommendation_request(
         conversation_key,
         line_group_id,
         line_user_id,
-        user_text,
+        effective_query_text,
     )
     return True
 
@@ -1368,6 +1429,7 @@ def handle_message(event: MessageEvent) -> None:
                 line_group_id,
                 line_user_id,
                 user_text,
+                result,
                 record_user_message=False,
             ):
                 print("Location recommendation flow handled after AI decision")
