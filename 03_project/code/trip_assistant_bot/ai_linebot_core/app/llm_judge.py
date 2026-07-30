@@ -321,7 +321,7 @@ def _latest_message_text(text: str) -> str:
 
 def _normalize_category_reply(text: str) -> str:
     normalized_text = str(text or "").strip().replace(" ", "")
-    category_map = {
+    exact_map = {
         "餐廳": "餐廳",
         "吃的": "餐廳",
         "美食": "餐廳",
@@ -332,13 +332,25 @@ def _normalize_category_reply(text: str) -> str:
         "景點喔": "景點",
         "玩的": "景點",
         "逛街": "購物",
-        "商場": "購物",
         "百貨公司": "購物",
         "購物": "購物",
         "商圈": "購物",
         "夜市": "購物",
     }
-    return category_map.get(normalized_text, "")
+    if normalized_text in exact_map:
+        return exact_map[normalized_text]
+
+    keyword_groups = {
+        "餐廳": ("吃", "餐廳", "美食", "用餐", "晚餐", "午餐", "宵夜"),
+        "咖啡廳": ("咖啡", "咖啡廳", "喝咖啡"),
+        "景點": ("景點", "走走", "出去玩", "玩", "散步"),
+        "購物": ("逛街", "百貨", "購物", "商圈", "夜市"),
+    }
+    for category, keywords in keyword_groups.items():
+        if any(keyword in normalized_text for keyword in keywords):
+            return category
+
+    return ""
 
 
 def _apply_clarifying_question_override(
