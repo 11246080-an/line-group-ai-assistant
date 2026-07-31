@@ -66,6 +66,7 @@ from location_flow import (
     run_text_location_recommendation,
     save_recent_location_context,
 )
+from weather_flow import run_weather_recommendation
 
 load_dotenv()
 
@@ -359,6 +360,124 @@ def _extract_text_location_query_payload(
         "constraints": [str(item).strip() for item in constraints if str(item).strip()],
         "activity_types": [str(item).strip() for item in activity_types if str(item).strip()],
     }
+
+
+def _has_weather_request_signal(
+    user_text: str,
+    analysis_result: dict[str, Any],
+) -> bool:
+    scenario_code = str(analysis_result.get("scenario_code") or "").strip()
+    if scenario_code == "劇本十七":
+        return True
+
+    extracted_info = analysis_result.get("extracted_info") or {}
+    risk_info = extracted_info.get("risk_info") or []
+    if not isinstance(risk_info, list):
+        risk_info = [risk_info]
+    if any("天氣" in str(item) for item in risk_info):
+        return True
+
+    system_behavior = analysis_result.get("system_behavior") or []
+    if not isinstance(system_behavior, list):
+        system_behavior = [system_behavior]
+    if any("天氣" in str(item) for item in system_behavior):
+        return True
+
+    weather_keywords = (
+        "天氣",
+        "下雨",
+        "降雨",
+        "氣溫",
+        "溫度",
+        "天候",
+        "會不會熱",
+        "會不會冷",
+    )
+    return any(keyword in user_text for keyword in weather_keywords)
+
+
+def _extract_weather_query_payload(
+    user_text: str,
+    analysis_result: dict[str, Any],
+) -> dict[str, Any] | None:
+    if not bool(analysis_result.get("requires_external_search")):
+        return None
+
+    if not bool(analysis_result.get("should_intervene")):
+        return None
+
+    reply_trigger = str(analysis_result.get("reply_trigger") or "").strip()
+    if reply_trigger not in {"functional_question", "explicit_request"}:
+        return None
+
+    if not _has_weather_request_signal(user_text, analysis_result):
+        return None
+
+    extracted_info = analysis_result.get("extracted_info") or {}
+    locations = extracted_info.get("location") or []
+    times = extracted_info.get("time") or []
+    if not isinstance(locations, list):
+        locations = [locations]
+    if not isinstance(times, list):
+        times = [times]
+
+    location_text = next((str(item).strip() for item in locations if str(item).strip()), "")
+    time_text = next((str(item).strip() for item in times if str(item).strip()), "")
+
+    return {
+        "query_text": user_text.strip(),
+        "location_text": location_text,
+        "time_text": time_text,
+    }
+
+
+def _handle_weather_recommendation_request(
+    event: MessageEvent,
+    conversation_key: str,
+    scenario_code: str,
+    *,
+    query_text: str,
+    location_text: str,
+    time_text: str,
+) -> bool:
+    result = run_weather_recommendation(
+        query_text=query_text,
+        location_text=location_text,
+        time_text=time_text,
+    )
+    print(
+        "Weather recommendation payload:",
+        {
+            "query_text": query_text,
+            "location_text": location_text,
+            "time_text": time_text,
+            "provider": result.get("provider"),
+            "county_name": result.get("county_name"),
+        },
+    )
+    group_message = str(result.get("group_message") or "").strip()
+    if not group_message:
+        return False
+
+    current_user_message_count = _get_user_message_count(conversation_key)
+    if _should_suppress_duplicate_reply(
+        conversation_key,
+        scenario_code,
+        group_message,
+        current_user_message_count,
+    ):
+        print(
+            f"略過語意相近的重複回覆。 (scenario_code={scenario_code}, text={group_message})"
+        )
+        return True
+
+    _reply_text_and_mark(
+        event,
+        conversation_key,
+        scenario_code,
+        group_message,
+    )
+    return True
 
 
 def _build_location_query_text(
@@ -1420,6 +1539,23 @@ def handle_message(event: MessageEvent) -> None:
         confidence_score = float(result.get("confidence_score", 0))
     except (TypeError, ValueError):
         confidence_score = 0.0
+
+    try:
+        weather_payload = _extract_weather_query_payload(user_text, result)
+        if weather_payload:
+            if _handle_weather_recommendation_request(
+                event,
+                conversation_key,
+                scenario_code,
+                query_text=str(weather_payload["query_text"]),
+                location_text=str(weather_payload["location_text"]),
+                time_text=str(weather_payload["time_text"]),
+            ):
+                print("Weather recommendation flow handled after AI decision")
+                print("=" * 50 + "\n")
+                return
+    except Exception as exc:
+        print(f"Weather recommendation flow error: {exc}")
 
     try:
         if _should_route_to_location_flow(user_text, result):
