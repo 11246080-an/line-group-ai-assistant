@@ -399,15 +399,37 @@ def _has_weather_request_signal(
     return any(keyword in user_text for keyword in weather_keywords)
 
 
+def _is_direct_weather_question(user_text: str) -> bool:
+    normalized = user_text.strip()
+    if not normalized:
+        return False
+
+    question_markers = ("嗎", "呢", "怎麼樣", "如何", "會不會", "有沒有", "?")
+    weather_keywords = (
+        "天氣",
+        "下雨",
+        "降雨",
+        "氣溫",
+        "溫度",
+        "天候",
+        "會不會熱",
+        "會不會冷",
+    )
+    return any(keyword in normalized for keyword in weather_keywords) and any(
+        marker in normalized for marker in question_markers
+    )
+
+
 def _extract_weather_query_payload(
     user_text: str,
     analysis_result: dict[str, Any],
 ) -> dict[str, Any] | None:
-    if not bool(analysis_result.get("should_intervene")):
+    should_intervene = bool(analysis_result.get("should_intervene"))
+    if not should_intervene and not _is_direct_weather_question(user_text):
         return None
 
     reply_trigger = str(analysis_result.get("reply_trigger") or "").strip()
-    if reply_trigger not in {"functional_question", "explicit_request"}:
+    if reply_trigger not in {"functional_question", "explicit_request", "no_reply"}:
         return None
 
     if not _has_weather_request_signal(user_text, analysis_result):
