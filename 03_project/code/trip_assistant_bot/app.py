@@ -322,6 +322,9 @@ def _extract_text_location_query_payload(
     user_text: str,
     analysis_result: dict[str, Any],
 ) -> dict[str, Any] | None:
+    if _has_weather_request_signal(user_text, analysis_result):
+        return None
+
     if not bool(analysis_result.get("requires_external_search")):
         return None
 
@@ -1553,6 +1556,10 @@ def handle_message(event: MessageEvent) -> None:
                 return
     except Exception as exc:
         print(f"Weather recommendation flow error: {exc}")
+        if _has_weather_request_signal(user_text, result):
+            print("Weather query stopped from falling through to location flow")
+            print("=" * 50 + "\n")
+            return
 
     try:
         if _should_route_to_location_flow(user_text, result):
