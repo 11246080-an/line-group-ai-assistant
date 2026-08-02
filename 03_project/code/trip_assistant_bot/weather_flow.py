@@ -48,6 +48,55 @@ COUNTY_ALIASES = {
     "連江": "連江縣",
 }
 
+LOCATION_TO_COUNTY_ALIASES = {
+    "淡水": "新北市",
+    "板橋": "新北市",
+    "新店": "新北市",
+    "永和": "新北市",
+    "中和": "新北市",
+    "三重": "新北市",
+    "九份": "新北市",
+    "瑞芳": "新北市",
+    "烏來": "新北市",
+    "北投": "臺北市",
+    "士林": "臺北市",
+    "西門": "臺北市",
+    "信義區": "臺北市",
+    "信義": "臺北市",
+    "東區": "臺北市",
+    "內湖": "臺北市",
+    "木柵": "臺北市",
+    "景美": "臺北市",
+    "礁溪": "宜蘭縣",
+    "羅東": "宜蘭縣",
+    "冬山": "宜蘭縣",
+    "頭城": "宜蘭縣",
+    "蘇澳": "宜蘭縣",
+    "員山": "宜蘭縣",
+    "清境": "南投縣",
+    "日月潭": "南投縣",
+    "溪頭": "南投縣",
+    "逢甲": "臺中市",
+    "一中": "臺中市",
+    "谷關": "臺中市",
+    "七期": "臺中市",
+    "旗津": "高雄市",
+    "西子灣": "高雄市",
+    "駁二": "高雄市",
+    "左營": "高雄市",
+    "美濃": "高雄市",
+    "墾丁": "屏東縣",
+    "小琉球": "屏東縣",
+    "東港": "屏東縣",
+    "恆春": "屏東縣",
+    "太魯閣": "花蓮縣",
+    "七星潭": "花蓮縣",
+    "清水斷崖": "花蓮縣",
+    "三仙台": "臺東縣",
+    "伯朗大道": "臺東縣",
+    "鹿野": "臺東縣",
+}
+
 
 def _normalize_county_name(location_text: str, query_text: str = "") -> str:
     candidates = [str(location_text or "").strip(), str(query_text or "").strip()]
@@ -55,8 +104,11 @@ def _normalize_county_name(location_text: str, query_text: str = "") -> str:
         if not candidate:
             continue
         for alias in sorted(COUNTY_ALIASES, key=len, reverse=True):
-            if alias and alias in candidate:
+            if alias in candidate:
                 return COUNTY_ALIASES[alias]
+        for alias in sorted(LOCATION_TO_COUNTY_ALIASES, key=len, reverse=True):
+            if alias in candidate:
+                return LOCATION_TO_COUNTY_ALIASES[alias]
     return ""
 
 
