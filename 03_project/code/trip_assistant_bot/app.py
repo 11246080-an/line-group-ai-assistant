@@ -400,9 +400,6 @@ def _extract_weather_query_payload(
     user_text: str,
     analysis_result: dict[str, Any],
 ) -> dict[str, Any] | None:
-    if not bool(analysis_result.get("requires_external_search")):
-        return None
-
     if not bool(analysis_result.get("should_intervene")):
         return None
 
