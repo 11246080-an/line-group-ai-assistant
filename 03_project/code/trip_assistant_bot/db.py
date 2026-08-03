@@ -42,6 +42,9 @@ def ensure_indexes() -> None:
         [("line_user_id", ASCENDING), ("line_group_id", ASCENDING)],
         unique=True,
     )
+    # 上面那個複合索引以 line_user_id 為前綴，查「整個群組」的偏好時用不到；
+    # 另外建一個以 line_group_id 為前綴的索引，給 get_group_preferences() 用。
+    db.user_preferences.create_index([("line_group_id", ASCENDING)])
     db.api_query_cache.create_index(
         [("query_type", ASCENDING), ("query_key", ASCENDING)],
         unique=True,
@@ -177,6 +180,7 @@ def save_api_query_cache(
     result: Any,
     query_params: dict | None = None,
     ttl_seconds: int = 3600,
+    line_group_id: str | None = None,
 ) -> None:
     """
     存/更新一筆外部 API 查詢結果快取（同 query_type + query_key upsert）。
@@ -188,6 +192,13 @@ def save_api_query_cache(
     - result：API 回傳結果，原樣存放（dict / list 皆可）
     - ttl_seconds：快取有效秒數，預設 1 小時；到期後 get_api_query_cache
       會回傳 None，MongoDB TTL 索引也會自動清掉該筆文件
+    - line_group_id：選填，記錄是哪個群組觸發了這次查詢，方便之後追蹤/除錯。
+      注意這裡「不會」拿它當快取鍵：天氣、餐廳、電影場次這類外部資料本身是
+      公開資訊，不同群組查同一個條件應該要能共用同一份結果，不需要重複打
+      外部 API。如果某個查詢類型的結果本來就跟群組的私有資訊綁在一起、
+      不能跨群組共用，處理方式是呼叫端自己把 line_group_id 編進 query_key
+      裡（例如 f"{line_group_id}:{query_key}"），這樣同一個 query_type 底下
+      不同群組自然就會落在不同的快取鍵，不用改這支函式。
     """
     now = datetime.now(timezone.utc)
     get_db().api_query_cache.update_one(
@@ -198,6 +209,7 @@ def save_api_query_cache(
                 "result": result,
                 "updated_at": now,
                 "expires_at": now + timedelta(seconds=ttl_seconds),
+                "line_group_id": line_group_id,
             },
             "$setOnInsert": {"created_at": now},
         },
@@ -244,6 +256,97 @@ def save_summary(line_group_id: str, result: dict) -> None:
             "suggested_reply": result.get("suggested_reply"),
         },
     })
+
+
+def get_latest_summary(line_group_id: str) -> dict | None:
+    """
+    取得「這個群組」最新一筆分析摘要（budget / need_type / decision_state
+    等已確認條件），給 AI 組 context 時參考用。
+
+    查詢條件只有 line_group_id，絕對不會讀到其他群組已確認的條件。
+    """
+    return get_db().summaries.find_one(
+        {"line_group_id": line_group_id},
+        sort=[("window_start", DESCENDING)],
+    )
+
+
+# ── 使用者 / 群組偏好 ────────────────────────────────────────────────
+
+def upsert_user_preference(
+    line_group_id: str,
+    line_user_id: str,
+    preference_type: str,
+    preference_value: str,
+) -> None:
+    """
+    新增或更新某位使用者在「這個群組」裡的偏好（例如飲食限制、預算）。
+
+    務必同時帶 line_group_id + line_user_id 兩個條件去更新，確保不會誤更新到
+    這位使用者在其他群組裡的偏好。同一個 preference_type 已存在時直接覆蓋
+    value，不會產生重複項目。
+    """
+    now = datetime.now(timezone.utc)
+    db = get_db()
+
+    updated = db.user_preferences.update_one(
+        {
+            "line_group_id": line_group_id,
+            "line_user_id": line_user_id,
+            "preferences.type": preference_type,
+        },
+        {
+            "$set": {
+                "preferences.$.value": preference_value,
+                "preferences.$.updated_at": now,
+            }
+        },
+    )
+    if updated.matched_count == 0:
+        db.user_preferences.update_one(
+            {"line_group_id": line_group_id, "line_user_id": line_user_id},
+            {
+                "$push": {
+                    "preferences": {
+                        "type": preference_type,
+                        "value": preference_value,
+                        "updated_at": now,
+                    }
+                },
+                "$setOnInsert": {
+                    "line_group_id": line_group_id,
+                    "line_user_id": line_user_id,
+                },
+            },
+            upsert=True,
+        )
+
+
+def get_user_preferences(line_group_id: str, line_user_id: str) -> list[dict]:
+    """取得單一使用者在「這個群組」裡的偏好清單。嚴格限定 line_group_id + line_user_id。"""
+    doc = get_db().user_preferences.find_one(
+        {"line_group_id": line_group_id, "line_user_id": line_user_id}
+    )
+    return doc.get("preferences", []) if doc else []
+
+
+def get_group_preferences(line_group_id: str) -> list[dict]:
+    """
+    取得「這個群組」所有成員合併後的偏好清單，給 AI 組 context_text 用。
+
+    查詢條件只有 line_group_id，絕對不會撈到其他群組的偏好資料。
+    """
+    docs = get_db().user_preferences.find({"line_group_id": line_group_id})
+    preferences: list[dict] = []
+    for doc in docs:
+        for pref in doc.get("preferences", []):
+            preferences.append({
+                "line_user_id": doc.get("line_user_id"),
+                "type": pref.get("type"),
+                "value": pref.get("value"),
+                "updated_at": pref.get("updated_at"),
+            })
+    return preferences
 
 
 # ── 群組 ──────────────────────────────────────────────────────────
