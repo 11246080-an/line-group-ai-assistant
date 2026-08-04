@@ -18,6 +18,21 @@ CWA_WEATHER_CACHE_TTL_SECONDS = max(
     60,
     int(os.getenv("CWA_WEATHER_CACHE_TTL_SECONDS", "3600")),
 )
+ENABLE_VERBOSE_DEBUG = os.getenv("ENABLE_VERBOSE_DEBUG", "false").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+
+
+def _debug_print(message: str, payload: dict[str, Any] | None = None) -> None:
+    if not ENABLE_VERBOSE_DEBUG:
+        return
+    if payload is None:
+        print(message, flush=True)
+        return
+    print(message, payload, flush=True)
 
 COUNTY_ALIASES = {
     "基隆": "基隆市",
@@ -217,7 +232,7 @@ def run_weather_recommendation(
     )
     cached = get_api_query_cache("weather_cwa_36h", scoped_cache_key)
     if isinstance(cached, dict):
-        print(
+        _debug_print(
             "CWA weather cache hit:",
             {
                 "line_group_id": line_group_id,
@@ -267,7 +282,7 @@ def run_weather_recommendation(
         query_params=params,
         ttl_seconds=CWA_WEATHER_CACHE_TTL_SECONDS,
     )
-    print(
+    _debug_print(
         "CWA weather cache save:",
         {
             "line_group_id": line_group_id,

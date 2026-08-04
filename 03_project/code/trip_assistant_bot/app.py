@@ -81,10 +81,17 @@ app.config["MAX_CONTENT_LENGTH"] = max(
     1024,
     int(os.getenv("MAX_REQUEST_BODY_BYTES", str(1024 * 1024))),
 )
+ENABLE_VERBOSE_DEBUG = os.getenv("ENABLE_VERBOSE_DEBUG", "false").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 
 
 def _debug_print(message: str) -> None:
-    print(message, flush=True)
+    if ENABLE_VERBOSE_DEBUG:
+        print(message, flush=True)
 
 try:
     ensure_indexes()
