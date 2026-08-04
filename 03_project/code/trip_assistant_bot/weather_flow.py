@@ -219,7 +219,12 @@ def run_weather_recommendation(
     if isinstance(cached, dict):
         print(
             "CWA weather cache hit:",
-            {"county_name": county_name, "query_text": query_text},
+            {
+                "line_group_id": line_group_id,
+                "cache_key": scoped_cache_key,
+                "county_name": county_name,
+                "query_text": query_text,
+            },
         )
         return cached
 
@@ -261,5 +266,15 @@ def run_weather_recommendation(
         payload,
         query_params=params,
         ttl_seconds=CWA_WEATHER_CACHE_TTL_SECONDS,
+    )
+    print(
+        "CWA weather cache save:",
+        {
+            "line_group_id": line_group_id,
+            "cache_key": scoped_cache_key,
+            "county_name": county_name,
+            "query_text": query_text,
+            "ttl_seconds": CWA_WEATHER_CACHE_TTL_SECONDS,
+        },
     )
     return payload
