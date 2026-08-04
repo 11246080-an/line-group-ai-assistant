@@ -82,6 +82,10 @@ app.config["MAX_CONTENT_LENGTH"] = max(
     int(os.getenv("MAX_REQUEST_BODY_BYTES", str(1024 * 1024))),
 )
 
+
+def _debug_print(message: str) -> None:
+    print(message, flush=True)
+
 try:
     ensure_indexes()
     print("MongoDB 索引建立完成")
@@ -1777,6 +1781,9 @@ def handle_message(event: MessageEvent) -> None:
     line_user_id  = getattr(source, "user_id",  None) or ""
     conversation_key = _get_conversation_key(event)
 
+    _debug_print("=" * 50)
+    _debug_print(f"DEBUG 收到訊息：{user_text}")
+
     if user_text.lower() == "#reset":
         _reset_conversation_state(conversation_key)
         try:
@@ -1863,8 +1870,15 @@ def handle_message(event: MessageEvent) -> None:
             query_embedding=query_embedding,
             exclude_message_id=saved_message_id,
         )
+        _debug_print(
+            f"DEBUG 對話視窗 key={conversation_key}, "
+            f"messages={len(_recent_messages)}/{CONVERSATION_WINDOW_SIZE}"
+        )
+        _debug_print("DEBUG 送進 AI 的上下文：")
+        _debug_print(context_text)
         direct_reply = _reply_from_imported_itinerary(conversation_key, user_text)
         if direct_reply:
+            _debug_print(f"DEBUG 命中匯入行程直接回覆：{direct_reply}")
             _reply_text_if_allowed(
                 event,
                 conversation_key,
@@ -1875,6 +1889,8 @@ def handle_message(event: MessageEvent) -> None:
 
         result_obj = analyze_dialogue(context_text)
         result = result_obj.to_dict()
+        _debug_print("DEBUG AI 判斷結果：")
+        _debug_print(json.dumps(result, ensure_ascii=False, indent=4))
 
         # ── DB：儲存完整 AI 分析結果（失敗不中斷主流程）─────────
         try:
@@ -1907,6 +1923,7 @@ def handle_message(event: MessageEvent) -> None:
                 location_text=str(weather_payload["location_text"]),
                 time_text=str(weather_payload["time_text"]),
             ):
+                _debug_print("Weather recommendation flow handled after AI decision")
                 return
     except Exception as exc:
         _log_failure("Weather recommendation flow", exc)
@@ -1924,6 +1941,7 @@ def handle_message(event: MessageEvent) -> None:
                 result,
                 record_user_message=False,
             ):
+                _debug_print("Location recommendation flow handled after AI decision")
                 return
     except Exception as exc:
         _log_failure("Location recommendation flow", exc)
@@ -1941,14 +1959,21 @@ def handle_message(event: MessageEvent) -> None:
                 constraints=list(text_location_payload["constraints"]),
                 activity_types=list(text_location_payload["activity_types"]),
             ):
+                _debug_print("Text location recommendation flow handled after AI decision")
                 return
     except Exception as exc:
         _log_failure("Text location recommendation flow", exc)
 
     if not should_intervene:
+        _debug_print("AI 判斷不介入。")
         return
 
     if confidence_score < MIN_INTERVENTION_CONFIDENCE:
+        _debug_print(
+            "AI 有介入傾向，但信心不足，先不回覆。 "
+            f"(confidence_score={confidence_score:.2f}, "
+            f"threshold={MIN_INTERVENTION_CONFIDENCE:.2f})"
+        )
         return
 
     current_user_message_count = _get_user_message_count(conversation_key)
@@ -1969,9 +1994,11 @@ def handle_message(event: MessageEvent) -> None:
                     final_reply,
                 ):
                     app.logger.info("Suppressed a duplicate external-search reply")
+                    _debug_print("略過語意相近的重複回覆。")
                     return
 
                 if push_target_id and intermediate_reply:
+                    _debug_print(f"先回覆查詢中訊息：{intermediate_reply}")
                     _reply_text(line_bot_api, event.reply_token, intermediate_reply)
                     _mark_reply_sent(
                         conversation_key,
@@ -1987,6 +2014,7 @@ def handle_message(event: MessageEvent) -> None:
                 else:
                     fallback_text = final_reply or intermediate_reply
                     if fallback_text:
+                        _debug_print(f"準備回覆：{fallback_text}")
                         _reply_text(line_bot_api, event.reply_token, fallback_text)
                         _mark_reply_sent(
                             conversation_key,
@@ -2004,12 +2032,19 @@ def handle_message(event: MessageEvent) -> None:
                     current_user_message_count,
                 ):
                     app.logger.info("Suppressed a duplicate suggested reply")
+                    _debug_print(
+                        f"略過語意相近的重複回覆。 "
+                        f"(scenario_code={scenario_code}, text={suggested_reply})"
+                    )
                     return
 
+                _debug_print(f"準備回覆：{suggested_reply}")
                 _reply_text(line_bot_api, event.reply_token, suggested_reply)
                 _mark_reply_sent(conversation_key, scenario_code, suggested_reply)
+                _debug_print("已送出 LINE 回覆。")
             else:
                 app.logger.info("AI selected intervention without reply text")
+                _debug_print("AI 判斷要介入，但沒有可回覆文字。")
 
         except Exception as exc:
             _log_failure("LINE reply", exc)
