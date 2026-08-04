@@ -29,6 +29,21 @@ erDiagram
         string display_name
         string message_text
         datetime sent_at
+        array embedding "語意向量，供 RAG 相似度檢索用"
+        string topic_hint "主題標記，可為 null"
+        string conversation_key "同群組/room 的對話脈絡分組"
+        string message_role "user／bot"
+    }
+
+    api_query_cache {
+        ObjectId _id PK
+        string query_type
+        string query_key
+        object query_params
+        object result
+        datetime created_at
+        datetime updated_at
+        datetime expires_at
     }
 
     summaries {
@@ -122,6 +137,10 @@ erDiagram
 | `display_name` | string | 否 | 發送者顯示名稱 |
 | `message_text` | string | 是 | 訊息內容 |
 | `sent_at` | datetime | 是 | 發送時間（UTC） |
+| `embedding` | array\<float\> | 否 | 訊息語意向量，由 AI 後端計算後寫入；尚未計算時為 `null`，供 RAG 相似度檢索用 |
+| `topic_hint` | string | 否 | 主題標記，預設 `null` / 空字串，之後可放話題分類結果 |
+| `conversation_key` | string | 是 | 同一群組 / room 的對話脈絡分組 key；未指定時預設等於 `line_group_id` |
+| `message_role` | string | 是 | `user` 或 `bot`，方便過濾是誰發的訊息 |
 
 ---
 
@@ -223,7 +242,8 @@ erDiagram
 | `line_group_id` | string | 是 | 所屬群組 ID |
 | `preferences` | array | 是 | 偏好清單（見下方） |
 
-> `line_user_id` + `line_group_id` 組合唯一。
+> `line_user_id` + `line_group_id` 組合唯一。另有一個 `line_group_id` 單欄索引，
+> 支援「整個群組」的偏好查詢（見 `get_group_preferences()`）。
 
 **preferences 內嵌結構：**
 
@@ -232,6 +252,38 @@ erDiagram
 | `type` | string | 偏好類型（如 `飲食`、`交通`、`住宿`） |
 | `value` | string | 偏好值（如 `不吃辣`、`不開車`） |
 | `updated_at` | datetime | 最後更新時間（UTC） |
+
+**存取函式（`db.py`，皆嚴格以 `line_group_id` 隔離，不會跨群組讀寫）：**
+
+| 函式 | 說明 |
+|------|------|
+| `upsert_user_preference(line_group_id, line_user_id, preference_type, preference_value)` | 新增/更新單一使用者在該群組的一筆偏好 |
+| `get_user_preferences(line_group_id, line_user_id)` | 取得單一使用者在該群組的偏好清單 |
+| `get_group_preferences(line_group_id)` | 取得該群組所有成員合併後的偏好清單，給 AI 組 context 用 |
+
+`summaries` collection 對應「已確認條件」的讀取，見 `get_latest_summary(line_group_id)`（同樣只以 `line_group_id` 查詢）。
+
+---
+
+### 2.7 api_query_cache
+
+儲存外部 API（餐廳、天氣、路線等查詢）的回傳結果暫存，避免短時間內重複打外部 API。以 `query_type` + `query_key` 唯一識別一筆快取，重複查詢時直接 upsert。
+
+| 欄位 | 型態 | 必填 | 說明 |
+|------|------|------|------|
+| `_id` | ObjectId | 是 | 自動產生主鍵 |
+| `query_type` | string | 是 | 查詢類型（如 `restaurant` / `weather` / `movie`） |
+| `query_key` | string | 是 | 正規化後的查詢關鍵字 / 條件字串，與 `query_type` 組合唯一 |
+| `query_params` | object | 否 | 原始查詢條件，方便除錯或重新查詢 |
+| `result` | object | 否 | 外部 API 回傳結果（原樣存放） |
+| `created_at` | datetime | 是 | 建立時間（UTC） |
+| `updated_at` | datetime | 是 | 最後更新時間（UTC） |
+| `expires_at` | datetime | 是 | 到期時間（UTC），搭配 TTL 索引到期自動清除 |
+| `line_group_id` | string | 否 | 記錄是哪個群組觸發這次查詢，僅供追蹤/除錯，**不是**快取鍵的一部分 |
+
+> 外部 API 資料（天氣、餐廳、電影場次等）本身是公開資訊，預設跨群組共用同一份快取結果。
+> 若某個查詢類型的結果跟群組私有資訊綁定、不能共用，呼叫端要自己把 `line_group_id`
+> 編進 `query_key`（例如 `f"{line_group_id}:{query_key}"`），讓不同群組落在不同的快取鍵。
 
 ---
 
@@ -242,16 +294,22 @@ erDiagram
 | `groups` | `line_group_id` | 唯一索引 | 快速查找群組、防重複建立 |
 | `messages` | `line_group_id` + `sent_at DESC` | 複合索引 | 取得群組最近 N 筆訊息 |
 | `messages` | `line_user_id` | 單欄索引 | 查詢特定使用者訊息 |
+| `messages` | `conversation_key` + `sent_at DESC` | 複合索引 | 依對話脈絡取訊息 |
 | `summaries` | `line_group_id` + `window_start DESC` | 複合索引 | 取得群組最新分析結果 |
 | `itineraries` | `line_group_id` + `created_at DESC` | 複合索引 | 取得群組最新行程 |
 | `vote_sessions` | `line_group_id` + `status` | 複合索引 | 查詢進行中的投票 |
 | `user_preferences` | `line_user_id` + `line_group_id` | 唯一複合索引 | 快速查找偏好、防重複 |
+| `user_preferences` | `line_group_id` | 單欄索引 | 取得「整個群組」的偏好清單（`get_group_preferences()`） |
+| `api_query_cache` | `query_type` + `query_key` | 唯一複合索引 | 快速查找快取、防重複、支援 upsert |
+| `api_query_cache` | `expires_at` | TTL 索引（`expireAfterSeconds=0`） | 到期自動清除快取 |
+
+> `messages.embedding` 目前用 Python 端 brute-force 算 cosine similarity 做語意檢索（見 `get_similar_messages()`），未建立 Atlas Vector Search 索引；等訊息量變大或 cluster 有支援時可再補上 `$vectorSearch` 索引。
 
 ---
 
 ## 四、設計決策說明
 
-### 從 10 個 SQL 表縮減為 6 個 Collection？
+### 為何從 10 個 SQL 表縮減為 6 個 Collection？
 
 | 決策 | 原因 |
 |------|------|
