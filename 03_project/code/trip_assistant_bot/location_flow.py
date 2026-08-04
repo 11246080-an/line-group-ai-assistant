@@ -489,6 +489,7 @@ def _build_google_places_recommendation(
     latitude: float,
     longitude: float,
     location_source: str,
+    line_group_id: str = "",
 ) -> dict[str, Any]:
     api_key = os.getenv("GOOGLE_PLACES_API_KEY", "").strip()
     if not api_key:
@@ -500,7 +501,10 @@ def _build_google_places_recommendation(
         longitude=longitude,
         location_source=location_source,
     )
-    cached = get_api_query_cache("google_places_text_search", cache_key)
+    scoped_cache_key = (
+        f"{line_group_id}:{cache_key}" if line_group_id else cache_key
+    )
+    cached = get_api_query_cache("google_places_text_search", scoped_cache_key)
     if isinstance(cached, dict):
         LOGGER.info("Google Places coordinate cache hit")
         return cached
@@ -556,7 +560,7 @@ def _build_google_places_recommendation(
     }
     save_api_query_cache(
         "google_places_text_search",
-        cache_key,
+        scoped_cache_key,
         payload,
         query_params=request_body,
         ttl_seconds=GOOGLE_PLACES_CACHE_TTL_SECONDS,
@@ -571,6 +575,7 @@ def _build_google_places_text_recommendation(
     constraints: list[str] | None = None,
     activity_types: list[str] | None = None,
     location_source: str = "text_location",
+    line_group_id: str = "",
 ) -> dict[str, Any]:
     api_key = os.getenv("GOOGLE_PLACES_API_KEY", "").strip()
     if not api_key:
@@ -586,7 +591,10 @@ def _build_google_places_text_recommendation(
         raise RuntimeError("No text query available for Google Places text search.")
 
     cache_key = hashlib.sha256(text_query.encode("utf-8")).hexdigest()
-    cached = get_api_query_cache("google_places_text_query", cache_key)
+    scoped_cache_key = (
+        f"{line_group_id}:{cache_key}" if line_group_id else cache_key
+    )
+    cached = get_api_query_cache("google_places_text_query", scoped_cache_key)
     if isinstance(cached, dict):
         LOGGER.info("Google Places text cache hit")
         return cached
@@ -642,7 +650,7 @@ def _build_google_places_text_recommendation(
     }
     save_api_query_cache(
         "google_places_text_query",
-        cache_key,
+        scoped_cache_key,
         payload,
         query_params=request_body,
         ttl_seconds=GOOGLE_PLACES_CACHE_TTL_SECONDS,
@@ -1200,6 +1208,7 @@ def run_location_recommendation(
                 latitude=latitude,
                 longitude=longitude,
                 location_source=location_source,
+                line_group_id=line_group_id,
             )
         except Exception as exc:
             _log_external_failure("Google Places recommendation", exc)
@@ -1229,6 +1238,7 @@ def run_text_location_recommendation(
     location_text: str,
     constraints: list[str] | None = None,
     activity_types: list[str] | None = None,
+    line_group_id: str = "",
 ) -> dict[str, Any]:
     if os.getenv("GOOGLE_PLACES_API_KEY", "").strip():
         return _build_google_places_text_recommendation(
@@ -1237,6 +1247,7 @@ def run_text_location_recommendation(
             constraints=constraints,
             activity_types=activity_types,
             location_source="text_location",
+            line_group_id=line_group_id,
         )
 
     raise RuntimeError("GOOGLE_PLACES_API_KEY is not configured.")

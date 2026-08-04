@@ -710,6 +710,7 @@ def _handle_weather_recommendation_request(
     event: MessageEvent,
     conversation_key: str,
     scenario_code: str,
+    line_group_id: str,
     *,
     query_text: str,
     location_text: str,
@@ -719,6 +720,7 @@ def _handle_weather_recommendation_request(
         query_text=query_text,
         location_text=location_text,
         time_text=time_text,
+        line_group_id=line_group_id,
     )
     group_message = str(result.get("group_message") or "").strip()
     if not group_message:
@@ -805,6 +807,7 @@ def _handle_text_location_recommendation_request(
     event: MessageEvent,
     conversation_key: str,
     scenario_code: str,
+    line_group_id: str,
     *,
     query_text: str,
     location_text: str,
@@ -816,6 +819,7 @@ def _handle_text_location_recommendation_request(
         location_text=location_text,
         constraints=constraints,
         activity_types=activity_types,
+        line_group_id=line_group_id,
     )
     group_message = str(result.get("group_message") or "").strip()
     if not group_message:
@@ -1898,6 +1902,7 @@ def handle_message(event: MessageEvent) -> None:
                 event,
                 conversation_key,
                 scenario_code,
+                line_group_id,
                 query_text=str(weather_payload["query_text"]),
                 location_text=str(weather_payload["location_text"]),
                 time_text=str(weather_payload["time_text"]),
@@ -1930,6 +1935,7 @@ def handle_message(event: MessageEvent) -> None:
                 event,
                 conversation_key,
                 scenario_code,
+                line_group_id,
                 query_text=str(text_location_payload["query_text"]),
                 location_text=str(text_location_payload["location_text"]),
                 constraints=list(text_location_payload["constraints"]),

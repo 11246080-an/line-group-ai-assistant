@@ -195,6 +195,7 @@ def run_weather_recommendation(
     query_text: str,
     location_text: str = "",
     time_text: str = "",
+    line_group_id: str = "",
 ) -> dict[str, Any]:
     county_name = _normalize_county_name(location_text, query_text)
     if not county_name:
@@ -211,7 +212,10 @@ def run_weather_recommendation(
         raise RuntimeError("CWA_AUTHORIZATION_KEY is not configured.")
 
     cache_key = _build_weather_cache_key(county_name, query_text, time_text)
-    cached = get_api_query_cache("weather_cwa_36h", cache_key)
+    scoped_cache_key = (
+        f"{line_group_id}:{cache_key}" if line_group_id else cache_key
+    )
+    cached = get_api_query_cache("weather_cwa_36h", scoped_cache_key)
     if isinstance(cached, dict):
         print(
             "CWA weather cache hit:",
@@ -253,7 +257,7 @@ def run_weather_recommendation(
     }
     save_api_query_cache(
         "weather_cwa_36h",
-        cache_key,
+        scoped_cache_key,
         payload,
         query_params=params,
         ttl_seconds=CWA_WEATHER_CACHE_TTL_SECONDS,
