@@ -2,17 +2,26 @@ from __future__ import annotations
 
 import base64
 from functools import lru_cache
+import hashlib
+import hmac
 import json
+import os
 from pathlib import Path
 import re
 from dataclasses import dataclass
+import time
 from typing import Any
 
 
-ITINERARY_IMPORT_MARKER = "#TRIP_IMPORT_V1"
-SPOT_IMPORT_MARKER = "#TRIP_SPOT_IMPORT_V1"
+ITINERARY_IMPORT_MARKER = "#TRIP_IMPORT_V2"
+SPOT_IMPORT_MARKER = "#TRIP_SPOT_IMPORT_V2"
+LEGACY_IMPORT_MARKERS = ("#TRIP_IMPORT_V1", "#TRIP_SPOT_IMPORT_V1")
 ITINERARY_IMPORT_HEADER = "【Trip Assistant 行程匯入】"
 SPOT_IMPORT_HEADER = "【Trip Assistant 景點同步】"
+MAX_IMPORT_MESSAGE_CHARS = 12_000
+MAX_IMPORT_TOKEN_CHARS = 4_096
+DEFAULT_IMPORT_TOKEN_TTL_SECONDS = 15 * 60
+MAX_IMPORT_TOKEN_TTL_SECONDS = 30 * 60
 
 NEXT_STOP_KEYWORDS = (
     "\u4e0b\u4e00\u7ad9",
@@ -82,9 +91,57 @@ class LineImportCommand:
         return self.marker == SPOT_IMPORT_MARKER
 
 
+def create_signed_line_import_token(
+    *,
+    kind: str,
+    itinerary_id: str,
+    spot_id: str = "",
+) -> tuple[str, str]:
+    normalized_kind = str(kind or "").strip().casefold()
+    normalized_itinerary_id = _bounded_identifier(itinerary_id, "itinerary_id")
+    normalized_spot_id = _bounded_identifier(spot_id, "spot_id", required=False)
+
+    if normalized_kind == "itinerary":
+        _lookup_itinerary_payload(itinerary_id=normalized_itinerary_id)
+        marker = ITINERARY_IMPORT_MARKER
+    elif normalized_kind == "spot":
+        if not normalized_spot_id:
+            raise LineImportError("景點匯入缺少景點編號。")
+        _lookup_spot_payload(
+            itinerary_id=normalized_itinerary_id,
+            spot_id=normalized_spot_id,
+        )
+        marker = SPOT_IMPORT_MARKER
+    else:
+        raise LineImportError("不支援的 LINE 匯入類型。")
+
+    now = int(time.time())
+    claims = {
+        "v": 2,
+        "kind": normalized_kind,
+        "itinerary_id": normalized_itinerary_id,
+        "spot_id": normalized_spot_id,
+        "iat": now,
+        "exp": now + DEFAULT_IMPORT_TOKEN_TTL_SECONDS,
+    }
+    encoded_claims = _base64url_encode(
+        json.dumps(claims, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    )
+    signature = hmac.new(
+        _line_import_signing_secret(),
+        encoded_claims.encode("ascii"),
+        hashlib.sha256,
+    ).digest()
+    return marker, f"{encoded_claims}.{_base64url_encode(signature)}"
+
+
 def extract_line_import_command(text: str) -> LineImportCommand | None:
     message = text.strip()
     if not message:
+        return None
+    if len(message) > MAX_IMPORT_MESSAGE_CHARS:
+        if _looks_like_line_import(message):
+            raise LineImportError("LINE 匯入訊息過長。")
         return None
 
     for marker in (ITINERARY_IMPORT_MARKER, SPOT_IMPORT_MARKER):
@@ -92,45 +149,105 @@ def extract_line_import_command(text: str) -> LineImportCommand | None:
             continue
 
         marker_index = message.index(marker)
-        summary_text = message[:marker_index].strip()
-        payload_text = message[marker_index + len(marker) :].strip()
+        token_text = message[marker_index + len(marker) :].strip()
+        if not token_text or len(token_text) > MAX_IMPORT_TOKEN_CHARS or any(
+            char.isspace() for char in token_text
+        ):
+            raise LineImportError("LINE 匯入簽章格式錯誤。")
 
         return LineImportCommand(
             marker=marker,
-            payload=_decode_shared_payload(
-                marker=marker,
-                summary_text=summary_text,
-                payload_text=payload_text,
-            ),
+            payload=_verify_signed_line_import_token(marker, token_text),
         )
 
-    inferred_marker = _infer_marker_from_summary(message)
-    if inferred_marker is None:
-        return None
+    if _looks_like_line_import(message):
+        raise LineImportError("此 LINE 匯入訊息未簽章或版本過舊，請從網站重新分享。")
 
-    return LineImportCommand(
-        marker=inferred_marker,
-        payload=_decode_shared_payload(
-            marker=inferred_marker,
-            summary_text=message,
-            payload_text="",
-        ),
+    return None
+
+
+def _verify_signed_line_import_token(marker: str, token: str) -> dict[str, Any]:
+    encoded_claims, separator, encoded_signature = token.partition(".")
+    if not separator or not encoded_claims or not encoded_signature or "." in encoded_signature:
+        raise LineImportError("LINE 匯入簽章格式錯誤。")
+
+    expected_signature = hmac.new(
+        _line_import_signing_secret(),
+        encoded_claims.encode("ascii"),
+        hashlib.sha256,
+    ).digest()
+    try:
+        supplied_signature = _base64url_decode(encoded_signature)
+    except ValueError as exc:
+        raise LineImportError("LINE 匯入簽章格式錯誤。") from exc
+    if not hmac.compare_digest(supplied_signature, expected_signature):
+        raise LineImportError("LINE 匯入簽章驗證失敗。")
+
+    try:
+        claims = json.loads(_base64url_decode(encoded_claims).decode("utf-8"))
+    except (ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise LineImportError("LINE 匯入內容格式錯誤。") from exc
+    if not isinstance(claims, dict) or claims.get("v") != 2:
+        raise LineImportError("不支援的 LINE 匯入版本。")
+
+    now = int(time.time())
+    try:
+        issued_at = int(claims.get("iat"))
+        expires_at = int(claims.get("exp"))
+    except (TypeError, ValueError) as exc:
+        raise LineImportError("LINE 匯入期限格式錯誤。") from exc
+    if issued_at > now + 60 or expires_at <= now:
+        raise LineImportError("LINE 匯入簽章已過期，請從網站重新分享。")
+    if expires_at - issued_at <= 0 or expires_at - issued_at > MAX_IMPORT_TOKEN_TTL_SECONDS:
+        raise LineImportError("LINE 匯入簽章期限無效。")
+
+    kind = str(claims.get("kind") or "").casefold()
+    itinerary_id = _bounded_identifier(claims.get("itinerary_id"), "itinerary_id")
+    spot_id = _bounded_identifier(claims.get("spot_id"), "spot_id", required=False)
+    if marker == ITINERARY_IMPORT_MARKER and kind == "itinerary":
+        return _lookup_itinerary_payload(itinerary_id=itinerary_id)
+    if marker == SPOT_IMPORT_MARKER and kind == "spot" and spot_id:
+        return _lookup_spot_payload(itinerary_id=itinerary_id, spot_id=spot_id)
+    raise LineImportError("LINE 匯入類型與簽章內容不符。")
+
+
+def _looks_like_line_import(message: str) -> bool:
+    return any(
+        marker in message
+        for marker in (
+            ITINERARY_IMPORT_MARKER,
+            SPOT_IMPORT_MARKER,
+            *LEGACY_IMPORT_MARKERS,
+            ITINERARY_IMPORT_HEADER,
+            SPOT_IMPORT_HEADER,
+        )
     )
 
-    return None
+
+def _line_import_signing_secret() -> bytes:
+    secret = os.getenv("LINE_IMPORT_SIGNING_SECRET", "").strip()
+    if len(secret) < 32:
+        raise LineImportError("LINE 匯入簽章服務尚未完成安全設定。")
+    return secret.encode("utf-8")
 
 
-def _infer_marker_from_summary(message: str) -> str | None:
-    lines = [line.strip() for line in message.splitlines() if line.strip()]
-    if not lines:
-        return None
+def _bounded_identifier(value: Any, field_name: str, *, required: bool = True) -> str:
+    normalized = str(value or "").strip()
+    if required and not normalized:
+        raise LineImportError(f"LINE 匯入缺少 {field_name}。")
+    if len(normalized) > 128 or (normalized and not re.fullmatch(r"[A-Za-z0-9_-]+", normalized)):
+        raise LineImportError(f"LINE 匯入的 {field_name} 格式無效。")
+    return normalized
 
-    first_line = lines[0]
-    if first_line == SPOT_IMPORT_HEADER:
-        return SPOT_IMPORT_MARKER
-    if first_line == ITINERARY_IMPORT_HEADER:
-        return ITINERARY_IMPORT_MARKER
-    return None
+
+def _base64url_encode(value: bytes) -> str:
+    return base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
+
+
+def _base64url_decode(value: str) -> bytes:
+    if not value or not re.fullmatch(r"[A-Za-z0-9_-]+", value):
+        raise ValueError("invalid base64url")
+    return base64.urlsafe_b64decode(value + ("=" * (-len(value) % 4)))
 
 
 def normalize_itinerary_payload(payload: dict[str, Any]) -> dict[str, Any]:
@@ -355,135 +472,6 @@ def create_placeholder_itinerary_from_spot(spot_payload: dict[str, Any]) -> dict
     }
 
 
-def _decode_shared_payload(
-    *,
-    marker: str,
-    summary_text: str,
-    payload_text: str,
-) -> dict[str, Any]:
-    if not payload_text:
-        return _decode_summary_payload(marker=marker, summary_text=summary_text)
-
-    if "{" in payload_text and "}" in payload_text:
-        return _load_json_object(payload_text)
-
-    lookup_payload = _decode_lookup_payload(marker=marker, payload_text=payload_text)
-    if lookup_payload is not None:
-        return lookup_payload
-
-    candidate = next((line.strip() for line in payload_text.splitlines() if line.strip()), "")
-    if not candidate:
-        raise LineImportError("分享訊息中沒有有效的資料內容。")
-
-    padding = "=" * (-len(candidate) % 4)
-    try:
-        decoded = base64.urlsafe_b64decode(candidate + padding).decode("utf-8")
-    except (ValueError, UnicodeDecodeError) as exc:
-        raise LineImportError("分享資料無法解碼。") from exc
-
-    return _load_json_object(decoded)
-
-
-def _decode_summary_payload(*, marker: str, summary_text: str) -> dict[str, Any]:
-    lines = [line.strip() for line in summary_text.splitlines() if line.strip()]
-    if marker == SPOT_IMPORT_MARKER:
-        itinerary_title, spot_name = _extract_spot_titles(lines)
-        return _lookup_spot_payload(
-            itinerary_title=itinerary_title,
-            spot_name=spot_name,
-        )
-
-    itinerary_title = _extract_itinerary_title(lines)
-    return _lookup_itinerary_payload(itinerary_title=itinerary_title)
-
-
-def _decode_lookup_payload(*, marker: str, payload_text: str) -> dict[str, Any] | None:
-    fields, saw_lookup_field = _parse_lookup_fields(payload_text)
-    if not saw_lookup_field:
-        return None
-
-    itinerary_id = fields.get("itinerary_id", "")
-    if marker == SPOT_IMPORT_MARKER:
-        if not itinerary_id:
-            raise LineImportError("分享訊息缺少行程編號。")
-        return _lookup_spot_payload(
-            itinerary_id=itinerary_id,
-            spot_id=fields.get("spot_id", ""),
-            spot_name=fields.get("spot_name", ""),
-            sequence=_as_int(fields.get("sequence"), default=0),
-        )
-
-    if not itinerary_id:
-        raise LineImportError("分享訊息缺少行程編號。")
-    return _lookup_itinerary_payload(itinerary_id=itinerary_id)
-
-
-def _parse_lookup_fields(payload_text: str) -> tuple[dict[str, str], bool]:
-    field_aliases = {
-        "行程編號": "itinerary_id",
-        "itinerary_id": "itinerary_id",
-        "景點編號": "spot_id",
-        "spot_id": "spot_id",
-        "景點名稱": "spot_name",
-        "spot_name": "spot_name",
-        "站次": "sequence",
-        "sequence": "sequence",
-    }
-
-    fields: dict[str, str] = {}
-    saw_lookup_field = False
-
-    for raw_line in payload_text.splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-
-        separator = "：" if "：" in line else ":"
-        if separator not in line:
-            continue
-
-        key, value = line.split(separator, 1)
-        normalized_key = field_aliases.get(key.strip().lower()) or field_aliases.get(key.strip())
-        if not normalized_key:
-            continue
-
-        saw_lookup_field = True
-        fields[normalized_key] = value.strip()
-
-    return fields, saw_lookup_field
-
-
-def _extract_itinerary_title(lines: list[str]) -> str:
-    for line in lines:
-        if line.startswith("【Trip Assistant"):
-            continue
-        if line.startswith("路線："):
-            continue
-        if line.startswith("請 AI "):
-            continue
-        return line
-
-    raise LineImportError("分享訊息中找不到行程名稱。")
-
-
-def _extract_spot_titles(lines: list[str]) -> tuple[str, str]:
-    for line in lines:
-        if line.startswith("【Trip Assistant"):
-            continue
-        if line.startswith("請把群組"):
-            continue
-
-        parts = re.split(r"\s*/\s*", line, maxsplit=1)
-        if len(parts) != 2:
-            continue
-
-        itinerary_title, spot_name = (part.strip() for part in parts)
-        if itinerary_title and spot_name:
-            return itinerary_title, spot_name
-
-    raise LineImportError("分享訊息中找不到景點對應資訊。")
-
-
 @lru_cache(maxsize=1)
 def _load_trip_website_lookup() -> dict[str, Any]:
     data_path = Path(__file__).resolve().parents[2] / "trip_website" / "src" / "data.js"
@@ -641,22 +629,6 @@ def _slugify(value: str) -> str:
     text = re.sub(r"[^\w-]+", "", text)
     text = re.sub(r"-{2,}", "-", text)
     return text.strip("-")
-
-
-def _load_json_object(text: str) -> dict[str, Any]:
-    start = text.find("{")
-    end = text.rfind("}")
-    if start == -1 or end == -1 or end <= start:
-        raise LineImportError("分享訊息中找不到有效的 JSON 物件。")
-
-    try:
-        data = json.loads(text[start : end + 1])
-    except json.JSONDecodeError as exc:
-        raise LineImportError("分享資料不是有效的 JSON。") from exc
-
-    if not isinstance(data, dict):
-        raise LineImportError("分享資料解碼後必須是 JSON 物件。")
-    return data
 
 
 def _normalize_spots(raw_spots: Any) -> list[dict[str, Any]]:

@@ -4,6 +4,10 @@
   const DEFAULT_ZOOM = 8;
   const MOBILE_QUERY = "(max-width: 760px)";
   const LINE_SHARE_URL = "https://line.me/R/share?text=";
+  const LION_AD_URL = "https://travel.liontravel.com/category/zh-tw/taiwan/penghu";
+  const launchParams = parseLaunchParams();
+  const sharedSessionToken = normalizeSessionToken(launchParams.get("session_token"));
+  scrubSensitiveLaunchParams();
 
   const state = {
     itineraries: normalizeItineraries(Array.isArray(window.ITINERARIES) ? window.ITINERARIES : []),
@@ -21,6 +25,8 @@
     hasRequestedLocation: false,
     hasShownLocationPrompt: false,
     lastUserLocation: null,
+    sharedSessionToken,
+    isLoadingSharedLocation: false,
     markerEntries: [],
     sheetHeight: 38,
     sheetSnapPoints: [32, 52, 78],
@@ -71,8 +77,64 @@
     renderAll();
     resetMobileSheetScroll();
     fitSelectedAfterPaint(false);
-    requestMobileLocationOnOpen();
+    setupLionAdModal();
+    initializeLocationSource();
     restartCarouselAutoplay();
+  }
+
+  function setupLionAdModal() {
+    const modal = document.createElement("div");
+    modal.className = "lion-ad-modal is-visible";
+    modal.setAttribute("role", "dialog");
+    modal.setAttribute("aria-modal", "true");
+    modal.setAttribute("aria-label", "雄獅旅遊活動廣告");
+    modal.innerHTML = `
+      <div class="lion-ad-content">
+        <a class="lion-ad-link" href="${LION_AD_URL}" target="_blank" rel="noopener noreferrer" aria-label="前往雄獅旅遊官網查看澎湖花火節行程">
+          <div class="lion-ad-card">
+            <div class="lion-ad-visual">
+              <img
+                class="lion-ad-campaign-image"
+                src="assets/penghu-fireworks-hd.png"
+                alt="澎湖花火節海上煙火"
+              />
+              <div class="lion-ad-overlay">
+                <span class="lion-ad-ribbon">2026 澎湖夏日限定</span>
+                <p>PENGHU FIREWORKS FESTIVAL</p>
+                <h2>澎湖花火節</h2>
+                <strong>海上煙火・浪漫跳島・自由行 3 日</strong>
+                <div class="lion-ad-offer-pill">
+                  <span>精選飯店自由選</span>
+                  <b><small>TWD</small> 7,699 <small>起</small></b>
+                </div>
+              </div>
+            </div>
+          </div>
+        </a>
+        <button class="lion-ad-close" type="button" aria-label="關閉廣告">×</button>
+      </div>
+    `;
+    document.body.appendChild(modal);
+
+    const closeModal = () => {
+      modal.classList.remove("is-visible");
+      window.setTimeout(() => modal.remove(), 220);
+      document.removeEventListener("keydown", handleKeydown);
+    };
+
+    const handleKeydown = (event) => {
+      if (event.key === "Escape") {
+        closeModal();
+      }
+    };
+
+    modal.addEventListener("click", (event) => {
+      if (event.target === modal) {
+        closeModal();
+      }
+    });
+    modal.querySelector(".lion-ad-close")?.addEventListener("click", closeModal);
+    document.addEventListener("keydown", handleKeydown);
   }
 
   function setupResponsiveBehavior() {
@@ -147,8 +209,65 @@
     state.map.addControl(new LocateControl());
   }
 
+  function initializeLocationSource() {
+    if (!state.sharedSessionToken) {
+      requestMobileLocationOnOpen();
+      return;
+    }
+
+    state.hasRequestedLocation = true;
+    requestSharedSessionLocation();
+  }
+
+  async function requestSharedSessionLocation() {
+    if (state.isLoadingSharedLocation || !state.sharedSessionToken) return;
+
+    state.isLoadingSharedLocation = true;
+    showLocationMessage("正在同步 LINE 共享定位...", 4200);
+
+    try {
+      const response = await fetch(buildApiUrl("api/liff/location-session"), {
+          method: "POST",
+          headers: {
+            Accept: "application/json",
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ session_token: state.sharedSessionToken }),
+          cache: "no-store",
+          credentials: "same-origin",
+        });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || !payload.ok || !payload.location) {
+        throw new Error(payload.error || "Shared location request failed");
+      }
+
+      const applied = applyResolvedLocation(payload.location, {
+        flyTo: true,
+        showFeedback: true,
+        feedbackMessage: "已同步 LINE 的定位位置。",
+      });
+      if (!applied) {
+        throw new Error("Shared location payload is invalid");
+      }
+    } catch (error) {
+      console.warn("Shared LIFF location fetch failed", error);
+      state.hasRequestedLocation = false;
+      showLocationMessage("LINE 定位資料不可用，改用目前裝置定位。", 3400);
+      requestMobileLocationOnOpen();
+    } finally {
+      state.isLoadingSharedLocation = false;
+    }
+  }
+
   function requestMobileLocationOnOpen() {
-    if (!state.isMobile || state.hasRequestedLocation || state.hasShownLocationPrompt) return;
+    if (
+      !state.isMobile ||
+      state.hasRequestedLocation ||
+      state.hasShownLocationPrompt ||
+      state.isLoadingSharedLocation
+    ) {
+      return;
+    }
     window.setTimeout(() => {
       showMobileLocationPrompt();
     }, 700);
@@ -240,16 +359,33 @@
   }
 
   function handleLocationSuccess(position, { flyTo = false, showFeedback = false } = {}) {
-    if (!state.map) return;
+    return applyResolvedLocation(
+      {
+        latitude: position.coords.latitude,
+        longitude: position.coords.longitude,
+        accuracy: position.coords.accuracy,
+      },
+      {
+        flyTo,
+        showFeedback,
+      }
+    );
+  }
 
-    const { latitude, longitude, accuracy } = position.coords;
+  function applyResolvedLocation(
+    { latitude, longitude, accuracy },
+    { flyTo = false, showFeedback = false, feedbackMessage = "已定位到目前位置。" } = {}
+  ) {
+    if (!state.map) return false;
+    if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return false;
+
     const latLng = [latitude, longitude];
     const radius = Number.isFinite(accuracy) ? accuracy : 30;
     const previousLocation = state.lastUserLocation;
     const movedMeters = previousLocation ? distanceMeters(previousLocation.latLng, latLng) : Infinity;
     const accuracyDelta = previousLocation ? Math.abs(previousLocation.radius - radius) : Infinity;
 
-    if (!flyTo && previousLocation && movedMeters < 8 && accuracyDelta < 12) return;
+    if (!flyTo && previousLocation && movedMeters < 8 && accuracyDelta < 12) return true;
 
     state.lastUserLocation = { latLng, radius };
 
@@ -286,8 +422,10 @@
     }
 
     if (showFeedback) {
-      showLocationMessage("已定位到目前位置。", 1400);
+      showLocationMessage(feedbackMessage, 1600);
     }
+
+    return true;
   }
 
   function handleLocationError(error) {
@@ -439,7 +577,17 @@
         return;
       }
 
-      const shareText = buildLineShareText(payloadData);
+      let signedImport;
+      try {
+        showImportFeedback(trigger, "正在建立安全匯入");
+        signedImport = await requestSignedLineImport(payloadData);
+      } catch (_error) {
+        showImportFeedback(trigger, "簽章失敗");
+        window.alert("目前無法建立安全的 LINE 匯入訊息，請稍後再試。");
+        return;
+      }
+
+      const shareText = buildLineShareText(payloadData, signedImport);
       await copyLineImportPayload(shareText);
       showImportFeedback(
         trigger,
@@ -898,12 +1046,46 @@
     }
   }
 
-  function buildLineShareText(payloadData) {
+  async function requestSignedLineImport(payloadData) {
+    const isSpot = payloadData.kind === "travel_spot_import";
+    const response = await fetch(buildApiUrl("api/trip/import/sign"), {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        kind: isSpot ? "spot" : "itinerary",
+        itinerary_id: String(payloadData.itinerary_id || ""),
+        spot_id: isSpot ? String(payloadData.spot_id || "") : "",
+      }),
+      cache: "no-store",
+      credentials: "same-origin",
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok || !result.ok) {
+      throw new Error("Import signing failed");
+    }
+
+    const marker = String(result.marker || "");
+    const token = String(result.token || "");
+    if (!/^#TRIP_(?:SPOT_)?IMPORT_V2$/.test(marker)) {
+      throw new Error("Invalid import marker");
+    }
+    if (!/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(token) || token.length > 4096) {
+      throw new Error("Invalid import token");
+    }
+    return { marker, token };
+  }
+
+  function buildLineShareText(payloadData, signedImport) {
     if (payloadData.kind === "travel_spot_import") {
       return [
         "【Trip Assistant 景點同步】",
         `${payloadData.itinerary_title || "目前行程"} / ${payloadData.spot_name || "景點"}`,
         "請把群組目前討論焦點切到這一站，並接著提供下一站建議。",
+        signedImport.marker,
+        signedImport.token,
       ].join("\n");
     }
 
@@ -916,6 +1098,8 @@
       payloadData.title || "未命名行程",
       routePreview ? `路線：${routePreview}` : "",
       "請 AI 旅遊行程助理匯入這份群組行程，之後依這份內容提供建議。",
+      signedImport.marker,
+      signedImport.token,
     ].filter(Boolean).join("\n");
   }
 
@@ -999,6 +1183,46 @@
     if (type === "自然" || type === "山城") return { className: "nature", label: "景" };
     return { className: "city", label: "景" };
   }
+
+  function parseLaunchParams() {
+    const params = new URLSearchParams(window.location.hash.replace(/^#/, ""));
+    const queryParams = new URLSearchParams(window.location.search);
+    if (!params.get("session_token") && queryParams.get("session_token")) {
+      params.set("session_token", queryParams.get("session_token"));
+    }
+    const nestedState = queryParams.get("liff.state") || "";
+    if (!nestedState) {
+      return params;
+    }
+
+    const decodedState = nestedState.startsWith("?")
+      ? nestedState.slice(1)
+      : nestedState;
+    const nestedParams = new URLSearchParams(decodedState);
+
+    if (!params.get("session_token") && nestedParams.get("session_token")) {
+      params.set("session_token", nestedParams.get("session_token"));
+    }
+    return params;
+  }
+
+  function normalizeSessionToken(value) {
+    const token = String(value || "").trim();
+    return /^[A-Za-z0-9_-]{32,128}$/.test(token) ? token : "";
+  }
+
+  function scrubSensitiveLaunchParams() {
+    const url = new URL(window.location.href);
+    url.searchParams.delete("session_token");
+    url.searchParams.delete("api_base");
+    url.hash = "";
+    window.history.replaceState(null, "", `${url.pathname}${url.search}`);
+  }
+
+  function buildApiUrl(path) {
+    return new URL(String(path || "").replace(/^\/+/, ""), `${window.location.origin}/`).toString();
+  }
+
   function normalizeItineraries(itineraries) {
     return itineraries.map((itinerary) => {
       const id = itinerary.id || slugify(itinerary.title);

@@ -1,14 +1,18 @@
 from collections import deque
 from dataclasses import dataclass, field
+import hashlib
 import json
+import math
 import os
 import threading
 import time
 from typing import Any
+from urllib.parse import urlparse
 from uuid import uuid4
 
 from dotenv import load_dotenv
 from flask import Flask, abort, jsonify, request, send_from_directory
+import requests as http_requests
 
 from linebot.v3 import WebhookHandler
 from linebot.v3.exceptions import InvalidSignatureError
@@ -37,6 +41,7 @@ from ai_linebot_core.app.line_import import (
     build_itinerary_followup_reply,
     build_itinerary_import_reply,
     build_spot_import_reply,
+    create_signed_line_import_token,
     create_focus_spot_from_import,
     create_placeholder_itinerary_from_spot,
     extract_line_import_command,
@@ -54,6 +59,7 @@ from db import (
 )
 from location_flow import (
     build_liff_url,
+    claim_recommendation_session,
     clear_recent_location_context,
     create_recommendation_session,
     finalize_session_result,
@@ -71,12 +77,16 @@ from weather_flow import run_weather_recommendation
 load_dotenv()
 
 app = Flask(__name__)
+app.config["MAX_CONTENT_LENGTH"] = max(
+    1024,
+    int(os.getenv("MAX_REQUEST_BODY_BYTES", str(1024 * 1024))),
+)
 
 try:
     ensure_indexes()
     print("MongoDB 索引建立完成")
-except Exception as _db_exc:
-    print(f"MongoDB 連線失敗，繼續啟動（無持久化）：{_db_exc}")
+except Exception:
+    print("MongoDB 連線失敗，繼續啟動（無持久化）。")
 
 configuration = Configuration(access_token=os.getenv("LINE_CHANNEL_ACCESS_TOKEN"))
 handler = WebhookHandler(os.getenv("LINE_CHANNEL_SECRET"))
@@ -106,6 +116,236 @@ SEMANTIC_DUPLICATE_SIMILARITY_THRESHOLD = float(
 TOPIC_JUDGE_HISTORY_LIMIT = max(1, int(os.getenv("TOPIC_JUDGE_HISTORY_LIMIT", "6")))
 DEFAULT_FINAL_REPLY = "我先整理一個方向給大家參考。"
 LIFF_LOCATION_DIR = os.path.join(app.root_path, "liff_app")
+LIFF_MAX_JSON_BYTES = max(1024, int(os.getenv("LIFF_MAX_JSON_BYTES", "8192")))
+LIFF_MAX_ACCURACY_METERS = max(
+    0.0,
+    float(os.getenv("LIFF_MAX_ACCURACY_METERS", "100000")),
+)
+LIFF_AUTH_TIMEOUT_SECONDS = max(
+    1.0,
+    float(os.getenv("LIFF_AUTH_TIMEOUT_SECONDS", "5")),
+)
+LIFF_RATE_LIMIT_WINDOW_SECONDS = max(
+    1,
+    int(os.getenv("LIFF_RATE_LIMIT_WINDOW_SECONDS", "60")),
+)
+LIFF_RATE_LIMIT_PER_IP = max(1, int(os.getenv("LIFF_RATE_LIMIT_PER_IP", "20")))
+LIFF_RATE_LIMIT_PER_USER = max(1, int(os.getenv("LIFF_RATE_LIMIT_PER_USER", "5")))
+LINE_IMPORT_MAX_JSON_BYTES = max(
+    512,
+    int(os.getenv("LINE_IMPORT_MAX_JSON_BYTES", "2048")),
+)
+LINE_IMPORT_RATE_LIMIT_PER_IP = max(
+    1,
+    int(os.getenv("LINE_IMPORT_RATE_LIMIT_PER_IP", "30")),
+)
+WEBHOOK_DEDUP_TTL_SECONDS = max(
+    60,
+    int(os.getenv("WEBHOOK_DEDUP_TTL_SECONDS", str(24 * 60 * 60))),
+)
+CONVERSATION_STATE_TTL_SECONDS = max(
+    60,
+    int(os.getenv("CONVERSATION_STATE_TTL_SECONDS", str(6 * 60 * 60))),
+)
+LIFF_ALLOWED_MAP_HOSTS = tuple(
+    host.strip().casefold()
+    for host in os.getenv(
+        "LIFF_ALLOWED_MAP_HOSTS",
+        "google.com,maps.google.com,maps.app.goo.gl",
+    ).split(",")
+    if host.strip()
+)
+
+
+def _log_failure(operation: str, exc: BaseException) -> None:
+    """Log an operation failure without leaking request data or exception text."""
+    app.logger.error("%s failed (%s)", operation, type(exc).__name__)
+
+
+def _expected_liff_channel_id() -> str:
+    configured_channel_id = os.getenv("LINE_LOGIN_CHANNEL_ID", "").strip()
+    if configured_channel_id:
+        return configured_channel_id
+
+    liff_id_prefix = os.getenv("LIFF_ID", "").strip().split("-", 1)[0]
+    return liff_id_prefix if liff_id_prefix.isdigit() else ""
+
+
+def _extract_bearer_token() -> str:
+    authorization = request.headers.get("Authorization", "").strip()
+    scheme, separator, token = authorization.partition(" ")
+    if separator and scheme.casefold() == "bearer":
+        normalized_token = token.strip()
+        if 1 <= len(normalized_token) <= 4096:
+            return normalized_token
+    return ""
+
+
+def _verify_liff_access_token(access_token: str) -> str | None:
+    """Validate a LIFF access token and return its LINE user ID."""
+    expected_channel_id = _expected_liff_channel_id()
+    if not expected_channel_id:
+        app.logger.error("LIFF authentication is unavailable: channel ID is not configured")
+        return None
+
+    try:
+        verification_response = http_requests.get(
+            "https://api.line.me/oauth2/v2.1/verify",
+            params={"access_token": access_token},
+            timeout=LIFF_AUTH_TIMEOUT_SECONDS,
+            allow_redirects=False,
+        )
+        if verification_response.status_code != 200:
+            return None
+        verification = verification_response.json()
+        if not isinstance(verification, dict):
+            return None
+        if str(verification.get("client_id") or "") != expected_channel_id:
+            return None
+        if int(verification.get("expires_in") or 0) <= 0:
+            return None
+
+        profile_response = http_requests.get(
+            "https://api.line.me/v2/profile",
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=LIFF_AUTH_TIMEOUT_SECONDS,
+            allow_redirects=False,
+        )
+        if profile_response.status_code != 200:
+            return None
+        profile = profile_response.json()
+        if not isinstance(profile, dict):
+            return None
+        line_user_id = str(profile.get("userId") or "").strip()
+        return line_user_id or None
+    except (http_requests.RequestException, TypeError, ValueError) as exc:
+        _log_failure("LIFF token verification", exc)
+        return None
+
+
+_rate_limit_lock = threading.Lock()
+_rate_limit_buckets: dict[tuple[str, str], deque[float]] = {}
+_webhook_dedup_lock = threading.Lock()
+_processed_webhook_events: dict[str, float] = {}
+
+
+def _client_ip_address() -> str:
+    if os.getenv("TRUST_PROXY_IP_HEADERS", "").strip().casefold() in {"1", "true", "yes"}:
+        forwarded = request.headers.get("CF-Connecting-IP", "").strip()
+        if forwarded:
+            return forwarded[:128]
+    return (request.remote_addr or "unknown")[:128]
+
+
+def _is_rate_limited(scope: str, identity: str, limit: int) -> bool:
+    now = time.monotonic()
+    cutoff = now - LIFF_RATE_LIMIT_WINDOW_SECONDS
+    bucket_key = (scope, identity)
+
+    with _rate_limit_lock:
+        for key, bucket in list(_rate_limit_buckets.items()):
+            while bucket and bucket[0] <= cutoff:
+                bucket.popleft()
+            if not bucket:
+                _rate_limit_buckets.pop(key, None)
+
+        bucket = _rate_limit_buckets.setdefault(bucket_key, deque())
+        if len(bucket) >= limit:
+            return True
+        bucket.append(now)
+        return False
+
+
+def _claim_webhook_event(event_id: str) -> bool:
+    now = time.monotonic()
+    cutoff = now - WEBHOOK_DEDUP_TTL_SECONDS
+    with _webhook_dedup_lock:
+        for stored_id, processed_at in list(_processed_webhook_events.items()):
+            if processed_at <= cutoff:
+                _processed_webhook_events.pop(stored_id, None)
+        if event_id in _processed_webhook_events:
+            return False
+        _processed_webhook_events[event_id] = now
+        return True
+
+
+def _release_webhook_event(event_id: str) -> None:
+    with _webhook_dedup_lock:
+        _processed_webhook_events.pop(event_id, None)
+
+
+def _sanitize_maps_url(value: Any) -> str:
+    candidate = str(value or "").strip()
+    if not candidate or len(candidate) > 2048:
+        return ""
+    try:
+        parsed = urlparse(candidate)
+    except ValueError:
+        return ""
+    hostname = (parsed.hostname or "").casefold()
+    if parsed.scheme.casefold() != "https" or not hostname or parsed.username or parsed.password:
+        return ""
+    if not any(hostname == host or hostname.endswith(f".{host}") for host in LIFF_ALLOWED_MAP_HOSTS):
+        return ""
+    return candidate
+
+
+def _public_liff_result(result: dict[str, Any], *, synced_to_group: bool) -> dict[str, Any]:
+    raw_results = result.get("results") or []
+    if not isinstance(raw_results, list):
+        raw_results = []
+    public_results: list[dict[str, Any]] = []
+    for raw_item in raw_results[:20]:
+        if not isinstance(raw_item, dict):
+            continue
+        item: dict[str, Any] = {}
+        for field_name, max_length in (
+            ("name", 200),
+            ("subtitle", 500),
+            ("description", 2000),
+            ("address", 500),
+        ):
+            value = str(raw_item.get(field_name) or "").strip()
+            if value:
+                item[field_name] = value[:max_length]
+        try:
+            distance_km = float(raw_item.get("distance_km"))
+            if math.isfinite(distance_km) and distance_km >= 0:
+                item["distance_km"] = distance_km
+        except (TypeError, ValueError):
+            pass
+        maps_url = _sanitize_maps_url(raw_item.get("maps_url"))
+        if maps_url:
+            item["maps_url"] = maps_url
+        public_results.append(item)
+
+    return {
+        "group_message": str(result.get("group_message") or "").strip()[:5000],
+        "results": public_results,
+        "location_source": "liff",
+        "synced_to_group": synced_to_group,
+    }
+
+
+@app.after_request
+def add_security_headers(response):
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Permissions-Policy"] = "geolocation=(self), camera=(), microphone=()"
+    if request.path.startswith(("/liff/", "/api/liff/")):
+        response.headers["Cache-Control"] = "no-store, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+    if request.path == "/liff/location":
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self'; "
+            "script-src 'self' https://static.line-scdn.net; "
+            "connect-src 'self' https://api.line.me https://*.line.me; "
+            "img-src 'self' data: https:; "
+            "style-src 'self'; "
+            "object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+        )
+    return response
 
 
 @dataclass
@@ -124,16 +364,27 @@ class ConversationState:
     # 保存網站匯入的行程與目前焦點景點。
     imported_itinerary: dict[str, Any] | None = None
     focused_spot: dict[str, Any] | None = None
+    last_accessed_at: float = field(default_factory=time.monotonic)
 
 
 conversation_states: dict[str, ConversationState] = {}
 conversation_lock = threading.Lock()
 
+
+def _prune_conversation_states_locked() -> None:
+    cutoff = time.monotonic() - CONVERSATION_STATE_TTL_SECONDS
+    for key, state in list(conversation_states.items()):
+        if state.last_accessed_at <= cutoff:
+            conversation_states.pop(key, None)
+
+
 def _get_or_create_state(conversation_key: str) -> ConversationState:
+    _prune_conversation_states_locked()
     state = conversation_states.get(conversation_key)
     if state is None:
         state = ConversationState()
         conversation_states[conversation_key] = state
+    state.last_accessed_at = time.monotonic()
     return state
 
 
@@ -164,9 +415,11 @@ def _get_imported_itinerary_state(
     conversation_key: str,
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
     with conversation_lock:
+        _prune_conversation_states_locked()
         state = conversation_states.get(conversation_key)
         if state is None:
             return None, None
+        state.last_accessed_at = time.monotonic()
         return state.imported_itinerary, state.focused_spot
 
 
@@ -467,16 +720,6 @@ def _handle_weather_recommendation_request(
         location_text=location_text,
         time_text=time_text,
     )
-    print(
-        "Weather recommendation payload:",
-        {
-            "query_text": query_text,
-            "location_text": location_text,
-            "time_text": time_text,
-            "provider": result.get("provider"),
-            "county_name": result.get("county_name"),
-        },
-    )
     group_message = str(result.get("group_message") or "").strip()
     if not group_message:
         return False
@@ -488,9 +731,7 @@ def _handle_weather_recommendation_request(
         group_message,
         current_user_message_count,
     ):
-        print(
-            f"略過語意相近的重複回覆。 (scenario_code={scenario_code}, text={group_message})"
-        )
+        app.logger.info("Suppressed a duplicate weather recommendation reply")
         return True
 
     _reply_text_and_mark(
@@ -576,21 +817,9 @@ def _handle_text_location_recommendation_request(
         constraints=constraints,
         activity_types=activity_types,
     )
-    print(
-        "Text location recommendation payload:",
-        {
-            "query_text": query_text,
-            "location_text": location_text,
-            "constraints": constraints,
-            "activity_types": activity_types,
-            "provider": result.get("provider"),
-            "result_count": len(result.get("results") or []),
-        },
-    )
     group_message = str(result.get("group_message") or "").strip()
     if not group_message:
         return False
-    print(f"Text location group_message: {group_message}")
 
     current_user_message_count = _get_user_message_count(conversation_key)
     if _should_suppress_duplicate_reply(
@@ -599,10 +828,7 @@ def _handle_text_location_recommendation_request(
         group_message,
         current_user_message_count,
     ):
-        print(
-            "略過語意相近的重複回覆。"
-            f" (scenario_code={scenario_code}, text={group_message})"
-        )
+        app.logger.info("Suppressed a duplicate text-location recommendation reply")
         return True
 
     _reply_text_and_mark(
@@ -713,7 +939,7 @@ def _handle_location_recommendation_request(
                 beacon_context=beacon_context,
             )
         except Exception as exc:
-            print(f"Beacon recommendation failed, falling back to LIFF: {exc}")
+            _log_failure("Beacon recommendation", exc)
         else:
             group_message = str(result.get("group_message") or "").strip()
             if group_message:
@@ -741,7 +967,7 @@ def _handle_location_recommendation_request(
                 beacon_context=None,
             )
         except Exception as exc:
-            print(f"Recent location recommendation failed, falling back to LIFF: {exc}")
+            _log_failure("Recent location recommendation", exc)
         else:
             group_message = str(result.get("group_message") or "").strip()
             if group_message:
@@ -840,7 +1066,7 @@ def _call_small_json_model(
         content = response.choices[0].message.content or "{}"
         return _extract_json_object(content)
     except Exception as exc:
-        print(f"{purpose} failed: {exc}")
+        _log_failure(purpose, exc)
         return None
 
 
@@ -906,7 +1132,6 @@ def _should_reset_history_by_topic(
         )
         if history_embedding:
             similarity = _cosine_similarity(history_embedding, query_embedding)
-            print(f"Topic similarity fallback score={similarity:.3f}")
             return similarity < TOPIC_SWITCH_SIMILARITY_THRESHOLD
 
     return False
@@ -946,7 +1171,6 @@ def semantic_duplicate_check(new_reply: str, previous_reply: str) -> bool:
     previous_embedding = _build_text_embedding(previous_reply)
     if new_embedding and previous_embedding:
         similarity = _cosine_similarity(new_embedding, previous_embedding)
-        print(f"Reply similarity fallback score={similarity:.3f}")
         return similarity >= SEMANTIC_DUPLICATE_SIMILARITY_THRESHOLD
 
     return False
@@ -975,7 +1199,7 @@ def _build_text_embedding(text: str) -> list[float] | None:
         embedding = response.data[0].embedding
         return list(embedding) if embedding else None
     except Exception as exc:
-        print(f"Embedding generation failed: {exc}")
+        _log_failure("Embedding generation", exc)
         return None
 
 
@@ -1043,7 +1267,7 @@ def _build_conversation_context(
             )
             retrieved_messages = _format_retrieved_messages(similar_messages)
         except Exception as exc:
-            print(f"RAG retrieval failed: {exc}")
+            _log_failure("RAG retrieval", exc)
 
     recent_context = "\n".join(history_snapshot)
     retrieved_context = "\n".join(retrieved_messages)
@@ -1060,9 +1284,11 @@ def _build_conversation_context(
 
 def _get_user_message_count(conversation_key: str) -> int:
     with conversation_lock:
+        _prune_conversation_states_locked()
         state = conversation_states.get(conversation_key)
         if state is None:
             return 0
+        state.last_accessed_at = time.monotonic()
         return state.user_message_count
 
 
@@ -1077,9 +1303,11 @@ def _should_suppress_duplicate_reply(
         return False
 
     with conversation_lock:
+        _prune_conversation_states_locked()
         state = conversation_states.get(conversation_key)
         if state is None or not state.last_reply_text:
             return False
+        state.last_accessed_at = time.monotonic()
 
         messages_since_last_reply = (
             current_user_message_count - state.last_reply_message_count
@@ -1145,7 +1373,7 @@ def _push_followup_after_external_search(
 ) -> None:
     final_reply = _resolve_final_reply_after_external_search(result)
     if not final_reply:
-        print("查詢完成後沒有可發送的最終回覆。")
+        app.logger.info("External search completed without a final reply")
         return
 
     if EXTERNAL_SEARCH_DELAY_SECONDS > 0:
@@ -1154,15 +1382,14 @@ def _push_followup_after_external_search(
     try:
         _push_text(push_target_id, final_reply)
         _mark_reply_sent(conversation_key, scenario_code, final_reply)
-        print(f"已補送最終回覆：{final_reply}")
     except Exception as exc:
-        print(f"補送最終回覆失敗：{exc}")
+        _log_failure("External-search follow-up push", exc)
 
 
 def _handle_line_import_message(
     conversation_key: str,
     user_text: str,
-) -> str | None:
+) -> tuple[str, str] | None:
     command = extract_line_import_command(user_text)
     if command is None:
         return None
@@ -1172,7 +1399,10 @@ def _handle_line_import_message(
         focused_spot = itinerary["spots"][0] if itinerary["spots"] else None
         _store_imported_itinerary(conversation_key, itinerary, focused_spot)
         _note_user_message(conversation_key, f"[匯入行程] {itinerary['title']}")
-        return build_itinerary_import_reply(itinerary)
+        return (
+            build_itinerary_import_reply(itinerary),
+            f"[verified LINE itinerary import] {itinerary['title']}",
+        )
 
     spot_payload = normalize_spot_payload(command.payload)
     itinerary, _ = _get_imported_itinerary_state(conversation_key)
@@ -1190,7 +1420,10 @@ def _handle_line_import_message(
 
     _store_imported_itinerary(conversation_key, itinerary, focused_spot)
     _note_user_message(conversation_key, f"[匯入景點] {focused_spot['name']}")
-    return build_spot_import_reply(itinerary, focused_spot)
+    return (
+        build_spot_import_reply(itinerary, focused_spot),
+        f"[verified LINE spot import] {focused_spot['name']}",
+    )
 
 
 def _reply_from_imported_itinerary(
@@ -1201,6 +1434,35 @@ def _reply_from_imported_itinerary(
     if itinerary is None:
         return None
     return build_itinerary_followup_reply(user_text, itinerary, focused_spot)
+
+
+@app.route("/api/trip/import/sign", methods=["POST"])
+def sign_trip_import():
+    client_ip = _client_ip_address()
+    if _is_rate_limited("line-import-sign", client_ip, LINE_IMPORT_RATE_LIMIT_PER_IP):
+        response = jsonify({"ok": False, "error": "Too many requests. Please try again later."})
+        response.status_code = 429
+        response.headers["Retry-After"] = str(LIFF_RATE_LIMIT_WINDOW_SECONDS)
+        return response
+    if request.content_length is None:
+        return jsonify({"ok": False, "error": "Content-Length is required."}), 411
+    if request.content_length > LINE_IMPORT_MAX_JSON_BYTES:
+        return jsonify({"ok": False, "error": "Request body is too large."}), 413
+    if not request.is_json:
+        return jsonify({"ok": False, "error": "Content-Type must be application/json."}), 415
+
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"ok": False, "error": "Invalid JSON body."}), 400
+    try:
+        marker, token = create_signed_line_import_token(
+            kind=str(payload.get("kind") or ""),
+            itinerary_id=str(payload.get("itinerary_id") or ""),
+            spot_id=str(payload.get("spot_id") or ""),
+        )
+    except LineImportError:
+        return jsonify({"ok": False, "error": "The import request is invalid."}), 400
+    return jsonify({"ok": True, "marker": marker, "token": token})
 
 
 @app.route("/liff/location", methods=["GET"])
@@ -1245,13 +1507,29 @@ def serve_liff_location_script():
 
 @app.route("/api/liff/location/recommendation", methods=["POST"])
 def receive_liff_location_recommendation():
+    client_ip = _client_ip_address()
+    if _is_rate_limited("ip", client_ip, LIFF_RATE_LIMIT_PER_IP):
+        response = jsonify({"ok": False, "error": "Too many requests. Please try again later."})
+        response.status_code = 429
+        response.headers["Retry-After"] = str(LIFF_RATE_LIMIT_WINDOW_SECONDS)
+        return response
+
+    if request.content_length is None:
+        return jsonify({"ok": False, "error": "Content-Length is required."}), 411
+    if request.content_length > LIFF_MAX_JSON_BYTES:
+        return jsonify({"ok": False, "error": "Request body is too large."}), 413
+    if not request.is_json:
+        return jsonify({"ok": False, "error": "Content-Type must be application/json."}), 415
+
     payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        return jsonify({"ok": False, "error": "Invalid JSON body."}), 400
     session_token = str(payload.get("session_token") or "").strip()
     latitude = payload.get("latitude")
     longitude = payload.get("longitude")
     accuracy = payload.get("accuracy")
 
-    if not session_token:
+    if not session_token or len(session_token) > 128:
         return jsonify({"ok": False, "error": "Missing session token."}), 400
 
     session = get_recommendation_session(session_token)
@@ -1263,28 +1541,62 @@ def receive_liff_location_recommendation():
             }
         ), 410
 
-    if session.status == "completed" and session.result is not None:
-        cached_payload = dict(session.result)
-        cached_payload["ok"] = True
-        cached_payload["cached"] = True
-        return jsonify(cached_payload)
-
-    if session.status == "processing":
+    if session.status != "pending":
         return jsonify(
             {
                 "ok": False,
-                "error": "This recommendation request is already in progress.",
+                "error": "This recommendation session has already been used.",
             }
         ), 409
 
+    if not _expected_liff_channel_id():
+        return jsonify({"ok": False, "error": "LIFF authentication is unavailable."}), 503
+
+    access_token = _extract_bearer_token()
+    if not access_token:
+        return jsonify({"ok": False, "error": "A valid LIFF access token is required."}), 401
+    authenticated_user_id = _verify_liff_access_token(access_token)
+    if not authenticated_user_id or authenticated_user_id != session.line_user_id:
+        return jsonify({"ok": False, "error": "LIFF authentication failed."}), 403
+
+    if _is_rate_limited("user", authenticated_user_id, LIFF_RATE_LIMIT_PER_USER):
+        response = jsonify({"ok": False, "error": "Too many requests. Please try again later."})
+        response.status_code = 429
+        response.headers["Retry-After"] = str(LIFF_RATE_LIMIT_WINDOW_SECONDS)
+        return response
+
     try:
+        if isinstance(latitude, bool) or isinstance(longitude, bool) or isinstance(accuracy, bool):
+            raise ValueError
         latitude = float(latitude)
         longitude = float(longitude)
         accuracy_value = float(accuracy) if accuracy is not None else None
     except (TypeError, ValueError):
         return jsonify({"ok": False, "error": "Invalid latitude or longitude."}), 400
 
-    session.status = "processing"
+    if not math.isfinite(latitude) or not -90.0 <= latitude <= 90.0:
+        return jsonify({"ok": False, "error": "Latitude is out of range."}), 400
+    if not math.isfinite(longitude) or not -180.0 <= longitude <= 180.0:
+        return jsonify({"ok": False, "error": "Longitude is out of range."}), 400
+    if accuracy_value is not None and (
+        not math.isfinite(accuracy_value)
+        or accuracy_value < 0
+        or accuracy_value > LIFF_MAX_ACCURACY_METERS
+    ):
+        return jsonify({"ok": False, "error": "Accuracy is out of range."}), 400
+
+    session, claim_error = claim_recommendation_session(
+        session_token,
+        authenticated_user_id,
+    )
+    if claim_error == "forbidden":
+        return jsonify({"ok": False, "error": "LIFF authentication failed."}), 403
+    if claim_error == "used":
+        return jsonify(
+            {"ok": False, "error": "This recommendation session has already been used."}
+        ), 409
+    if claim_error == "expired" or session is None:
+        return jsonify({"ok": False, "error": "This LIFF session has expired."}), 410
 
     try:
         result = run_location_recommendation(
@@ -1306,20 +1618,20 @@ def receive_liff_location_recommendation():
             accuracy=accuracy_value,
         )
     except Exception as exc:
-        failure_result = {
-            "group_message": "",
-            "results": [],
-            "location_source": "liff",
-            "query_text": session.query_text,
-            "synced_to_group": False,
-            "error": str(exc),
-        }
-        mark_session_failed(session_token, failure_result)
-        return jsonify({"ok": False, "error": str(exc)}), 502
+        _log_failure("LIFF location recommendation", exc)
+        mark_session_failed(session_token, {"error_code": "recommendation_failed"})
+        return jsonify(
+            {"ok": False, "error": "The recommendation service is temporarily unavailable."}
+        ), 502
 
-    group_message = str(result.get("group_message") or "").strip()
+    if not isinstance(result, dict):
+        mark_session_failed(session_token, {"error_code": "invalid_backend_response"})
+        return jsonify(
+            {"ok": False, "error": "The recommendation service returned an invalid response."}
+        ), 502
+
+    group_message = str(result.get("group_message") or "").strip()[:5000]
     synced_to_group = False
-    push_error = ""
     if group_message:
         try:
             _push_text(session.push_target_id, group_message)
@@ -1330,29 +1642,50 @@ def receive_liff_location_recommendation():
             )
             synced_to_group = True
         except Exception as exc:
-            push_error = str(exc)
+            _log_failure("LIFF result push", exc)
 
-    response_payload = dict(result)
-    response_payload["synced_to_group"] = synced_to_group
-    if push_error:
-        response_payload["push_error"] = push_error
-
-    finalize_session_result(session_token, response_payload)
+    response_payload = _public_liff_result(result, synced_to_group=synced_to_group)
+    finalize_session_result(session_token, {"consumed": True})
 
     return jsonify({"ok": True, **response_payload})
 
 
+def _dispatch_webhook_event(event: Any) -> None:
+    if isinstance(event, BeaconEvent):
+        handle_beacon_event(event)
+    elif isinstance(event, MessageEvent) and isinstance(event.message, LocationMessageContent):
+        handle_location_message(event)
+    elif isinstance(event, MessageEvent) and isinstance(event.message, TextMessageContent):
+        handle_message(event)
+
+
 @app.route("/callback", methods=["POST"])
 def callback() -> str:
-    signature = request.headers["X-Line-Signature"]
+    signature = request.headers.get("X-Line-Signature", "").strip()
+    if not signature:
+        abort(400)
     body = request.get_data(as_text=True)
-    app.logger.info("Request body: %s", body)
 
     try:
-        handler.handle(body, signature)
+        payload = handler.parser.parse(body, signature, as_payload=True)
     except InvalidSignatureError:
-        app.logger.info("Webhook 簽章驗證失敗，請確認 channel access token / secret。")
         abort(400)
+    except (ValueError, TypeError) as exc:
+        _log_failure("LINE webhook parsing", exc)
+        abort(400)
+
+    for event in payload.events:
+        event_id = str(getattr(event, "webhook_event_id", "") or "").strip()
+        if not event_id:
+            event_id = hashlib.sha256(event.to_json().encode("utf-8")).hexdigest()
+        if not _claim_webhook_event(event_id):
+            continue
+        try:
+            _dispatch_webhook_event(event)
+        except Exception as exc:
+            _release_webhook_event(event_id)
+            _log_failure("LINE webhook event handling", exc)
+            abort(500)
 
     return "OK"
 
@@ -1369,18 +1702,14 @@ def handle_beacon_event(event: BeaconEvent) -> None:
         return
 
     try:
-        context = register_beacon_event(
+        register_beacon_event(
             line_user_id=line_user_id,
             hwid=str(getattr(beacon, "hwid", "") or "").strip(),
             beacon_type=str(getattr(beacon, "type", "enter") or "enter").strip(),
             device_message=str(getattr(beacon, "dm", "") or "").strip(),
         )
-        print(
-            "Beacon context updated: "
-            f"user_id={line_user_id}, hwid={context.hwid}, name={context.name or 'unmapped'}"
-        )
     except Exception as exc:
-        print(f"Failed to register beacon context: {exc}")
+        _log_failure("Beacon registration", exc)
 
 
 @handler.add(MessageEvent, message=LocationMessageContent)
@@ -1411,7 +1740,7 @@ def handle_location_message(event: MessageEvent) -> None:
             accuracy=None,
         )
     except Exception as exc:
-        print(f"Manual location recommendation failed: {exc}")
+        _log_failure("Manual location recommendation", exc)
         _reply_text_and_mark(
             event,
             conversation_key,
@@ -1454,7 +1783,52 @@ def handle_message(event: MessageEvent) -> None:
                 "已清空這個群組目前的對話狀態，可以重新開始測試。",
             )
         except Exception as exc:
-            print(f"Reset reply failed: {exc}")
+            _log_failure("Reset reply", exc)
+        return
+
+    try:
+        import_result = _handle_line_import_message(conversation_key, user_text)
+    except LineImportError:
+        _note_user_message(conversation_key, "[rejected LINE import]")
+        try:
+            _reply_text_and_mark(
+                event,
+                conversation_key,
+                "line_import_error",
+                "LINE 匯入資料無效或已過期，請從網站重新分享。",
+            )
+        except Exception as reply_exc:
+            _log_failure("LINE import error reply", reply_exc)
+        return
+    except Exception as exc:
+        _log_failure("LINE import processing", exc)
+        return
+
+    if import_result:
+        import_reply, safe_import_record = import_result
+        try:
+            if line_group_id:
+                upsert_group(line_group_id)
+                upsert_member(line_group_id, line_user_id)
+            save_message(
+                line_group_id,
+                line_user_id,
+                safe_import_record,
+                conversation_key=conversation_key,
+                embedding=None,
+                topic_hint=None,
+            )
+        except Exception as db_exc:
+            _log_failure("LINE import persistence", db_exc)
+        try:
+            _reply_text_and_mark(
+                event,
+                conversation_key,
+                "line_import_received",
+                import_reply,
+            )
+        except Exception as exc:
+            _log_failure("LINE import acknowledgement", exc)
         return
 
     topic_hint = None
@@ -1475,56 +1849,16 @@ def handle_message(event: MessageEvent) -> None:
             topic_hint=topic_hint,
         )
     except Exception as _db_exc:
-        print(f"DB 寫入訊息失敗（繼續處理）：{_db_exc}")
-
-    # 先處理網站分享進來的行程 / 景點匯入訊息。
-    try:
-        import_reply = _handle_line_import_message(conversation_key, user_text)
-    except LineImportError as exc:
-        _note_user_message(conversation_key, "[匯入資料解析失敗]")
-        try:
-            _reply_text_and_mark(
-                event,
-                conversation_key,
-                "line_import_error",
-                f"匯入資料格式有誤，請重新分享一次：{exc}",
-            )
-        except Exception as reply_exc:
-            print(f"LINE 匯入錯誤回覆失敗：{reply_exc}")
-        return
-    except Exception as exc:
-        print(f"LINE 匯入處理失敗：{exc}")
-        return
-
-    if import_reply:
-        try:
-            _reply_text_and_mark(
-                event,
-                conversation_key,
-                "line_import_received",
-                import_reply,
-            )
-        except Exception as exc:
-            print(f"LINE 匯入成功回覆失敗：{exc}")
-        return
-
+        _log_failure("Message persistence", _db_exc)
 
     try:
-        print("\n" + "=" * 50)
-        print(f"DEBUG 收到訊息：{user_text}")
-
-        recent_messages, context_text = _build_conversation_context(
+        _recent_messages, context_text = _build_conversation_context(
             conversation_key,
             user_text,
             line_group_id=line_group_id,
             query_embedding=query_embedding,
             exclude_message_id=saved_message_id,
         )
-        print(
-            f"DEBUG 對話視窗 key={conversation_key}, "
-            f"messages={len(recent_messages)}/{CONVERSATION_WINDOW_SIZE}"
-        )
-
         direct_reply = _reply_from_imported_itinerary(conversation_key, user_text)
         if direct_reply:
             _reply_text_if_allowed(
@@ -1533,23 +1867,18 @@ def handle_message(event: MessageEvent) -> None:
                 "imported_itinerary_context",
                 direct_reply,
             )
-            print("已依照匯入行程直接回覆。")
-            print("=" * 50 + "\n")
             return
 
-        print(f"DEBUG 送進 AI 的上下文：\n{context_text}")
         result_obj = analyze_dialogue(context_text)
         result = result_obj.to_dict()
-        pretty_result = json.dumps(result, indent=4, ensure_ascii=False)
-        print(f"DEBUG AI 判斷結果：\n{pretty_result}")
 
         # ── DB：儲存完整 AI 分析結果（失敗不中斷主流程）─────────
         try:
             save_summary(line_group_id or conversation_key, result)
         except Exception as _db_exc:
-            print(f"DB 寫入分析結果失敗（繼續處理）：{_db_exc}")
+            _log_failure("Analysis persistence", _db_exc)
     except Exception as exc:
-        print(f"AI 分析失敗：{exc}")
+        _log_failure("AI analysis", exc)
         return
 
     should_intervene = bool(result.get("should_intervene"))
@@ -1573,14 +1902,10 @@ def handle_message(event: MessageEvent) -> None:
                 location_text=str(weather_payload["location_text"]),
                 time_text=str(weather_payload["time_text"]),
             ):
-                print("Weather recommendation flow handled after AI decision")
-                print("=" * 50 + "\n")
                 return
     except Exception as exc:
-        print(f"Weather recommendation flow error: {exc}")
+        _log_failure("Weather recommendation flow", exc)
         if _has_weather_request_signal(user_text, result):
-            print("Weather query stopped from falling through to location flow")
-            print("=" * 50 + "\n")
             return
 
     try:
@@ -1594,11 +1919,9 @@ def handle_message(event: MessageEvent) -> None:
                 result,
                 record_user_message=False,
             ):
-                print("Location recommendation flow handled after AI decision")
-                print("=" * 50 + "\n")
                 return
     except Exception as exc:
-        print(f"Location recommendation flow error: {exc}")
+        _log_failure("Location recommendation flow", exc)
 
     try:
         text_location_payload = _extract_text_location_query_payload(user_text, result)
@@ -1612,24 +1935,14 @@ def handle_message(event: MessageEvent) -> None:
                 constraints=list(text_location_payload["constraints"]),
                 activity_types=list(text_location_payload["activity_types"]),
             ):
-                print("Text location recommendation flow handled after AI decision")
-                print("=" * 50 + "\n")
                 return
     except Exception as exc:
-        print(f"Text location recommendation flow error: {exc}")
+        _log_failure("Text location recommendation flow", exc)
 
     if not should_intervene:
-        print("AI 判斷不介入。")
-        print("=" * 50 + "\n")
         return
 
     if confidence_score < MIN_INTERVENTION_CONFIDENCE:
-        print(
-            "AI 有介入傾向，但信心不足，先不回覆。"
-            f" (confidence_score={confidence_score:.2f}, "
-            f"threshold={MIN_INTERVENTION_CONFIDENCE:.2f})"
-        )
-        print("=" * 50 + "\n")
         return
 
     current_user_message_count = _get_user_message_count(conversation_key)
@@ -1649,11 +1962,7 @@ def handle_message(event: MessageEvent) -> None:
                     intermediate_reply,
                     final_reply,
                 ):
-                    print(
-                        "略過語意相近的重複回覆。 "
-                        f"(scenario_code={scenario_code})"
-                    )
-                    print("=" * 50 + "\n")
+                    app.logger.info("Suppressed a duplicate external-search reply")
                     return
 
                 if push_target_id and intermediate_reply:
@@ -1663,7 +1972,6 @@ def handle_message(event: MessageEvent) -> None:
                         scenario_code,
                         intermediate_reply,
                     )
-                    print(f"先回覆查詢中訊息：{intermediate_reply}")
 
                     threading.Thread(
                         target=_push_followup_after_external_search,
@@ -1679,9 +1987,8 @@ def handle_message(event: MessageEvent) -> None:
                             scenario_code,
                             fallback_text,
                         )
-                        print(f"直接回覆最終訊息：{fallback_text}")
                     else:
-                        print("需要查資料，但沒有可送出的訊息。")
+                        app.logger.info("External search required but no reply text was available")
 
             elif suggested_reply:
                 if _should_suppress_duplicate_reply(
@@ -1690,23 +1997,16 @@ def handle_message(event: MessageEvent) -> None:
                     suggested_reply,
                     current_user_message_count,
                 ):
-                    print(
-                        "略過語意相近的重複回覆。 "
-                        f"(scenario_code={scenario_code}, text={suggested_reply})"
-                    )
-                    print("=" * 50 + "\n")
+                    app.logger.info("Suppressed a duplicate suggested reply")
                     return
 
-                print(f"準備回覆：{suggested_reply}")
                 _reply_text(line_bot_api, event.reply_token, suggested_reply)
                 _mark_reply_sent(conversation_key, scenario_code, suggested_reply)
-                print("已送出 LINE 回覆。")
             else:
-                print("AI 判斷要介入，但沒有可送出的 suggested_reply。")
+                app.logger.info("AI selected intervention without reply text")
 
-            print("=" * 50 + "\n")
         except Exception as exc:
-            print(f"LINE 回覆失敗：{exc}")
+            _log_failure("LINE reply", exc)
 
 
 if __name__ == "__main__":

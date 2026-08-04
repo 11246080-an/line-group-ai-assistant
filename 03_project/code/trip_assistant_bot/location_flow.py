@@ -3,18 +3,21 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import json
+import logging
 import math
 import os
 from pathlib import Path
+import re
 import threading
 import time
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import requests
 from db import get_api_query_cache, save_api_query_cache
 
 
+LOGGER = logging.getLogger(__name__)
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_BEACON_REGISTRY_PATH = BASE_DIR / "beacon_registry.json"
 DEFAULT_ITINERARY_DATA_PATH = BASE_DIR / "trip_website" / "data" / "itineraries.json"
@@ -44,6 +47,17 @@ LOCATION_RECOMMENDATION_API_TIMEOUT_SECONDS = _env_float(
     "LOCATION_RECOMMENDATION_API_TIMEOUT_SECONDS",
     10.0,
 )
+LOCATION_RECOMMENDATION_MAX_RESPONSE_BYTES = max(
+    1024,
+    _env_int("LOCATION_RECOMMENDATION_MAX_RESPONSE_BYTES", 1_048_576),
+)
+DEFAULT_LOCATION_LINK_HOSTS = (
+    "www.google.com",
+    "maps.google.com",
+    "maps.app.goo.gl",
+)
+EXTERNAL_URL_PATTERN = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
+URL_TRAILING_PUNCTUATION = ".,;:!?)]}，。；：！？）】》"
 GROUP_RESULT_LIMIT = max(
     1,
     _env_int(
@@ -278,7 +292,7 @@ def _normalize_location_text_with_llm(location_text: str, query_text: str) -> st
         normalized = str(data.get("normalized_location") or "").strip()
         return normalized
     except Exception as exc:
-        print(f"Location normalization failed: {exc}")
+        _log_external_failure("Location normalization", exc)
         return ""
 
 
@@ -488,14 +502,7 @@ def _build_google_places_recommendation(
     )
     cached = get_api_query_cache("google_places_text_search", cache_key)
     if isinstance(cached, dict):
-        print(
-            "Google Places coordinate cache hit:",
-            {
-                "query_text": query_text,
-                "location_source": location_source,
-                "result_count": len(cached.get("results") or []),
-            },
-        )
+        LOGGER.info("Google Places coordinate cache hit")
         return cached
 
     headers = {
@@ -538,15 +545,7 @@ def _build_google_places_recommendation(
         if isinstance(place, dict)
     ]
     results = [item for item in results if item.get("name")]
-    print(
-        "Google Places coordinate search:",
-        {
-            "query_text": query_text,
-            "location_source": location_source,
-            "result_count": len(results),
-            "first_result": results[0]["name"] if results else "",
-        },
-    )
+    LOGGER.info("Google Places coordinate search completed")
 
     payload = {
         "group_message": _format_group_message(results, query_text, location_source),
@@ -589,14 +588,7 @@ def _build_google_places_text_recommendation(
     cache_key = hashlib.sha256(text_query.encode("utf-8")).hexdigest()
     cached = get_api_query_cache("google_places_text_query", cache_key)
     if isinstance(cached, dict):
-        print(
-            "Google Places text cache hit:",
-            {
-                "text_query": text_query,
-                "location_text": location_text,
-                "result_count": len(cached.get("results") or []),
-            },
-        )
+        LOGGER.info("Google Places text cache hit")
         return cached
 
     headers = {
@@ -635,15 +627,7 @@ def _build_google_places_text_recommendation(
         normalized = _google_place_to_result(place, 0.0, 0.0)
         normalized["distance_km"] = None
         results.append(normalized)
-    print(
-        "Google Places text search:",
-        {
-            "text_query": text_query,
-            "location_text": location_text,
-            "result_count": len(results),
-            "first_result": results[0]["name"] if results else "",
-        },
-    )
+    LOGGER.info("Google Places text search completed")
 
     payload = {
         "group_message": _format_group_message(
@@ -1095,6 +1079,24 @@ def get_recommendation_session(session_token: str) -> RecommendationSession | No
         return session
 
 
+def claim_recommendation_session(
+    session_token: str,
+    line_user_id: str,
+) -> tuple[RecommendationSession | None, str]:
+    """Atomically bind and transition a pending LIFF session to processing."""
+    with _session_lock:
+        _prune_state_locked()
+        session = _recommendation_sessions.get(session_token)
+        if session is None:
+            return None, "expired"
+        if session.line_user_id != line_user_id:
+            return None, "forbidden"
+        if session.status != "pending":
+            return None, "used"
+        session.status = "processing"
+        return session, ""
+
+
 def save_recent_location_context(
     *,
     conversation_key: str,
@@ -1144,14 +1146,26 @@ def build_liff_url(session_token: str, request_base_url: str) -> str:
     if not endpoint:
         endpoint = f"{request_base_url.rstrip('/')}/liff/location"
 
-    params = {
-        "session_token": session_token,
-    }
+    endpoint_parts = urlsplit(endpoint)
+    query_params = [
+        (key, value)
+        for key, value in parse_qsl(endpoint_parts.query, keep_blank_values=True)
+        if key != "session_token"
+    ]
     liff_id = os.getenv("LIFF_ID", "").strip()
     if liff_id:
-        params["liff_id"] = liff_id
+        query_params = [(key, value) for key, value in query_params if key != "liff_id"]
+        query_params.append(("liff_id", liff_id))
 
-    return f"{endpoint}?{urlencode(params)}"
+    return urlunsplit(
+        (
+            endpoint_parts.scheme,
+            endpoint_parts.netloc,
+            endpoint_parts.path,
+            urlencode(query_params),
+            urlencode({"session_token": session_token}),
+        )
+    )
 
 
 def run_location_recommendation(
@@ -1188,7 +1202,7 @@ def run_location_recommendation(
                 location_source=location_source,
             )
         except Exception as exc:
-            print(f"Google Places recommendation failed, falling back: {exc}")
+            _log_external_failure("Google Places recommendation", exc)
 
     if os.getenv("OPENAI_API_KEY", "").strip():
         try:
@@ -1199,7 +1213,7 @@ def run_location_recommendation(
                 location_source=location_source,
             )
         except Exception as exc:
-            print(f"OpenAI location fallback failed, using local demo fallback: {exc}")
+            _log_external_failure("OpenAI location fallback", exc)
 
     return _build_local_fallback_recommendation(
         query_text=query_text,
@@ -1287,6 +1301,11 @@ def _request_backend_recommendation(
     location_source: str,
     beacon_context: BeaconContext | None,
 ) -> dict[str, Any]:
+    _validate_recommendation_backend_url(backend_url)
+    api_key = os.getenv("LOCATION_RECOMMENDATION_API_KEY", "").strip()
+    if not api_key:
+        raise RuntimeError("LOCATION_RECOMMENDATION_API_KEY is required.")
+
     payload = {
         "query_text": query_text,
         "line_user_id": line_user_id,
@@ -1306,23 +1325,40 @@ def _request_backend_recommendation(
             "detected_at": beacon_context.detected_at,
         }
 
-    headers: dict[str, str] = {}
-    api_key = os.getenv("LOCATION_RECOMMENDATION_API_KEY", "").strip()
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
+    headers = {
+        "Accept": "application/json",
+        "Authorization": f"Bearer {api_key}",
+    }
 
     response = requests.post(
         backend_url,
         json=payload,
         headers=headers,
         timeout=LOCATION_RECOMMENDATION_API_TIMEOUT_SECONDS,
+        allow_redirects=False,
     )
+    if 300 <= response.status_code < 400:
+        raise RuntimeError("Recommendation backend redirects are not allowed.")
     response.raise_for_status()
 
+    content_length = response.headers.get("Content-Length", "").strip()
+    if content_length:
+        try:
+            if int(content_length) > LOCATION_RECOMMENDATION_MAX_RESPONSE_BYTES:
+                raise RuntimeError("Recommendation backend response is too large.")
+        except ValueError as exc:
+            raise RuntimeError("Recommendation backend returned an invalid Content-Length.") from exc
+    response_body = response.content
+    if len(response_body) > LOCATION_RECOMMENDATION_MAX_RESPONSE_BYTES:
+        raise RuntimeError("Recommendation backend response is too large.")
+
+    content_type = response.headers.get("Content-Type", "").partition(";")[0].strip().lower()
+    if content_type != "application/json":
+        raise RuntimeError("Recommendation backend must return application/json.")
     try:
         raw = response.json()
-    except ValueError:
-        raw = {"group_message": response.text}
+    except ValueError as exc:
+        raise RuntimeError("Recommendation backend returned invalid JSON.") from exc
 
     normalized = _normalize_backend_response(
         raw=raw,
@@ -1331,7 +1367,6 @@ def _request_backend_recommendation(
         longitude=longitude,
         location_source=location_source,
     )
-    normalized["backend_payload"] = payload
     return normalized
 
 
@@ -1345,7 +1380,9 @@ def _normalize_backend_response(
 ) -> dict[str, Any]:
     if isinstance(raw, list):
         results = [_normalize_result_item(item, latitude, longitude) for item in raw]
-        group_message = _format_group_message(results, query_text, location_source)
+        group_message = _sanitize_group_message_links(
+            _format_group_message(results, query_text, location_source)
+        )
         return {
             "group_message": group_message,
             "results": results,
@@ -1355,7 +1392,7 @@ def _normalize_backend_response(
 
     if not isinstance(raw, dict):
         return {
-            "group_message": str(raw),
+            "group_message": _sanitize_group_message_links(str(raw)),
             "results": [],
             "location_source": location_source,
             "query_text": query_text,
@@ -1390,7 +1427,7 @@ def _normalize_backend_response(
         group_message = _format_group_message(results, query_text, location_source)
 
     return {
-        "group_message": str(group_message).strip(),
+        "group_message": _sanitize_group_message_links(str(group_message).strip()),
         "results": results,
         "location_source": location_source,
         "query_text": query_text,
@@ -1446,7 +1483,9 @@ def _normalize_result_item(item: Any, origin_latitude: float, origin_longitude: 
     if distance_km is None and latitude is not None and longitude is not None:
         distance_km = _haversine_km(origin_latitude, origin_longitude, latitude, longitude)
 
-    maps_url = str(item.get("maps_url") or item.get("mapsUrl") or "").strip()
+    maps_url = _sanitize_location_link(
+        str(item.get("maps_url") or item.get("mapsUrl") or "").strip()
+    )
     if not maps_url and latitude is not None and longitude is not None:
         maps_url = f"https://www.google.com/maps/search/?api=1&query={latitude},{longitude}"
 
@@ -1458,6 +1497,68 @@ def _normalize_result_item(item: Any, origin_latitude: float, origin_longitude: 
         "address": address,
         "maps_url": maps_url,
     }
+
+
+def _log_external_failure(operation: str, exc: Exception) -> None:
+    """Log enough for operations without leaking requests, locations, or responses."""
+    LOGGER.warning("%s failed (%s)", operation, type(exc).__name__)
+
+
+def _split_configured_hosts(name: str, defaults: tuple[str, ...] = ()) -> set[str]:
+    configured = os.getenv(name, "")
+    values = configured.split(",") if configured.strip() else defaults
+    return {value.strip().lower().rstrip(".") for value in values if value.strip()}
+
+
+def _validate_recommendation_backend_url(backend_url: str) -> None:
+    parsed = urlsplit(backend_url)
+    if (
+        parsed.scheme.lower() != "https"
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.fragment
+    ):
+        raise RuntimeError("LOCATION_RECOMMENDATION_API_URL must be an HTTPS URL without credentials or fragments.")
+
+    allowed_hosts = _split_configured_hosts("LOCATION_RECOMMENDATION_ALLOWED_HOSTS")
+    if not allowed_hosts:
+        raise RuntimeError("LOCATION_RECOMMENDATION_ALLOWED_HOSTS is required.")
+    if parsed.hostname.lower().rstrip(".") not in allowed_hosts:
+        raise RuntimeError("LOCATION_RECOMMENDATION_API_URL host is not allowed.")
+
+
+def _sanitize_location_link(url: str) -> str:
+    if not url or len(url) > 2048:
+        return ""
+    try:
+        parsed = urlsplit(url)
+    except ValueError:
+        return ""
+    allowed_hosts = _split_configured_hosts(
+        "LOCATION_ALLOWED_LINK_HOSTS",
+        DEFAULT_LOCATION_LINK_HOSTS,
+    )
+    if (
+        parsed.scheme.lower() != "https"
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.hostname.lower().rstrip(".") not in allowed_hosts
+    ):
+        return ""
+    return url
+
+
+def _sanitize_group_message_links(message: str) -> str:
+    def replace_url(match: re.Match[str]) -> str:
+        raw_url = match.group(0)
+        url = raw_url.rstrip(URL_TRAILING_PUNCTUATION)
+        trailing = raw_url[len(url):]
+        safe_url = _sanitize_location_link(url)
+        return f"{safe_url or '[已移除不受信任連結]'}{trailing}"
+
+    return EXTERNAL_URL_PATTERN.sub(replace_url, message)
 
 
 def _build_local_fallback_recommendation(

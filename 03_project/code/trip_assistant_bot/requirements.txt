@@ -1,6 +1,6 @@
 flask==3.0.0
-line-bot-sdk>=3.11.0
+line-bot-sdk==3.7.0
 python-dotenv==1.0.0
 requests==2.31.0
-openai
+openai==2.44.0
 pymongo[srv]==4.7.3
