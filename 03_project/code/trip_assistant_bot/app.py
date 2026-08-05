@@ -73,6 +73,7 @@ from location_flow import (
     save_recent_location_context,
 )
 from weather_flow import run_weather_recommendation
+from route_optimization import build_optimized_route_reply, should_optimize_route
 
 load_dotenv()
 
@@ -1917,6 +1918,16 @@ def handle_message(event: MessageEvent) -> None:
         confidence_score = float(result.get("confidence_score", 0))
     except (TypeError, ValueError):
         confidence_score = 0.0
+
+    try:
+        if should_optimize_route(result):
+            route_reply = build_optimized_route_reply(result)
+            if route_reply:
+                _reply_text_and_mark(event, conversation_key, "route_optimization", route_reply)
+                _debug_print("Route optimization flow handled after AI decision")
+                return
+    except Exception as exc:
+        _log_failure("Route optimization flow", exc)
 
     try:
         weather_payload = _extract_weather_query_payload(user_text, result)
