@@ -88,6 +88,7 @@ ENABLE_VERBOSE_DEBUG = os.getenv("ENABLE_VERBOSE_DEBUG", "false").strip().lower(
     "yes",
     "on",
 }
+PROCESSING_HINT_TEXT = "目前 AI 正在找資料，這個回答可能需要一點時間，請稍等一下。"
 
 
 def _debug_print(message: str) -> None:
@@ -1895,7 +1896,26 @@ def handle_message(event: MessageEvent) -> None:
             )
             return
 
-        result_obj = analyze_dialogue(context_text)
+        processing_hint_sent = False
+
+        def _send_processing_hint(_signal: str) -> None:
+            nonlocal processing_hint_sent
+            if processing_hint_sent:
+                return
+            push_target_id = _get_push_target_id(event)
+            if not push_target_id:
+                return
+            try:
+                _push_text(push_target_id, PROCESSING_HINT_TEXT)
+                processing_hint_sent = True
+                _debug_print("Processing hint pushed before final answer generation")
+            except Exception as hint_exc:
+                _log_failure("Processing hint push", hint_exc)
+
+        result_obj = analyze_dialogue(
+            context_text,
+            on_processing_required=_send_processing_hint,
+        )
         result = result_obj.to_dict()
         _debug_print("DEBUG AI 判斷結果：")
         _debug_print(json.dumps(result, ensure_ascii=False, indent=4))
@@ -2015,7 +2035,15 @@ def handle_message(event: MessageEvent) -> None:
                     _debug_print("略過語意相近的重複回覆。")
                     return
 
-                if push_target_id and intermediate_reply:
+                if processing_hint_sent and final_reply:
+                    _debug_print("Sending final reply after the early processing hint")
+                    _reply_text(line_bot_api, event.reply_token, final_reply)
+                    _mark_reply_sent(
+                        conversation_key,
+                        scenario_code,
+                        final_reply,
+                    )
+                elif push_target_id and intermediate_reply:
                     _debug_print(f"先回覆查詢中訊息：{intermediate_reply}")
                     _reply_text(line_bot_api, event.reply_token, intermediate_reply)
                     _mark_reply_sent(
