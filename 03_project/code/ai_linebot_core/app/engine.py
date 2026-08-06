@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Callable
+
 # 這個檔案可以想成「總控台」。
 # 它負責把：
 # 1. 對話資訊抽取
@@ -8,10 +10,10 @@ from __future__ import annotations
 # 4. 回覆欄位整理
 # 全部串在一起。
 
-from app.classifier import classify
-from app.extractor import extract_info
-from app.models import AnalysisResult, ExtractedInfo
-from app.llm_judge import LLMJudgeError, judge_with_llm
+from .classifier import classify
+from .extractor import extract_info
+from .models import AnalysisResult, ExtractedInfo
+from .llm_judge import LLMJudgeError, judge_with_llm
 
 
 # 這些劇本通常代表 AI 需要去外部查資料，
@@ -58,7 +60,11 @@ def _derive_external_search_fields(
 # 這是整個專案最重要的統一入口。
 # LINE Bot 同學之後如果要用這個專案，
 # 基本上就是把群組對話文字丟進這個函式。
-def analyze_dialogue(text: str) -> AnalysisResult:
+def analyze_dialogue(
+    text: str,
+    *,
+    on_processing_required: Callable[[str], None] | None = None,
+) -> AnalysisResult:
     # 主流程改成直接把整段對話交給 LLM 判斷，
     # 不再把 extractor 當成主要輸入來源。
     # extractor 只保留給 fallback classifier 使用。
@@ -69,7 +75,11 @@ def analyze_dialogue(text: str) -> AnalysisResult:
         # 第二步：優先交給 LLM 判斷。
         # 這就是 LLM-first 的意思：
         # 主要判斷工作先由大語言模型處理。
-        return judge_with_llm(text, info)
+        return judge_with_llm(
+            text,
+            info,
+            on_processing_required=on_processing_required,
+        )
     except LLMJudgeError as exc:
         # 如果 LLM 失敗，就改用備援方案。
         # fallback 可以理解成「主方案壞掉時的替代方案」。
