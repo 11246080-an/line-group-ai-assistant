@@ -35,6 +35,7 @@ from linebot.v3.webhooks import (
 )
 
 from ai_linebot_core.app.engine import analyze_dialogue
+from ai_linebot_core.app.models import AnalysisResult
 from ai_linebot_core.app.line_import import (
     LineImportError,
     build_itinerary_context,
@@ -171,8 +172,8 @@ LIFF_ALLOWED_MAP_HOSTS = tuple(
 
 
 def _log_failure(operation: str, exc: BaseException) -> None:
-    """Log an operation failure without leaking request data or exception text."""
-    app.logger.error("%s failed (%s)", operation, type(exc).__name__)
+    """Log an operation failure with traceback but without request secrets."""
+    app.logger.exception("%s failed", operation)
 
 
 def _expected_liff_channel_id() -> str:
@@ -1912,11 +1913,29 @@ def handle_message(event: MessageEvent) -> None:
             except Exception as hint_exc:
                 _log_failure("Processing hint push", hint_exc)
 
-        result_obj = analyze_dialogue(
+        app.logger.debug(
+            "AI analysis input type=%s",
+            type(context_text).__name__,
+        )
+        raw_result = analyze_dialogue(
             context_text,
             on_processing_required=_send_processing_hint,
         )
-        result = result_obj.to_dict()
+        app.logger.debug(
+            "AI analysis raw result type=%s",
+            type(raw_result).__name__,
+        )
+        if not isinstance(raw_result, AnalysisResult):
+            raise TypeError(
+                "analyze_dialogue() must return AnalysisResult, "
+                f"got {type(raw_result).__name__}"
+            )
+        result: dict[str, Any] = raw_result.to_dict()
+        app.logger.debug(
+            "AI analysis parsed result type=%s result=%s",
+            type(result).__name__,
+            result,
+        )
         _debug_print("DEBUG AI 判斷結果：")
         _debug_print(json.dumps(result, ensure_ascii=False, indent=4))
 
