@@ -1,0 +1,259 @@
+{
+  "groups": [
+    {
+      "line_group_id": "C1234567890",
+      "group_name": "台中出遊團",
+      "created_at": "2026-01-01T10:00:00",
+      "members": [
+        {
+          "line_user_id": "U1234567890",
+          "display_name": "Mike",
+          "joined_at": "2026-01-01T10:02:00"
+        }
+      ]
+    }
+  ],
+  "messages": [
+    {
+      "line_message_id": "M123456",
+      "line_group_id": "C1234567890",
+      "line_user_id": "U1234567890",
+      "display_name": "Mike",
+      "message_text": "這週要不要去台中玩？",
+      "sent_at": "2026-01-02T12:00:00"
+    }
+  ],
+  "summaries": [
+    {
+      "line_group_id": "C1234567890",
+      "window_start": "2026-01-02T12:00:00",
+      "window_end": "2026-01-02T13:00:00",
+      "summary_text": "討論台中三天兩夜行程",
+      "travel_date_start": "2026-02-01",
+      "travel_date_end": "2026-02-03",
+      "destination_city": "台中",
+      "destination_country": "台灣",
+      "budget_min": 3000,
+      "budget_max": 8000,
+      "budget_currency": "TWD",
+      "people_count": 4,
+      "decision_state": "討論中",
+      "need_type": "行程需求",
+      "has_conflict": false,
+      "conflict_description": null,
+      "scenario_result": {
+        "scenario_code": "S001",
+        "scenario_name": "行程衝突提醒",
+        "should_intervene": true,
+        "intervention_type": "顯性",
+        "confidence_score": 0.87,
+        "suggested_reply": "目前時間安排有衝突，建議重新調整出發時間"
+      }
+    }
+  ],
+  "itineraries": [
+    {
+      "line_group_id": "C1234567890",
+      "itinerary_text": "三天兩夜台中行程建議",
+      "created_at": "2026-01-02T14:00:00",
+      "stops": [
+        {
+          "stop_order": 1,
+          "stop_name": "高美濕地",
+          "stop_address": "台中市清水區",
+          "arrive_time": "10:00",
+          "duration_min": 120,
+          "category": "景點"
+        }
+      ]
+    }
+  ],
+  "vote_sessions": [
+    {
+      "line_group_id": "C1234567890",
+      "title": "要去哪個景點？",
+      "status": "進行中",
+      "created_at": "2026-01-02T15:00:00",
+      "closed_at": null,
+      "options": [
+        {
+          "option_id": 1,
+          "option_text": "高美濕地",
+          "votes": [
+            {
+              "line_user_id": "U1234567890",
+              "voted_at": "2026-01-02T15:10:00"
+            }
+          ]
+        },
+        {
+          "option_id": 2,
+          "option_text": "彩虹眷村",
+          "votes": []
+        }
+      ]
+    }
+  ],
+  "user_preferences": [
+    {
+      "line_user_id": "U1234567890",
+      "line_group_id": "C1234567890",
+      "preferences": [
+        {
+          "type": "飲食",
+          "value": "不吃辣",
+          "updated_at": "2026-01-02T16:00:00"
+        }
+      ]
+    }
+  ],
+  "api_query_cache": [
+    {
+      "query_type": "restaurant",
+      "line_group_id": "C1234567890",
+      "query_key": "台中_火鍋",
+      "query_params": {
+        "city": "台中",
+        "food_type": "火鍋"
+      },
+      "result": {
+        "restaurants": [
+          {
+            "name": "肉多多火鍋",
+            "address": "台中市西區台灣大道二段100號",
+            "rating": 4.3
+          }
+        ]
+      },
+      "created_at": "2026-08-09T09:00:00",
+      "updated_at": "2026-08-09T09:00:00",
+      "expires_at": "2026-08-09T10:00:00"
+    },
+    {
+      "query_type": "restaurant",
+      "line_group_id": "C9876543210",
+      "query_key": "台中_火鍋",
+      "query_params": {
+        "city": "台中",
+        "food_type": "火鍋"
+      },
+      "result": {
+        "restaurants": [
+          {
+            "name": "石研室石頭火鍋",
+            "address": "台中市北區崇德路一段100號",
+            "rating": 4.5
+          }
+        ]
+      },
+      "created_at": "2026-08-09T11:00:00",
+      "updated_at": "2026-08-09T11:00:00",
+      "expires_at": "2026-08-09T12:00:00"
+    }
+  ],
+  "weather_daily_cache": [
+    {
+      "provider": "cwa_weather",
+      "county_name": "臺北市",
+      "source_date": "2026-08-09",
+      "forecast_type": "36h",
+      "raw_data": {
+        "success": "true",
+        "records": {
+          "location": [
+            {
+              "locationName": "臺北市",
+              "weatherElement": [
+                {
+                  "elementName": "Wx",
+                  "time": [
+                    {
+                      "startTime": "2026-08-09 18:00:00",
+                      "endTime": "2026-08-10 06:00:00",
+                      "parameter": {
+                        "parameterName": "多雲時晴",
+                        "parameterValue": "2"
+                      }
+                    }
+                  ]
+                },
+                {
+                  "elementName": "PoP",
+                  "time": [
+                    {
+                      "startTime": "2026-08-09 18:00:00",
+                      "endTime": "2026-08-10 06:00:00",
+                      "parameter": {
+                        "parameterName": "20",
+                        "parameterUnit": "百分比"
+                      }
+                    }
+                  ]
+                },
+                {
+                  "elementName": "MinT",
+                  "time": [
+                    {
+                      "startTime": "2026-08-09 18:00:00",
+                      "endTime": "2026-08-10 06:00:00",
+                      "parameter": {
+                        "parameterName": "27",
+                        "parameterUnit": "C"
+                      }
+                    }
+                  ]
+                },
+                {
+                  "elementName": "MaxT",
+                  "time": [
+                    {
+                      "startTime": "2026-08-09 18:00:00",
+                      "endTime": "2026-08-10 06:00:00",
+                      "parameter": {
+                        "parameterName": "33",
+                        "parameterUnit": "C"
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "updated_at": "2026-08-09T06:05:00"
+    },
+    {
+      "provider": "cwa_weather",
+      "county_name": "宜蘭縣",
+      "source_date": "2026-08-09",
+      "forecast_type": "36h",
+      "raw_data": {
+        "success": "true",
+        "records": {
+          "location": [
+            {
+              "locationName": "宜蘭縣",
+              "weatherElement": [
+                {
+                  "elementName": "Wx",
+                  "time": [
+                    {
+                      "startTime": "2026-08-09 18:00:00",
+                      "endTime": "2026-08-10 06:00:00",
+                      "parameter": {
+                        "parameterName": "陰短暫雨",
+                        "parameterValue": "8"
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "updated_at": "2026-08-09T06:05:00"
+    }
+  ]
+}
