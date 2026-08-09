@@ -158,12 +158,19 @@ context_text = "\n".join(f"{m['display_name']}: {m['message_text']}" for m in si
 
 ## 四、外部 API 查詢結果暫存 — `api_query_cache`
 
-新 collection，欄位：
+> **2026-08 更新：** 這個 collection 現在強制以 `line_group_id` 隔離快取（唯一鍵是
+> `query_type` + `line_group_id` + `query_key`）。舊版是共用快取、`line_group_id`
+> 只是選填的追蹤欄位；如果你的程式碼是照本文件較早的版本寫的，`save_api_query_cache()`
+> / `get_api_query_cache()` 的參數順序都變了，**要照下面的新簽名更新呼叫端**。
+> 詳見 [GROUP_ISOLATION_AUDIT.md](GROUP_ISOLATION_AUDIT.md)。
+
+collection 欄位：
 
 | 欄位 | 型態 | 說明 |
 |---|---|---|
-| `query_type` | string | 查詢類型，例如 `"restaurant"` / `"weather"` / `"movie"` |
-| `query_key` | string | 正規化後的查詢關鍵字或條件字串，**由呼叫端自己決定怎麼組**（例如 `"台中_火鍋"`，或把查詢條件 dict 做 `json.dumps(sort_keys=True)` 後當 key） |
+| `query_type` | string | 查詢類型，例如 `"restaurant"` / `"movie"` |
+| `line_group_id` | string | 這次查詢所屬的 LINE 群組 ID，與 `query_type` + `query_key` 組合唯一 |
+| `query_key` | string | 正規化後的查詢關鍵字或條件字串，**由呼叫端自己決定怎麼組**（例如 `"台中_火鍋"`），只放查詢條件本身，不用自己拼群組 ID 進去 |
 | `query_params` | object | 原始查詢條件，方便除錯或重查，非必填 |
 | `result` | object | API 回傳結果，原樣存放 |
 | `created_at` | datetime | 第一次建立時間 |
@@ -175,13 +182,14 @@ context_text = "\n".join(f"{m['display_name']}: {m['message_text']}" for m in si
 ```python
 def save_api_query_cache(
     query_type: str,
+    line_group_id: str,
     query_key: str,
     result: Any,
     query_params: dict | None = None,
     ttl_seconds: int = 3600,   # 預設快取 1 小時
 ) -> None
 
-def get_api_query_cache(query_type: str, query_key: str) -> Any | None
+def get_api_query_cache(query_type: str, line_group_id: str, query_key: str) -> Any | None
 ```
 
 ### 標準使用模式（快取判斷邏輯要自己接）
@@ -189,9 +197,9 @@ def get_api_query_cache(query_type: str, query_key: str) -> Any | None
 ```python
 from db import get_api_query_cache, save_api_query_cache
 
-def query_restaurant(city: str, food_type: str):
+def query_restaurant(line_group_id: str, city: str, food_type: str):
     query_key = f"{city}_{food_type}"
-    cached = get_api_query_cache("restaurant", query_key)
+    cached = get_api_query_cache("restaurant", line_group_id, query_key)
     if cached is not None:
         return cached  # 命中快取，不用打外部 API
 
@@ -199,6 +207,7 @@ def query_restaurant(city: str, food_type: str):
 
     save_api_query_cache(
         "restaurant",
+        line_group_id,
         query_key,
         result,
         query_params={"city": city, "food_type": food_type},
@@ -207,7 +216,7 @@ def query_restaurant(city: str, food_type: str):
     return result
 ```
 
-`db.py` 只提供存取，「查詢前先看快取、查完後存快取」這個判斷流程要自己寫在呼叫外部 API 的地方。
+`db.py` 只提供存取，「查詢前先看快取、查完後存快取」這個判斷流程要自己寫在呼叫外部 API 的地方。群組隔離已經收進 `db.py` 裡了，`location_flow.py` / `weather_flow.py` 不用再自己手動把 `line_group_id` 拼進 `query_key`，直接把它當一個參數傳進來就好。
 
 ---
 

@@ -267,23 +267,44 @@ erDiagram
 
 ### 2.7 api_query_cache
 
-儲存外部 API（餐廳、天氣、路線等查詢）的回傳結果暫存，避免短時間內重複打外部 API。以 `query_type` + `query_key` 唯一識別一筆快取，重複查詢時直接 upsert。
+儲存外部 API（餐廳、路線等即時查詢）的回傳結果暫存，避免短時間內重複打外部 API。以
+`query_type` + `line_group_id` + `query_key` 三者一起唯一識別一筆快取，重複查詢時直接 upsert。
 
 | 欄位 | 型態 | 必填 | 說明 |
 |------|------|------|------|
 | `_id` | ObjectId | 是 | 自動產生主鍵 |
-| `query_type` | string | 是 | 查詢類型（如 `restaurant` / `weather` / `movie`） |
-| `query_key` | string | 是 | 正規化後的查詢關鍵字 / 條件字串，與 `query_type` 組合唯一 |
+| `query_type` | string | 是 | 查詢類型（如 `restaurant` / `movie`） |
+| `line_group_id` | string | 是 | 這次查詢所屬的 LINE 群組 ID，與 `query_type` + `query_key` 組合唯一 |
+| `query_key` | string | 是 | 正規化後的查詢關鍵字 / 條件字串 |
 | `query_params` | object | 否 | 原始查詢條件，方便除錯或重新查詢 |
 | `result` | object | 否 | 外部 API 回傳結果（原樣存放） |
 | `created_at` | datetime | 是 | 建立時間（UTC） |
 | `updated_at` | datetime | 是 | 最後更新時間（UTC） |
 | `expires_at` | datetime | 是 | 到期時間（UTC），搭配 TTL 索引到期自動清除 |
-| `line_group_id` | string | 否 | 記錄是哪個群組觸發這次查詢，僅供追蹤/除錯，**不是**快取鍵的一部分 |
 
-> 外部 API 資料（天氣、餐廳、電影場次等）本身是公開資訊，預設跨群組共用同一份快取結果。
-> 若某個查詢類型的結果跟群組私有資訊綁定、不能共用，呼叫端要自己把 `line_group_id`
-> 編進 `query_key`（例如 `f"{line_group_id}:{query_key}"`），讓不同群組落在不同的快取鍵。
+> `line_group_id` 是快取鍵的一部分：同樣的 `query_key` 在不同群組會各自存成獨立的一筆，
+> 群組 A 查過的結果不會被群組 B 讀到，呼叫端不用再自己手動把 `line_group_id` 拼進
+> `query_key` 字串。對應存取函式：`save_api_query_cache()` / `get_api_query_cache()`。
+
+---
+
+### 2.8 weather_daily_cache
+
+儲存「每日排程同步」的天氣資料，取代使用者一問就即時打中央氣象署 API 的做法。以
+`provider` + `county_name` + `source_date` + `forecast_type` 唯一識別一筆資料。
+
+| 欄位 | 型態 | 必填 | 說明 |
+|------|------|------|------|
+| `_id` | ObjectId | 是 | 自動產生主鍵 |
+| `provider` | string | 是 | 資料來源，例如 `cwa_weather` |
+| `county_name` | string | 是 | 縣市名稱，例如 `臺北市`、`宜蘭縣` |
+| `source_date` | string | 是 | 這筆資料是同步哪一天的，建議統一用 `YYYY-MM-DD` |
+| `forecast_type` | string | 是 | 預報類型，先固定 `36h` |
+| `raw_data` | object | 是 | 中央氣象署回傳的原始 JSON，不在資料庫層解析，後端自己挑今天/明天的內容 |
+| `updated_at` | datetime | 是 | 實際更新時間（UTC） |
+| `expires_at` | datetime | 否 | 到期時間（UTC），選填；有帶 `ttl_seconds` 才會設定，搭配 TTL 索引清舊資料用 |
+
+對應存取函式：`save_weather_daily_cache()` / `get_weather_daily_cache()`（`db.py`）。
 
 ---
 
@@ -300,8 +321,15 @@ erDiagram
 | `vote_sessions` | `line_group_id` + `status` | 複合索引 | 查詢進行中的投票 |
 | `user_preferences` | `line_user_id` + `line_group_id` | 唯一複合索引 | 快速查找偏好、防重複 |
 | `user_preferences` | `line_group_id` | 單欄索引 | 取得「整個群組」的偏好清單（`get_group_preferences()`） |
-| `api_query_cache` | `query_type` + `query_key` | 唯一複合索引 | 快速查找快取、防重複、支援 upsert |
+| `api_query_cache` | `query_type` + `line_group_id` + `query_key` | 唯一複合索引 | 快速查找快取、防重複、支援 upsert，並以群組隔離 |
 | `api_query_cache` | `expires_at` | TTL 索引（`expireAfterSeconds=0`） | 到期自動清除快取 |
+| `weather_daily_cache` | `provider` + `county_name` + `source_date` + `forecast_type` | 唯一複合索引 | 快速查找當日同步資料、防重複、支援 upsert |
+| `weather_daily_cache` | `expires_at` | TTL 索引（`expireAfterSeconds=0`） | 選填，若有設定到期時間就自動清除 |
+
+> **注意（重大變更）：** `api_query_cache` 的唯一鍵從舊版的 `query_type` + `query_key`
+> 改成加入 `line_group_id`。`ensure_indexes()` 會自動偵測並砍掉舊索引再建新的，
+> 但 `save_api_query_cache()` / `get_api_query_cache()` 的函式簽名也跟著改了
+> （多了必填的 `line_group_id` 參數），呼叫端的程式碼需要一併更新。
 
 > `messages.embedding` 目前用 Python 端 brute-force 算 cosine similarity 做語意檢索（見 `get_similar_messages()`），未建立 Atlas Vector Search 索引；等訊息量變大或 cluster 有支援時可再補上 `$vectorSearch` 索引。
 
