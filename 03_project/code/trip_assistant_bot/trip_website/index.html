@@ -5,13 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <meta name="referrer" content="no-referrer" />
     <title>台灣一日遊行程推薦</title>
-    <link
-      rel="stylesheet"
-      href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
-      integrity="sha256-p4NxAoJBhIINfQ3ynhORZ1MZgRZ7N1F7kPZ3L6pL7gY="
-      crossorigin="anonymous"
-    />
-    <link rel="stylesheet" href="src/styles.css" />
+    <link rel="stylesheet" href="vendor/leaflet/leaflet.css?v=1.9.4" />
+    <link rel="stylesheet" href="src/styles.css?v=20260810-self-hosted-map" />
   </head>
   <body>
     <header class="app-header">
@@ -117,12 +112,8 @@
       </section>
     </main>
 
-    <script
-      src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
-      integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
-      crossorigin="anonymous"
-    ></script>
+    <script src="vendor/leaflet/leaflet.js?v=1.9.4"></script>
     <script src="src/data.js"></script>
-    <script src="src/app.js"></script>
+    <script src="src/app.js?v=20260810-self-hosted-map"></script>
   </body>
 </html>

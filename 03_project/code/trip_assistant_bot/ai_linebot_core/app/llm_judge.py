@@ -5,6 +5,7 @@ from __future__ import annotations
 # 再把模型回傳結果整理成固定格式」的地方。
 
 import csv
+from collections.abc import Callable
 import json
 import os
 from pathlib import Path
@@ -764,7 +765,12 @@ def _merge_generated_reply(
     return AnalysisResult.from_dict(merged)
 
 
-def judge_with_llm(text: str, extracted_info: ExtractedInfo) -> AnalysisResult:
+def judge_with_llm(
+    text: str,
+    extracted_info: ExtractedInfo,
+    *,
+    on_processing_required: Callable[[str], None] | None = None,
+) -> AnalysisResult:
     _load_env_file()
 
     api_key = os.getenv("OPENAI_API_KEY")
@@ -791,6 +797,9 @@ def judge_with_llm(text: str, extracted_info: ExtractedInfo) -> AnalysisResult:
 
     if not judgment_result.should_intervene:
         return judgment_result
+
+    if judgment_result.requires_external_search and on_processing_required is not None:
+        on_processing_required("external_search")
 
     generation_messages = _build_generation_messages(text, judgment_result)
     generated_reply = _call_openai_json(

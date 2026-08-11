@@ -4,3 +4,8 @@ python-dotenv==1.0.0
 requests==2.31.0
 openai==2.44.0
 pymongo[srv]==4.7.3
+Pillow==11.3.0
+zxing-cpp==2.3.0
+tzdata==2026.3
+reportlab==5.0.0
+reportlab==5.0.0

@@ -1068,14 +1068,14 @@
     }
 
     const marker = String(result.marker || "");
-    const token = String(result.token || "");
-    if (!/^#TRIP_(?:SPOT_)?IMPORT_V2$/.test(marker)) {
+    const code = String(result.code || "");
+    if (!/^#TRIP_(?:SPOT_)?IMPORT_V3$/.test(marker)) {
       throw new Error("Invalid import marker");
     }
-    if (!/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(token) || token.length > 4096) {
-      throw new Error("Invalid import token");
+    if (!/^[A-Z2-9]{4}(?:-[A-Z2-9]{4}){2}$/.test(code)) {
+      throw new Error("Invalid import code");
     }
-    return { marker, token };
+    return { marker, code };
   }
 
   function buildLineShareText(payloadData, signedImport) {
@@ -1084,8 +1084,7 @@
         "【Trip Assistant 景點同步】",
         `${payloadData.itinerary_title || "目前行程"} / ${payloadData.spot_name || "景點"}`,
         "請把群組目前討論焦點切到這一站，並接著提供下一站建議。",
-        signedImport.marker,
-        signedImport.token,
+        `匯入碼：${signedImport.code}`,
       ].join("\n");
     }
 
@@ -1098,8 +1097,7 @@
       payloadData.title || "未命名行程",
       routePreview ? `路線：${routePreview}` : "",
       "請 AI 旅遊行程助理匯入這份群組行程，之後依這份內容提供建議。",
-      signedImport.marker,
-      signedImport.token,
+      `匯入碼：${signedImport.code}`,
     ].filter(Boolean).join("\n");
   }
 

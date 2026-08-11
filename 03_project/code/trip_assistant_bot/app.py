@@ -1,9 +1,13 @@
 from collections import deque
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 import hashlib
+import hmac
+from io import BytesIO
 import json
 import math
 import os
+import secrets
 import threading
 import time
 from typing import Any
@@ -11,15 +15,33 @@ from urllib.parse import urlparse
 from uuid import uuid4
 
 from dotenv import load_dotenv
-from flask import Flask, abort, jsonify, request, send_from_directory
+from flask import (
+    Flask,
+    abort,
+    has_request_context,
+    jsonify,
+    redirect,
+    request,
+    send_file,
+    send_from_directory,
+)
 import requests as http_requests
+import db as db_module
+from pymongo.errors import DuplicateKeyError
+
+load_dotenv()
 
 from linebot.v3 import WebhookHandler
 from linebot.v3.exceptions import InvalidSignatureError
 from linebot.v3.messaging import (
     ApiClient,
     Configuration,
+    FlexContainer,
+    FlexMessage,
+    MessageAction,
     MessagingApi,
+    MessagingApiBlob,
+    PostbackAction,
     PushMessageRequest,
     QuickReply,
     QuickReplyItem,
@@ -29,15 +51,19 @@ from linebot.v3.messaging import (
 )
 from linebot.v3.webhooks import (
     BeaconEvent,
+    ImageMessageContent,
     LocationMessageContent,
     MessageEvent,
+    PostbackEvent,
     TextMessageContent,
 )
 
 from ai_linebot_core.app.engine import analyze_dialogue
 from ai_linebot_core.app.models import AnalysisResult
 from ai_linebot_core.app.line_import import (
+    ITINERARY_IMPORT_MARKER,
     LineImportError,
+    SPOT_IMPORT_MARKER,
     build_itinerary_context,
     build_itinerary_followup_reply,
     build_itinerary_import_reply,
@@ -75,13 +101,41 @@ from location_flow import (
 )
 from weather_flow import run_weather_recommendation
 from route_optimization import build_optimized_route_reply, should_optimize_route
-
-load_dotenv()
+from expense_flow import (
+    ActionSpec,
+    FlowResult,
+    build_expense_report_result,
+    ensure_book_from_itinerary,
+    get_feature_database_module,
+    handle_expense_postback,
+    handle_expense_text,
+)
+from expense_report_pdf import (
+    build_expense_report_pdf,
+    create_expense_report_session,
+    expense_report_filename,
+    get_expense_report_session,
+)
+from invoice_flow import (
+    INVOICE_MAX_IMAGE_BYTES,
+    claim_capture_session,
+    get_capture_session,
+    has_pending_chat_session,
+    handle_invoice_image_bytes,
+    handle_invoice_postback,
+    process_liff_capture,
+    start_invoice_flow,
+)
+from privacy_redaction import redact_sensitive_identifiers, redact_structure
+from scheduled_tasks import run_due_tasks
+from trip_schedule_flow import handle_schedule_postback, handle_schedule_text
+from vote_flow import create_anonymous_poll, handle_vote_postback, handle_vote_text
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = max(
     1024,
     int(os.getenv("MAX_REQUEST_BODY_BYTES", str(1024 * 1024))),
+    INVOICE_MAX_IMAGE_BYTES + 256 * 1024,
 )
 ENABLE_VERBOSE_DEBUG = os.getenv("ENABLE_VERBOSE_DEBUG", "false").strip().lower() in {
     "1",
@@ -130,6 +184,8 @@ SEMANTIC_DUPLICATE_SIMILARITY_THRESHOLD = float(
 TOPIC_JUDGE_HISTORY_LIMIT = max(1, int(os.getenv("TOPIC_JUDGE_HISTORY_LIMIT", "6")))
 DEFAULT_FINAL_REPLY = "我先整理一個方向給大家參考。"
 LIFF_LOCATION_DIR = os.path.join(app.root_path, "liff_app")
+LIFF_INVOICE_DIR = os.path.join(app.root_path, "invoice_liff")
+TRIP_WEBSITE_DIR = os.path.join(app.root_path, "trip_website")
 LIFF_MAX_JSON_BYTES = max(1024, int(os.getenv("LIFF_MAX_JSON_BYTES", "8192")))
 LIFF_MAX_ACCURACY_METERS = max(
     0.0,
@@ -169,6 +225,27 @@ LIFF_ALLOWED_MAP_HOSTS = tuple(
     ).split(",")
     if host.strip()
 )
+ENABLE_TRIP_MANAGEMENT_FEATURES = os.getenv(
+    "ENABLE_TRIP_MANAGEMENT_FEATURES",
+    "false",
+).strip().casefold() in {"1", "true", "yes", "on"}
+USE_IN_MEMORY_FEATURE_DB = os.getenv(
+    "USE_IN_MEMORY_FEATURE_DB",
+    "false",
+).strip().casefold() in {"1", "true", "yes", "on"}
+ENABLE_OPPORTUNISTIC_SCHEDULE_CHECK = os.getenv(
+    "ENABLE_OPPORTUNISTIC_SCHEDULE_CHECK",
+    "true",
+).strip().casefold() in {"1", "true", "yes", "on"}
+SCHEDULE_CHECK_INTERVAL_SECONDS = max(
+    30,
+    int(os.getenv("SCHEDULE_CHECK_INTERVAL_SECONDS", "120")),
+)
+INTERNAL_TASK_SECRET = os.getenv("INTERNAL_TASK_SECRET", "").strip()
+PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").strip()
+
+if ENABLE_TRIP_MANAGEMENT_FEATURES and USE_IN_MEMORY_FEATURE_DB:
+    print("⚠️ 新功能目前使用記憶體測試資料庫；Flask 重新啟動後資料會全部消失。")
 
 
 def _log_failure(operation: str, exc: BaseException) -> None:
@@ -176,13 +253,81 @@ def _log_failure(operation: str, exc: BaseException) -> None:
     app.logger.exception("%s failed", operation)
 
 
+_LINE_IMPORT_CODE_ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
+_line_import_index_lock = threading.Lock()
+_line_import_indexes_ready = False
+
+
+def _line_import_code_collection():
+    """取得 app.py 私有的短碼 collection，避免修改共用 db.py。"""
+    global _line_import_indexes_ready
+    collection = db_module.get_db().line_import_codes
+    if not _line_import_indexes_ready:
+        with _line_import_index_lock:
+            if not _line_import_indexes_ready:
+                collection.create_index("code", unique=True)
+                collection.create_index("expires_at", expireAfterSeconds=0)
+                _line_import_indexes_ready = True
+    return collection
+
+
+def create_line_import_code(
+    signed_marker: str,
+    signed_token: str,
+    ttl_seconds: int = 15 * 60,
+) -> str:
+    """建立高熵、短效的 LINE 匯入碼；完整簽章只保留在伺服器端。"""
+    now = datetime.now(timezone.utc)
+    expires_at = now + timedelta(seconds=max(60, min(int(ttl_seconds), 30 * 60)))
+    collection = _line_import_code_collection()
+
+    for _ in range(8):
+        compact_code = "".join(secrets.choice(_LINE_IMPORT_CODE_ALPHABET) for _ in range(12))
+        display_code = "-".join(
+            compact_code[index : index + 4]
+            for index in range(0, len(compact_code), 4)
+        )
+        try:
+            collection.insert_one(
+                {
+                    "code": display_code,
+                    "signed_marker": signed_marker,
+                    "signed_token": signed_token,
+                    "created_at": now,
+                    "expires_at": expires_at,
+                }
+            )
+            return display_code
+        except DuplicateKeyError:
+            continue
+
+    raise RuntimeError("無法建立唯一的 LINE 匯入碼")
+
+
+def consume_line_import_code(code: str) -> tuple[str, str] | None:
+    """原子領取並刪除匯入碼，避免同一份行程訊息被重放。"""
+    normalized_code = str(code or "").strip().upper()
+    document = _line_import_code_collection().find_one_and_delete(
+        {
+            "code": normalized_code,
+            "expires_at": {"$gt": datetime.now(timezone.utc)},
+        }
+    )
+    if document is None:
+        return None
+    return str(document.get("signed_marker") or ""), str(document.get("signed_token") or "")
+
+
 def _expected_liff_channel_id() -> str:
     configured_channel_id = os.getenv("LINE_LOGIN_CHANNEL_ID", "").strip()
     if configured_channel_id:
         return configured_channel_id
 
-    liff_id_prefix = os.getenv("LIFF_ID", "").strip().split("-", 1)[0]
-    return liff_id_prefix if liff_id_prefix.isdigit() else ""
+    for env_name in ("LIFF_ID", "LIFF_INVOICE_ID"):
+        liff_id_prefix = os.getenv(env_name, "").strip().split("-", 1)[0]
+        if liff_id_prefix.isdigit():
+            return liff_id_prefix
+    return ""
 
 
 def _extract_bearer_token() -> str:
@@ -288,6 +433,21 @@ def _release_webhook_event(event_id: str) -> None:
         _processed_webhook_events.pop(event_id, None)
 
 
+def _claim_persistent_feature_event(event_id: str) -> bool:
+    if not ENABLE_TRIP_MANAGEMENT_FEATURES:
+        return True
+    claim = getattr(get_feature_database_module(), "claim_feature_event", None)
+    if not callable(claim):
+        return True
+    return bool(claim(event_id=event_id, feature="line_webhook", ttl_seconds=604800))
+
+
+def _release_persistent_feature_event(event_id: str) -> None:
+    release = getattr(get_feature_database_module(), "release_feature_event", None)
+    if callable(release):
+        release(event_id=event_id)
+
+
 def _sanitize_maps_url(value: Any) -> str:
     candidate = str(value or "").strip()
     if not candidate or len(candidate) > 2048:
@@ -346,8 +506,11 @@ def add_security_headers(response):
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Referrer-Policy"] = "no-referrer"
     response.headers["X-Frame-Options"] = "DENY"
-    response.headers["Permissions-Policy"] = "geolocation=(self), camera=(), microphone=()"
-    if request.path.startswith(("/liff/", "/api/liff/")):
+    if request.path.startswith("/liff/invoice"):
+        response.headers["Permissions-Policy"] = "geolocation=(), camera=(self), microphone=()"
+    else:
+        response.headers["Permissions-Policy"] = "geolocation=(self), camera=(), microphone=()"
+    if request.path.startswith(("/liff/", "/api/liff/", "/trip")):
         response.headers["Cache-Control"] = "no-store, max-age=0"
         response.headers["Pragma"] = "no-cache"
     if request.path == "/liff/location":
@@ -359,6 +522,23 @@ def add_security_headers(response):
             "style-src 'self'; "
             "object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
         )
+    elif request.path == "/liff/invoice":
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self'; "
+            "script-src 'self' https://static.line-scdn.net; "
+            "connect-src 'self' https://api.line.me https://*.line.me; "
+            "img-src 'self' data: blob:; style-src 'self'; "
+            "object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+        )
+    elif request.path.startswith("/trip"):
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self'; "
+            "script-src 'self'; "
+            "style-src 'self' 'unsafe-inline'; "
+            "img-src 'self' data: blob: https://*.tile.openstreetmap.org; "
+            "connect-src 'self'; font-src 'self'; "
+            "object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+        )
     return response
 
 
@@ -368,6 +548,13 @@ class ConversationState:
     history: deque[str] = field(
         default_factory=lambda: deque(maxlen=CONVERSATION_WINDOW_SIZE)
     )
+    # 只在目前 Flask process 暫存近期發言者，建立投票時立即轉成 HMAC；
+    # 不會把這份原始 LINE user ID 清單寫進投票資料庫。
+    recent_participants: deque[str] = field(
+        default_factory=lambda: deque(maxlen=CONVERSATION_WINDOW_SIZE)
+    )
+    # 送給 AI 時只使用 A、B 等暫時別名，不暴露 LINE user ID。
+    participant_aliases: dict[str, str] = field(default_factory=dict)
     # 只保存能明確辨識的主題；模糊訊息不會覆蓋它。
     current_topic: str = ""
     user_message_count: int = 0
@@ -404,7 +591,7 @@ def _get_or_create_state(conversation_key: str) -> ConversationState:
 
 def _note_user_message(conversation_key: str, text: str) -> None:
     # 這裡會把匯入行程這類系統轉換出的訊息也記進 history。
-    normalized_text = text.strip()
+    normalized_text = redact_sensitive_identifiers(text.strip())
     if not normalized_text:
         return
 
@@ -421,8 +608,8 @@ def _store_imported_itinerary(
 ) -> None:
     with conversation_lock:
         state = _get_or_create_state(conversation_key)
-        state.imported_itinerary = itinerary
-        state.focused_spot = focused_spot
+        state.imported_itinerary = redact_structure(itinerary)
+        state.focused_spot = redact_structure(focused_spot)
 
 
 def _get_imported_itinerary_state(
@@ -444,12 +631,84 @@ def _reset_conversation_state(conversation_key: str) -> None:
 
 
 def _reply_text(line_bot_api: MessagingApi, reply_token: str, text: str) -> None:
+    safe_text = redact_sensitive_identifiers(text)
     line_bot_api.reply_message(
         ReplyMessageRequest(
             reply_token=reply_token,
-            messages=[TextMessage(text=text)],
+            messages=[TextMessage(text=safe_text)],
         )
     )
+
+
+LINE_TEXT_MAX_UTF16_UNITS = 5000
+LINE_TEXT_CHUNK_TARGET_UTF16_UNITS = 4800
+LINE_MESSAGES_PER_REQUEST = 5
+
+
+def _utf16_units(text: str) -> int:
+    """Return LINE's character count (UTF-16 code units) for *text*."""
+    return len(text.encode("utf-16-le")) // 2
+
+
+def _prefix_within_utf16_limit(text: str, max_units: int) -> tuple[str, str]:
+    """Split text at a Unicode character boundary without exceeding max_units."""
+    used_units = 0
+    cut_at = 0
+    for index, character in enumerate(text):
+        character_units = 2 if ord(character) > 0xFFFF else 1
+        if used_units + character_units > max_units:
+            break
+        used_units += character_units
+        cut_at = index + 1
+    return text[:cut_at], text[cut_at:]
+
+
+def _split_line_text(text: str) -> list[str]:
+    """Split long LINE text on paragraph boundaries without dropping content."""
+    safe_text = redact_sensitive_identifiers(text.strip())
+    if not safe_text:
+        return []
+    if _utf16_units(safe_text) <= LINE_TEXT_MAX_UTF16_UNITS:
+        return [safe_text]
+
+    chunks: list[str] = []
+    remaining = safe_text
+    while remaining:
+        candidate, tail = _prefix_within_utf16_limit(
+            remaining,
+            LINE_TEXT_CHUNK_TARGET_UTF16_UNITS,
+        )
+        if not tail:
+            chunks.append(candidate.rstrip())
+            break
+
+        # Expense reports separate entries with a blank line. Prefer keeping an
+        # entire expense together; fall back to a line boundary for other text.
+        minimum_break = max(1, len(candidate) // 2)
+        cut_at = candidate.rfind("\n\n")
+        separator_length = 2
+        if cut_at < minimum_break:
+            cut_at = candidate.rfind("\n")
+            separator_length = 1
+        if cut_at < minimum_break:
+            chunks.append(candidate.rstrip())
+            remaining = tail.lstrip("\n")
+            continue
+
+        chunks.append(candidate[:cut_at].rstrip())
+        remaining = (candidate[cut_at + separator_length :] + tail).lstrip("\n")
+
+    if len(chunks) == 1:
+        return chunks
+    total = len(chunks)
+    return [f"（{index}/{total}）\n{chunk}" for index, chunk in enumerate(chunks, start=1)]
+
+
+def _message_batches(messages: list[TextMessage]) -> list[list[TextMessage]]:
+    return [
+        messages[index : index + LINE_MESSAGES_PER_REQUEST]
+        for index in range(0, len(messages), LINE_MESSAGES_PER_REQUEST)
+    ]
 
 
 def _reply_text_and_mark(
@@ -458,7 +717,7 @@ def _reply_text_and_mark(
     scenario_code: str,
     text: str,
 ) -> None:
-    normalized_text = text.strip()
+    normalized_text = redact_sensitive_identifiers(text.strip())
     if not normalized_text:
         return
 
@@ -475,7 +734,7 @@ def _reply_text_if_allowed(
     scenario_code: str,
     text: str,
 ) -> None:
-    normalized_text = text.strip()
+    normalized_text = redact_sensitive_identifiers(text.strip())
     if not normalized_text:
         return
 
@@ -492,15 +751,18 @@ def _reply_text_if_allowed(
 
 
 def _push_text(push_target_id: str, text: str) -> None:
+    if not push_target_id:
+        return
+    messages = [TextMessage(text=chunk) for chunk in _split_line_text(text)]
+    if not messages:
+        return
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
-        line_bot_api.push_message(
-            PushMessageRequest(
-                to=push_target_id,
-                messages=[TextMessage(text=text)],
-            ),
-            x_line_retry_key=str(uuid4()),
-        )
+        for batch in _message_batches(messages):
+            line_bot_api.push_message(
+                PushMessageRequest(to=push_target_id, messages=batch),
+                x_line_retry_key=str(uuid4()),
+            )
 
 
 def _reply_message_object(
@@ -508,11 +770,228 @@ def _reply_message_object(
     reply_token: str,
     message: TextMessage,
 ) -> None:
+    message.text = redact_sensitive_identifiers(message.text)
     line_bot_api.reply_message(
         ReplyMessageRequest(
             reply_token=reply_token,
             messages=[message],
         )
+    )
+
+
+def _build_anonymous_poll_flex(result: FlowResult) -> FlexMessage | None:
+    poll = result.data.get("anonymous_poll") if isinstance(result.data, dict) else None
+    if not isinstance(poll, dict) or poll.get("status") != "active":
+        return None
+    question = redact_sensitive_identifiers(str(poll.get("question") or "群組投票"))[:200]
+    option_labels: list[str] = []
+    for option in poll.get("options") or []:
+        if isinstance(option, dict):
+            label = str(option.get("label") or option.get("text") or "")
+        else:
+            label = str(option)
+        if label.strip():
+            option_labels.append(redact_sensitive_identifiers(label.strip())[:80])
+    body_contents: list[dict[str, Any]] = [
+        {
+            "type": "text",
+            "text": "匿名投票",
+            "size": "sm",
+            "color": "#147D6F",
+            "weight": "bold",
+        },
+        {
+            "type": "text",
+            "text": question,
+            "size": "xl",
+            "weight": "bold",
+            "wrap": True,
+            "margin": "md",
+        },
+        {
+            "type": "text",
+            "text": "投票期間不公開票數；截止前可重新選擇。",
+            "size": "sm",
+            "color": "#666666",
+            "wrap": True,
+            "margin": "md",
+        },
+    ]
+    for index, label in enumerate(option_labels, start=1):
+        body_contents.append(
+            {
+                "type": "text",
+                "text": f"{index}. {label}",
+                "size": "md",
+                "color": "#263238",
+                "wrap": True,
+                "margin": "sm" if index > 1 else "lg",
+            }
+        )
+    deadline = poll.get("deadline_at")
+    if isinstance(deadline, datetime):
+        body_contents.append(
+            {
+                "type": "text",
+                "text": f"截止：{deadline.astimezone().strftime('%m/%d %H:%M')}",
+                "size": "sm",
+                "color": "#666666",
+                "margin": "sm",
+            }
+        )
+    footer_contents: list[dict[str, Any]] = []
+    for index, action_spec in enumerate(result.actions[:6]):
+        option_label = option_labels[index] if index < len(option_labels) else action_spec.label
+        label = f"投給 {index + 1}. {option_label}"[:20]
+        footer_contents.append(
+            {
+                "type": "button",
+                "style": "secondary",
+                "color": "#DCEFEA",
+                "height": "sm",
+                "margin": "sm" if index else "none",
+                "action": {
+                    "type": "postback",
+                    "label": label[:20],
+                    "data": action_spec.value[:300],
+                },
+            }
+        )
+    payload = {
+        "type": "bubble",
+        "size": "mega",
+        "body": {
+            "type": "box",
+            "layout": "vertical",
+            "contents": body_contents,
+            "paddingAll": "20px",
+        },
+        "footer": {
+            "type": "box",
+            "layout": "vertical",
+            "contents": footer_contents,
+            "paddingAll": "16px",
+        },
+    }
+    return FlexMessage(
+        alt_text=f"匿名投票：{question}"[:400],
+        contents=FlexContainer.from_dict(payload),
+    )
+
+
+def _build_feature_messages(result: FlowResult) -> list[Any]:
+    poll_message = _build_anonymous_poll_flex(result)
+    if poll_message is not None:
+        return [poll_message]
+    items: list[QuickReplyItem] = []
+    for action_spec in result.actions[:13]:
+        label = redact_sensitive_identifiers(action_spec.label.strip())[:20] or "選擇"
+        if action_spec.kind == "uri":
+            action = URIAction(label=label, uri=action_spec.value)
+        elif action_spec.kind == "message":
+            action = MessageAction(label=label, text=action_spec.value[:300])
+        else:
+            postback_args: dict[str, Any] = {
+                "label": label,
+                "data": action_spec.value[:300],
+            }
+            if not action_spec.value.startswith("vote|cast|"):
+                postback_args["display_text"] = label
+            action = PostbackAction(**postback_args)
+        items.append(QuickReplyItem(action=action))
+    quick_reply = QuickReply(items=items) if items else None
+    chunks = _split_line_text(result.text)
+    messages = [TextMessage(text=chunk) for chunk in chunks]
+    if messages and quick_reply is not None:
+        messages[-1].quick_reply = quick_reply
+    return messages
+
+
+def _expense_report_base_url() -> str:
+    candidate = PUBLIC_BASE_URL or (request.url_root if has_request_context() else "")
+    candidate = str(candidate or "").strip().rstrip("/")
+    if not candidate:
+        return ""
+    try:
+        parsed = urlparse(candidate)
+    except ValueError:
+        return ""
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return ""
+    return candidate
+
+
+def _attach_expense_report_pdf(result: FlowResult) -> FlowResult:
+    report = result.data.get("expense_report") if isinstance(result.data, dict) else None
+    if not isinstance(report, dict):
+        return result
+    book = report.get("book")
+    expenses = report.get("expenses")
+    if not isinstance(book, dict) or not isinstance(expenses, list):
+        return result
+    base_url = _expense_report_base_url()
+    if not base_url:
+        return result
+    token = create_expense_report_session(book, expenses)
+    action = ActionSpec(
+        "下載 PDF",
+        "uri",
+        f"{base_url}/reports/expense/{token}.pdf",
+    )
+    return FlowResult(
+        handled=result.handled,
+        text=result.text,
+        actions=[*result.actions, action],
+        data=result.data,
+    )
+
+
+def _reply_feature_result(event: Any, result: FlowResult) -> None:
+    if not result.text.strip():
+        return
+    result = _attach_expense_report_pdf(result)
+    messages = _build_feature_messages(result)
+    if not messages:
+        return
+    with ApiClient(configuration) as api_client:
+        line_bot_api = MessagingApi(api_client)
+        batches = _message_batches(messages)
+        line_bot_api.reply_message(
+            ReplyMessageRequest(reply_token=event.reply_token, messages=batches[0])
+        )
+        push_target_id = _get_push_target_id(event) or ""
+        if push_target_id:
+            for batch in batches[1:]:
+                line_bot_api.push_message(
+                    PushMessageRequest(to=push_target_id, messages=batch),
+                    x_line_retry_key=str(uuid4()),
+                )
+
+
+def _push_feature_result(push_target_id: str, result: FlowResult) -> None:
+    if not push_target_id or not result.text.strip():
+        return
+    result = _attach_expense_report_pdf(result)
+    messages = _build_feature_messages(result)
+    if not messages:
+        return
+    with ApiClient(configuration) as api_client:
+        line_bot_api = MessagingApi(api_client)
+        for batch in _message_batches(messages):
+                line_bot_api.push_message(
+                    PushMessageRequest(to=push_target_id, messages=batch),
+                    x_line_retry_key=str(uuid4()),
+                )
+
+
+def _push_expense_report(
+    push_target_id: str,
+    book: dict[str, Any],
+    expenses: list[dict[str, Any]],
+) -> None:
+    _push_feature_result(
+        push_target_id,
+        build_expense_report_result(book, expenses),
     )
 
 
@@ -1243,6 +1722,7 @@ def _build_conversation_context(
     conversation_key: str,
     user_text: str,
     line_group_id: str = "",
+    line_user_id: str = "",
     query_embedding: list[float] | None = None,
     exclude_message_id: Any = None,
 ) -> tuple[list[str], str]:
@@ -1264,8 +1744,20 @@ def _build_conversation_context(
         state = _get_or_create_state(conversation_key)
         if should_reset_history:
             state.history.clear()
+            state.recent_participants.clear()
+            state.participant_aliases.clear()
             state.current_topic = ""
-        state.history.append(normalized_text)
+        history_text = normalized_text
+        if line_user_id:
+            state.recent_participants.append(line_user_id)
+            if line_group_id:
+                alias = state.participant_aliases.get(line_user_id)
+                if not alias:
+                    alias_index = len(state.participant_aliases)
+                    alias = chr(ord("A") + alias_index) if alias_index < 5 else "使用者"
+                    state.participant_aliases[line_user_id] = alias
+                history_text = f"{alias}：{normalized_text}"
+        state.history.append(history_text)
         state.user_message_count += 1
         history_snapshot = list(state.history)
         if state.imported_itinerary is not None:
@@ -1308,6 +1800,201 @@ def _get_user_message_count(conversation_key: str) -> int:
             return 0
         state.last_accessed_at = time.monotonic()
         return state.user_message_count
+
+
+def _recent_discussion_participants(conversation_key: str) -> list[str]:
+    with conversation_lock:
+        _prune_conversation_states_locked()
+        state = conversation_states.get(conversation_key)
+        if state is None:
+            return []
+        state.last_accessed_at = time.monotonic()
+        participants: list[str] = []
+        for user_id in state.recent_participants:
+            if user_id and user_id not in participants:
+                participants.append(user_id)
+        return participants
+
+
+def _clear_discussion_after_poll(conversation_key: str) -> None:
+    with conversation_lock:
+        state = conversation_states.get(conversation_key)
+        if state is None:
+            return
+        state.history.clear()
+        state.recent_participants.clear()
+        state.participant_aliases.clear()
+        state.current_topic = ""
+        state.last_accessed_at = time.monotonic()
+
+
+def _clean_auto_poll_options(result: dict[str, Any]) -> list[str]:
+    extracted = result.get("extracted_info")
+    if not isinstance(extracted, dict):
+        return []
+    options: list[str] = []
+    for value in extracted.get("options") or []:
+        label = redact_sensitive_identifiers(str(value).strip())[:80]
+        if label and label not in options:
+            options.append(label)
+    return options[:6]
+
+
+def _is_llm_analysis_result(result: dict[str, Any]) -> bool:
+    evidence = result.get("evidence") or []
+    if not isinstance(evidence, list):
+        evidence = [evidence]
+    return not any("LLM 無法使用" in str(item) for item in evidence)
+
+
+def _has_multi_member_option_support(
+    recent_messages: list[str],
+    options: list[str],
+) -> bool:
+    matched_options: set[str] = set()
+    supporting_speakers: set[str] = set()
+    for raw_line in recent_messages:
+        line = str(raw_line).strip()
+        if "：" not in line:
+            continue
+        speaker, message = line.split("：", 1)
+        if speaker not in {"A", "B", "C", "D", "E"}:
+            continue
+        for option in options:
+            if option in message or (len(message.strip()) >= 2 and message.strip() in option):
+                matched_options.add(option)
+                supporting_speakers.add(speaker)
+    return len(matched_options) >= 2 and len(supporting_speakers) >= 2
+
+
+def _is_semantic_poll_decision(
+    result: dict[str, Any],
+    recent_messages: list[str],
+    options: list[str],
+) -> bool:
+    if not _is_llm_analysis_result(result) or not 2 <= len(options) <= 6:
+        return False
+    extracted = result.get("extracted_info")
+    if not isinstance(extracted, dict):
+        return False
+    if str(extracted.get("decision_state") or "").strip() != "卡住":
+        return False
+    return _has_multi_member_option_support(recent_messages, options)
+
+
+def _has_urgent_poll_signal(messages: list[str]) -> bool:
+    text = "\n".join(messages[-5:])
+    return any(
+        keyword in text
+        for keyword in (
+            "現在",
+            "馬上",
+            "立刻",
+            "快點決定",
+            "等等就",
+            "準備出發",
+            "要出發",
+            "來不及",
+            "趕快",
+        )
+    )
+
+
+def _organize_auto_poll(
+    context_text: str,
+    result: dict[str, Any],
+    candidate_options: list[str],
+    recent_messages: list[str],
+) -> tuple[str, list[str], bool]:
+    fallback_question = "大家最後想選哪一個？"
+    urgent = _has_urgent_poll_signal(recent_messages)
+    payload = _call_small_json_model(
+        model=OPENAI_TOPIC_JUDGE_MODEL,
+        purpose="Automatic poll organizer",
+        system_prompt=(
+            "你負責把已經卡住的群組討論整理成匿名投票。"
+            "只能使用候選選項中已經存在的原文選項，不得新增、合併或改寫選項。"
+            "問題要中立、簡短且不暗示偏好。"
+            "只有必須在幾分鐘內決定才將 urgent 設為 true。"
+            "只輸出 JSON：{\"question\":\"...\",\"options\":[\"...\"],\"urgent\":false}。"
+        ),
+        user_prompt=(
+            f"候選選項：{json.dumps(candidate_options, ensure_ascii=False)}\n"
+            f"AI 分析：{json.dumps(result, ensure_ascii=False)}\n"
+            f"最近討論：\n{context_text[-4000:]}"
+        ),
+    )
+    if not isinstance(payload, dict):
+        return fallback_question, candidate_options, urgent
+    question = redact_sensitive_identifiers(str(payload.get("question") or "").strip())[:200]
+    allowed = {value: value for value in candidate_options}
+    organized: list[str] = []
+    for value in payload.get("options") or []:
+        exact = allowed.get(str(value).strip())
+        if exact and exact not in organized:
+            organized.append(exact)
+    if len(organized) < 2:
+        organized = candidate_options
+    model_urgent = payload.get("urgent") is True or str(payload.get("urgent") or "").casefold() in {
+        "1",
+        "true",
+        "yes",
+    }
+    return question or fallback_question, organized[:6], model_urgent or urgent
+
+
+def _try_start_automatic_poll(
+    event: Any,
+    *,
+    conversation_key: str,
+    line_group_id: str,
+    context_text: str,
+    recent_messages: list[str],
+    result: dict[str, Any],
+) -> bool:
+    if not ENABLE_TRIP_MANAGEMENT_FEATURES or not line_group_id:
+        return False
+    scenario_code = str(result.get("scenario_code") or "").strip()
+    scenario_name = str(result.get("scenario_name") or "").strip()
+    candidate_options = _clean_auto_poll_options(result)
+    is_vote_scenario = scenario_code == "劇本九" or scenario_name == "投票決策"
+    if not is_vote_scenario and not _is_semantic_poll_decision(
+        result,
+        recent_messages,
+        candidate_options,
+    ):
+        return False
+    if not _is_llm_analysis_result(result):
+        # LLM 失敗時的舊備援分類含關鍵字計分，不用它自動建立投票。
+        return False
+    participants = _recent_discussion_participants(conversation_key)
+    if len(candidate_options) < 2 or len(participants) < 2:
+        return False
+    question, options, urgent = _organize_auto_poll(
+        context_text,
+        result,
+        candidate_options,
+        recent_messages,
+    )
+    fingerprint_source = json.dumps(
+        {"question": question, "options": options},
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    flow_result = create_anonymous_poll(
+        line_group_id=line_group_id,
+        question=question,
+        options=options,
+        eligible_line_user_ids=participants,
+        auto_created=True,
+        urgent=urgent,
+        discussion_fingerprint=hashlib.sha256(fingerprint_source.encode("utf-8")).hexdigest(),
+    )
+    if not isinstance(flow_result.data.get("anonymous_poll"), dict):
+        return False
+    _reply_feature_result(event, flow_result)
+    _clear_discussion_after_poll(conversation_key)
+    return True
 
 
 def _should_suppress_duplicate_reply(
@@ -1408,7 +2095,10 @@ def _handle_line_import_message(
     conversation_key: str,
     user_text: str,
 ) -> tuple[str, str] | None:
-    command = extract_line_import_command(user_text)
+    command = extract_line_import_command(
+        user_text,
+        resolve_short_code=consume_line_import_code,
+    )
     if command is None:
         return None
 
@@ -1473,14 +2163,44 @@ def sign_trip_import():
     if not isinstance(payload, dict):
         return jsonify({"ok": False, "error": "Invalid JSON body."}), 400
     try:
-        marker, token = create_signed_line_import_token(
+        signed_marker, signed_token = create_signed_line_import_token(
             kind=str(payload.get("kind") or ""),
             itinerary_id=str(payload.get("itinerary_id") or ""),
             spot_id=str(payload.get("spot_id") or ""),
         )
     except LineImportError:
         return jsonify({"ok": False, "error": "The import request is invalid."}), 400
-    return jsonify({"ok": True, "marker": marker, "token": token})
+    try:
+        code = create_line_import_code(signed_marker, signed_token)
+    except Exception as exc:
+        _log_failure("LINE import code creation", exc)
+        return jsonify({"ok": False, "error": "The import service is temporarily unavailable."}), 503
+
+    marker = (
+        SPOT_IMPORT_MARKER
+        if str(payload.get("kind") or "").strip().casefold() == "spot"
+        else ITINERARY_IMPORT_MARKER
+    )
+    return jsonify({"ok": True, "marker": marker, "code": code})
+
+
+@app.route("/trip", methods=["GET"])
+def redirect_trip_website():
+    return redirect("/trip/", code=308)
+
+
+@app.route("/trip/", methods=["GET"])
+def serve_trip_website():
+    return send_from_directory(TRIP_WEBSITE_DIR, "index.html")
+
+
+@app.route("/trip/<path:filename>", methods=["GET"])
+def serve_trip_website_asset(filename: str):
+    allowed_directories = {"assets", "data", "src", "tiles", "vendor"}
+    top_level_directory = filename.replace("\\", "/").split("/", 1)[0]
+    if top_level_directory not in allowed_directories:
+        abort(404)
+    return send_from_directory(TRIP_WEBSITE_DIR, filename)
 
 
 @app.route("/liff/location", methods=["GET"])
@@ -1521,6 +2241,136 @@ def serve_liff_location_script():
         "location.js",
         mimetype="application/javascript",
     )
+
+
+@app.route("/liff/invoice", methods=["GET"])
+def serve_liff_invoice_page():
+    if not ENABLE_TRIP_MANAGEMENT_FEATURES:
+        abort(404)
+    return send_from_directory(LIFF_INVOICE_DIR, "index.html")
+
+
+@app.route("/liff/invoice/styles.css", methods=["GET"])
+def serve_liff_invoice_styles():
+    return send_from_directory(LIFF_INVOICE_DIR, "styles.css", mimetype="text/css")
+
+
+@app.route("/liff/invoice/app.js", methods=["GET"])
+def serve_liff_invoice_script():
+    return send_from_directory(
+        LIFF_INVOICE_DIR,
+        "app.js",
+        mimetype="application/javascript",
+    )
+
+
+@app.route("/api/liff/invoice/recognize", methods=["POST"])
+def receive_liff_invoice():
+    if not ENABLE_TRIP_MANAGEMENT_FEATURES:
+        return jsonify({"ok": False, "error": "Invoice capture is unavailable."}), 503
+    client_ip = _client_ip_address()
+    if _is_rate_limited("invoice-ip", client_ip, LIFF_RATE_LIMIT_PER_IP):
+        return jsonify({"ok": False, "error": "Too many requests."}), 429
+    if request.content_length is None:
+        return jsonify({"ok": False, "error": "Content-Length is required."}), 411
+    if request.content_length > INVOICE_MAX_IMAGE_BYTES + 256 * 1024:
+        return jsonify({"ok": False, "error": "Invoice image is too large."}), 413
+
+    image_bytes: bytes | None = None
+    qr_payload = ""
+    if request.is_json:
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return jsonify({"ok": False, "error": "Invalid JSON body."}), 400
+        session_token = str(payload.get("session_token") or "").strip()
+        qr_payload = str(payload.get("qr_payload") or "").strip()
+        if not qr_payload or len(qr_payload) > 4096:
+            return jsonify({"ok": False, "error": "Invalid QR payload."}), 400
+    else:
+        session_token = str(request.form.get("session_token") or "").strip()
+        uploaded = request.files.get("image")
+        if uploaded is None:
+            return jsonify({"ok": False, "error": "Invoice image is required."}), 400
+        image_bytes = uploaded.stream.read(INVOICE_MAX_IMAGE_BYTES + 1)
+        if len(image_bytes) > INVOICE_MAX_IMAGE_BYTES:
+            return jsonify({"ok": False, "error": "Invoice image is too large."}), 413
+
+    if not session_token or len(session_token) > 128:
+        return jsonify({"ok": False, "error": "Missing session token."}), 400
+    session = get_capture_session(session_token)
+    if session is None:
+        return jsonify({"ok": False, "error": "This capture session has expired."}), 410
+    if session.status != "pending":
+        return jsonify({"ok": False, "error": "This capture session was already used."}), 409
+    access_token = _extract_bearer_token()
+    if not access_token:
+        return jsonify({"ok": False, "error": "LIFF authentication is required."}), 401
+    authenticated_user_id = _verify_liff_access_token(access_token)
+    if not authenticated_user_id or authenticated_user_id != session.line_user_id:
+        return jsonify({"ok": False, "error": "LIFF authentication failed."}), 403
+    if _is_rate_limited("invoice-user", authenticated_user_id, LIFF_RATE_LIMIT_PER_USER):
+        return jsonify({"ok": False, "error": "Too many requests."}), 429
+
+    session, claim_error = claim_capture_session(session_token, authenticated_user_id)
+    if claim_error == "forbidden":
+        return jsonify({"ok": False, "error": "LIFF authentication failed."}), 403
+    if claim_error == "used":
+        return jsonify({"ok": False, "error": "This capture session was already used."}), 409
+    if claim_error == "expired" or session is None:
+        return jsonify({"ok": False, "error": "This capture session has expired."}), 410
+    try:
+        result = process_liff_capture(
+            session,
+            image_bytes=image_bytes,
+            qr_payload=qr_payload,
+        )
+        _push_feature_result(session.push_target_id, result)
+    except Exception as exc:
+        _log_failure("Invoice recognition", exc)
+        return jsonify({"ok": False, "error": "Invoice recognition failed."}), 422
+    return jsonify({"ok": True, "message": "Invoice draft sent to LINE."})
+
+
+@app.route("/reports/expense/<token>.pdf", methods=["GET"])
+def download_expense_report_pdf(token: str):
+    if not ENABLE_TRIP_MANAGEMENT_FEATURES:
+        abort(404)
+    client_ip = _client_ip_address()
+    if _is_rate_limited("expense-report-pdf-ip", client_ip, LIFF_RATE_LIMIT_PER_IP):
+        abort(429)
+    snapshot = get_expense_report_session(token)
+    if snapshot is None:
+        return "這份 PDF 下載連結已失效，請回 LINE 重新產生花費明細。", 410
+    try:
+        pdf_bytes = build_expense_report_pdf(snapshot)
+    except Exception as exc:
+        _log_failure("Expense report PDF", exc)
+        abort(500)
+    response = send_file(
+        BytesIO(pdf_bytes),
+        mimetype="application/pdf",
+        as_attachment=True,
+        download_name=expense_report_filename(snapshot),
+        max_age=0,
+    )
+    response.headers["Cache-Control"] = "private, no-store, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["X-Robots-Tag"] = "noindex, nofollow, noarchive"
+    return response
+
+
+@app.route("/internal/tasks/run", methods=["POST"])
+def run_internal_tasks():
+    if not ENABLE_TRIP_MANAGEMENT_FEATURES or not INTERNAL_TASK_SECRET:
+        abort(404)
+    supplied_secret = request.headers.get("X-Task-Secret", "")
+    if not hmac.compare_digest(supplied_secret, INTERNAL_TASK_SECRET):
+        abort(403)
+    result = run_due_tasks(
+        push_text=_push_text,
+        push_expense_report=_push_expense_report,
+    )
+    return jsonify({"ok": True, **result})
 
 
 @app.route("/api/liff/location/recommendation", methods=["POST"])
@@ -1668,9 +2518,136 @@ def receive_liff_location_recommendation():
     return jsonify({"ok": True, **response_payload})
 
 
+_schedule_run_lock = threading.Lock()
+_last_schedule_run_at = 0.0
+
+
+def _start_opportunistic_schedule_check() -> None:
+    global _last_schedule_run_at
+    if not ENABLE_TRIP_MANAGEMENT_FEATURES or not ENABLE_OPPORTUNISTIC_SCHEDULE_CHECK:
+        return
+    now = time.monotonic()
+    with _schedule_run_lock:
+        if now - _last_schedule_run_at < SCHEDULE_CHECK_INTERVAL_SECONDS:
+            return
+        _last_schedule_run_at = now
+
+    def _run() -> None:
+        try:
+            run_due_tasks(
+                push_text=_push_text,
+                push_expense_report=_push_expense_report,
+            )
+        except Exception as exc:
+            _log_failure("Opportunistic scheduled tasks", exc)
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
+def _is_explicit_feature_command(text: str) -> bool:
+    return text.startswith(
+        (
+            "開始記帳",
+            "記帳",
+            "確認記帳",
+            "取消記帳",
+            "設定分攤對象",
+            "設定付款人",
+            "修改帳本名稱",
+            "修改草稿",
+            "修改記帳草稿",
+            "修改發票草稿",
+            "修改支出",
+            "取消支出",
+            "發票記帳",
+            "查看花費",
+            "產生花費明細",
+            "結束行程",
+            "重新開啟帳本",
+            "設定行程時間",
+            "建立投票",
+            "開啟投票",
+            "發起投票",
+        )
+    )
+
+
+def _get_group_sender_display_name(line_group_id: str, line_user_id: str) -> str:
+    if not line_group_id or not line_user_id:
+        return ""
+    try:
+        with ApiClient(configuration) as api_client:
+            profile = MessagingApi(api_client).get_group_member_profile(line_group_id, line_user_id)
+        return redact_sensitive_identifiers(str(getattr(profile, "display_name", "") or "").strip())[:40]
+    except Exception as exc:
+        _log_failure("LINE group member profile", exc)
+        return ""
+
+
+def _handle_feature_text(
+    event: MessageEvent,
+    *,
+    user_text: str,
+    line_group_id: str,
+    line_user_id: str,
+    conversation_key: str,
+) -> bool:
+    if not ENABLE_TRIP_MANAGEMENT_FEATURES:
+        if _is_explicit_feature_command(user_text):
+            _reply_feature_result(
+                event,
+                FlowResult(True, "新功能目前尚未啟用，請等 DB 介面完成後再試。"),
+            )
+            return True
+        return False
+
+    if user_text == "發票記帳":
+        default_payer = _get_group_sender_display_name(line_group_id, line_user_id)
+        result = start_invoice_flow(
+            line_group_id=line_group_id,
+            line_user_id=line_user_id,
+            conversation_key=conversation_key,
+            push_target_id=_get_push_target_id(event) or "",
+            request_base_url=request.url_root,
+            default_payer=default_payer,
+        )
+        _reply_feature_result(event, result)
+        return True
+
+    default_payer = (
+        _get_group_sender_display_name(line_group_id, line_user_id)
+        if user_text.startswith("記帳")
+        else ""
+    )
+    result = handle_expense_text(
+        user_text,
+        line_group_id=line_group_id,
+        line_user_id=line_user_id,
+        default_payer=default_payer,
+    )
+    if result.handled:
+        _reply_feature_result(event, result)
+        return True
+
+    for handler_function in (handle_vote_text, handle_schedule_text):
+        result = handler_function(
+            user_text,
+            line_group_id=line_group_id,
+            line_user_id=line_user_id,
+        )
+        if result.handled:
+            _reply_feature_result(event, result)
+            return True
+    return False
+
+
 def _dispatch_webhook_event(event: Any) -> None:
     if isinstance(event, BeaconEvent):
         handle_beacon_event(event)
+    elif isinstance(event, PostbackEvent):
+        handle_feature_postback(event)
+    elif isinstance(event, MessageEvent) and isinstance(event.message, ImageMessageContent):
+        handle_image_message(event)
     elif isinstance(event, MessageEvent) and isinstance(event.message, LocationMessageContent):
         handle_location_message(event)
     elif isinstance(event, MessageEvent) and isinstance(event.message, TextMessageContent):
@@ -1698,14 +2675,71 @@ def callback() -> str:
             event_id = hashlib.sha256(event.to_json().encode("utf-8")).hexdigest()
         if not _claim_webhook_event(event_id):
             continue
+        if not _claim_persistent_feature_event(event_id):
+            continue
         try:
             _dispatch_webhook_event(event)
         except Exception as exc:
             _release_webhook_event(event_id)
+            _release_persistent_feature_event(event_id)
             _log_failure("LINE webhook event handling", exc)
             abort(500)
 
+    _start_opportunistic_schedule_check()
+
     return "OK"
+
+
+@handler.add(PostbackEvent)
+def handle_feature_postback(event: PostbackEvent) -> None:
+    if not ENABLE_TRIP_MANAGEMENT_FEATURES:
+        _reply_feature_result(event, FlowResult(True, "新功能目前尚未啟用。"))
+        return
+    source = getattr(event, "source", None)
+    line_group_id = getattr(source, "group_id", None) or ""
+    line_user_id = getattr(source, "user_id", None) or ""
+    postback = getattr(event, "postback", None)
+    data = str(getattr(postback, "data", "") or "").strip()
+    for handler_function in (
+        handle_expense_postback,
+        handle_invoice_postback,
+        handle_schedule_postback,
+        handle_vote_postback,
+    ):
+        result = handler_function(
+            data,
+            line_group_id=line_group_id,
+            line_user_id=line_user_id,
+        )
+        if result.handled:
+            _reply_feature_result(event, result)
+            return
+    _reply_feature_result(event, FlowResult(True, "這個操作已失效，請重新執行指令。"))
+
+
+@handler.add(MessageEvent, message=ImageMessageContent)
+def handle_image_message(event: MessageEvent) -> None:
+    if not ENABLE_TRIP_MANAGEMENT_FEATURES:
+        return
+    source = getattr(event, "source", None)
+    line_group_id = getattr(source, "group_id", None) or ""
+    line_user_id = getattr(source, "user_id", None) or ""
+    if not has_pending_chat_session(line_group_id, line_user_id):
+        return
+    try:
+        with ApiClient(configuration) as api_client:
+            blob_api = MessagingApiBlob(api_client)
+            image_bytes = bytes(blob_api.get_message_content(str(event.message.id)))
+        result = handle_invoice_image_bytes(
+            image_bytes,
+            line_group_id=line_group_id,
+            line_user_id=line_user_id,
+        )
+        if result.handled:
+            _reply_feature_result(event, result)
+    except Exception as exc:
+        _log_failure("LINE invoice image", exc)
+        _reply_feature_result(event, FlowResult(True, "圖片讀取失敗，請重新拍攝後再試。"))
 
 
 @handler.add(BeaconEvent)
@@ -1781,7 +2815,9 @@ def handle_location_message(event: MessageEvent) -> None:
 
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_message(event: MessageEvent) -> None:
-    user_text = event.message.text.strip()
+    # Redaction is the first operation on user-controlled text.  The raw value is
+    # never logged, stored, embedded, or sent to an AI provider.
+    user_text = redact_sensitive_identifiers(event.message.text.strip())
     if not user_text:
         return
 
@@ -1808,6 +2844,20 @@ def handle_message(event: MessageEvent) -> None:
         return
 
     try:
+        if _handle_feature_text(
+            event,
+            user_text=user_text,
+            line_group_id=line_group_id,
+            line_user_id=line_user_id,
+            conversation_key=conversation_key,
+        ):
+            return
+    except Exception as exc:
+        _log_failure("Feature text routing", exc)
+        _reply_feature_result(event, FlowResult(True, "新功能暫時無法處理這個操作，請稍後再試。"))
+        return
+
+    try:
         import_result = _handle_line_import_message(conversation_key, user_text)
     except LineImportError:
         _note_user_message(conversation_key, "[rejected LINE import]")
@@ -1827,10 +2877,20 @@ def handle_message(event: MessageEvent) -> None:
 
     if import_result:
         import_reply, safe_import_record = import_result
+        safe_import_record = redact_sensitive_identifiers(safe_import_record)
+        import_reply = redact_sensitive_identifiers(import_reply)
         try:
             if line_group_id:
                 upsert_group(line_group_id)
                 upsert_member(line_group_id, line_user_id)
+                if ENABLE_TRIP_MANAGEMENT_FEATURES:
+                    imported_itinerary, _ = _get_imported_itinerary_state(conversation_key)
+                    if imported_itinerary:
+                        ensure_book_from_itinerary(
+                            line_group_id=line_group_id,
+                            line_user_id=line_user_id,
+                            itinerary=imported_itinerary,
+                        )
             save_message(
                 line_group_id,
                 line_user_id,
@@ -1877,6 +2937,7 @@ def handle_message(event: MessageEvent) -> None:
             conversation_key,
             user_text,
             line_group_id=line_group_id,
+            line_user_id=line_user_id,
             query_embedding=query_embedding,
             exclude_message_id=saved_message_id,
         )
@@ -1957,6 +3018,20 @@ def handle_message(event: MessageEvent) -> None:
         confidence_score = float(result.get("confidence_score", 0))
     except (TypeError, ValueError):
         confidence_score = 0.0
+
+    try:
+        if _try_start_automatic_poll(
+            event,
+            conversation_key=conversation_key,
+            line_group_id=line_group_id,
+            context_text=context_text,
+            recent_messages=_recent_messages,
+            result=result,
+        ):
+            _debug_print("Automatic anonymous poll created from scenario nine")
+            return
+    except Exception as exc:
+        _log_failure("Automatic poll flow", exc)
 
     try:
         if should_optimize_route(result):

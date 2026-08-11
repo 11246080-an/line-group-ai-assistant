@@ -1,0 +1,90 @@
+:root {
+  color-scheme: light;
+  --paper: #fffdf8;
+  --cream: #f4efe4;
+  --ink: #1e2933;
+  --muted: #65717b;
+  --line: #d9cfbf;
+  --green: #176b5b;
+  --green-soft: #dcefe9;
+  --orange-soft: #fff0d8;
+  --danger: #9b2c2c;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  font-family: "Segoe UI", "Noto Sans TC", sans-serif;
+  color: var(--ink);
+  background:
+    radial-gradient(circle at 90% 0%, #dcefe9 0, transparent 32%),
+    linear-gradient(180deg, #f8f4eb 0%, #eee5d7 100%);
+}
+
+main {
+  width: min(620px, calc(100% - 28px));
+  margin: 0 auto;
+  padding: max(24px, env(safe-area-inset-top)) 0 max(32px, env(safe-area-inset-bottom));
+}
+
+header, .capture-card, .status-card, .notice {
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  background: rgba(255, 253, 248, 0.94);
+  box-shadow: 0 18px 42px rgba(72, 61, 46, 0.08);
+}
+
+header { padding: 24px; }
+.eyebrow { margin: 0 0 8px; color: var(--green); font-size: .78rem; letter-spacing: .12em; }
+h1 { margin: 0 0 8px; font-size: clamp(1.8rem, 8vw, 2.5rem); }
+header p, .status-card p { margin: 0; line-height: 1.65; color: var(--muted); }
+
+.notice {
+  margin: 14px 0;
+  padding: 13px 16px;
+  background: var(--orange-soft);
+  color: #713d13;
+  line-height: 1.5;
+}
+
+.capture-card, .status-card { padding: 18px; margin-bottom: 14px; }
+.capture-card { display: grid; gap: 12px; }
+input[type="file"] { position: absolute; width: 1px; height: 1px; overflow: hidden; opacity: 0; }
+
+.button {
+  width: 100%;
+  display: inline-flex;
+  justify-content: center;
+  align-items: center;
+  min-height: 48px;
+  padding: 12px 18px;
+  border: 0;
+  border-radius: 999px;
+  font: inherit;
+  font-weight: 650;
+  cursor: pointer;
+  text-decoration: none;
+}
+.button:disabled { opacity: .58; cursor: wait; }
+.primary { color: white; background: var(--green); }
+.secondary { color: var(--green); background: var(--green-soft); }
+.ghost { color: var(--ink); background: var(--cream); }
+
+.preview { display: grid; gap: 14px; }
+.preview img {
+  width: 100%;
+  max-height: 58vh;
+  object-fit: contain;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: white;
+}
+.actions { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.error { color: var(--danger) !important; }
+.hidden { display: none !important; }
+
+@media (max-width: 420px) {
+  .actions { grid-template-columns: 1fr; }
+}

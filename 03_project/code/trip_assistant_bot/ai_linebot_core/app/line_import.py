@@ -10,16 +10,19 @@ from pathlib import Path
 import re
 from dataclasses import dataclass
 import time
-from typing import Any
+from typing import Any, Callable
 
 
-ITINERARY_IMPORT_MARKER = "#TRIP_IMPORT_V2"
-SPOT_IMPORT_MARKER = "#TRIP_SPOT_IMPORT_V2"
+ITINERARY_IMPORT_MARKER = "#TRIP_IMPORT_V3"
+SPOT_IMPORT_MARKER = "#TRIP_SPOT_IMPORT_V3"
+SIGNED_ITINERARY_IMPORT_MARKER = "#TRIP_IMPORT_V2"
+SIGNED_SPOT_IMPORT_MARKER = "#TRIP_SPOT_IMPORT_V2"
 LEGACY_IMPORT_MARKERS = ("#TRIP_IMPORT_V1", "#TRIP_SPOT_IMPORT_V1")
 ITINERARY_IMPORT_HEADER = "【Trip Assistant 行程匯入】"
 SPOT_IMPORT_HEADER = "【Trip Assistant 景點同步】"
 MAX_IMPORT_MESSAGE_CHARS = 12_000
 MAX_IMPORT_TOKEN_CHARS = 4_096
+MAX_IMPORT_CODE_CHARS = 32
 DEFAULT_IMPORT_TOKEN_TTL_SECONDS = 15 * 60
 MAX_IMPORT_TOKEN_TTL_SECONDS = 30 * 60
 
@@ -84,11 +87,11 @@ class LineImportCommand:
 
     @property
     def is_itinerary(self) -> bool:
-        return self.marker == ITINERARY_IMPORT_MARKER
+        return self.marker in (ITINERARY_IMPORT_MARKER, SIGNED_ITINERARY_IMPORT_MARKER)
 
     @property
     def is_spot(self) -> bool:
-        return self.marker == SPOT_IMPORT_MARKER
+        return self.marker in (SPOT_IMPORT_MARKER, SIGNED_SPOT_IMPORT_MARKER)
 
 
 def create_signed_line_import_token(
@@ -103,7 +106,7 @@ def create_signed_line_import_token(
 
     if normalized_kind == "itinerary":
         _lookup_itinerary_payload(itinerary_id=normalized_itinerary_id)
-        marker = ITINERARY_IMPORT_MARKER
+        marker = SIGNED_ITINERARY_IMPORT_MARKER
     elif normalized_kind == "spot":
         if not normalized_spot_id:
             raise LineImportError("景點匯入缺少景點編號。")
@@ -111,7 +114,7 @@ def create_signed_line_import_token(
             itinerary_id=normalized_itinerary_id,
             spot_id=normalized_spot_id,
         )
-        marker = SPOT_IMPORT_MARKER
+        marker = SIGNED_SPOT_IMPORT_MARKER
     else:
         raise LineImportError("不支援的 LINE 匯入類型。")
 
@@ -135,7 +138,11 @@ def create_signed_line_import_token(
     return marker, f"{encoded_claims}.{_base64url_encode(signature)}"
 
 
-def extract_line_import_command(text: str) -> LineImportCommand | None:
+def extract_line_import_command(
+    text: str,
+    *,
+    resolve_short_code: Callable[[str], tuple[str, str] | None] | None = None,
+) -> LineImportCommand | None:
     message = text.strip()
     if not message:
         return None
@@ -144,7 +151,40 @@ def extract_line_import_command(text: str) -> LineImportCommand | None:
             raise LineImportError("LINE 匯入訊息過長。")
         return None
 
-    for marker in (ITINERARY_IMPORT_MARKER, SPOT_IMPORT_MARKER):
+    lines = message.splitlines()
+    short_marker = None
+    expected_signed_marker = None
+    if lines and lines[0].strip() == ITINERARY_IMPORT_HEADER:
+        short_marker = ITINERARY_IMPORT_MARKER
+        expected_signed_marker = SIGNED_ITINERARY_IMPORT_MARKER
+    elif lines and lines[0].strip() == SPOT_IMPORT_HEADER:
+        short_marker = SPOT_IMPORT_MARKER
+        expected_signed_marker = SIGNED_SPOT_IMPORT_MARKER
+
+    if short_marker is not None and "匯入碼" in message:
+        code_matches = re.findall(
+            r"^匯入碼[：:]\s*([A-Z2-9]{4}(?:-[A-Z2-9]{4}){2})\s*$",
+            message,
+            flags=re.MULTILINE,
+        )
+        if len(code_matches) != 1 or len(code_matches[0]) > MAX_IMPORT_CODE_CHARS:
+            raise LineImportError("LINE 匯入碼格式錯誤，請從網站重新分享。")
+        if resolve_short_code is None:
+            raise LineImportError("LINE 匯入碼服務目前無法使用。")
+
+        resolved_import = resolve_short_code(code_matches[0])
+        if resolved_import is None:
+            raise LineImportError("LINE 匯入碼已使用或過期，請從網站重新分享。")
+        signed_marker, signed_token = resolved_import
+        if signed_marker != expected_signed_marker:
+            raise LineImportError("LINE 匯入碼類型不符。")
+        return LineImportCommand(
+            marker=short_marker,
+            payload=_verify_signed_line_import_token(signed_marker, signed_token),
+        )
+
+    # 相容部署切換前已送出的 V2 長簽章；其 15 分鐘效期結束後自然淘汰。
+    for marker in (SIGNED_ITINERARY_IMPORT_MARKER, SIGNED_SPOT_IMPORT_MARKER):
         if marker not in message:
             continue
 
@@ -204,9 +244,9 @@ def _verify_signed_line_import_token(marker: str, token: str) -> dict[str, Any]:
     kind = str(claims.get("kind") or "").casefold()
     itinerary_id = _bounded_identifier(claims.get("itinerary_id"), "itinerary_id")
     spot_id = _bounded_identifier(claims.get("spot_id"), "spot_id", required=False)
-    if marker == ITINERARY_IMPORT_MARKER and kind == "itinerary":
+    if marker == SIGNED_ITINERARY_IMPORT_MARKER and kind == "itinerary":
         return _lookup_itinerary_payload(itinerary_id=itinerary_id)
-    if marker == SPOT_IMPORT_MARKER and kind == "spot" and spot_id:
+    if marker == SIGNED_SPOT_IMPORT_MARKER and kind == "spot" and spot_id:
         return _lookup_spot_payload(itinerary_id=itinerary_id, spot_id=spot_id)
     raise LineImportError("LINE 匯入類型與簽章內容不符。")
 
@@ -217,6 +257,8 @@ def _looks_like_line_import(message: str) -> bool:
         for marker in (
             ITINERARY_IMPORT_MARKER,
             SPOT_IMPORT_MARKER,
+            SIGNED_ITINERARY_IMPORT_MARKER,
+            SIGNED_SPOT_IMPORT_MARKER,
             *LEGACY_IMPORT_MARKERS,
             ITINERARY_IMPORT_HEADER,
             SPOT_IMPORT_HEADER,

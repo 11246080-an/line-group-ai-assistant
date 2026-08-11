@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>發票記帳</title>
+    <link rel="stylesheet" href="/liff/invoice/styles.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <p class="eyebrow">TRIP EXPENSE</p>
+        <h1>發票記帳</h1>
+        <p>拍攝清楚、完整的發票或收據。圖片只用於辨識，不會長期保存。</p>
+      </header>
+
+      <section class="notice" role="note">
+        請勿拍攝或上傳身分證、居留證、信用卡及其他證件。
+      </section>
+
+      <section class="capture-card">
+        <div id="cameraPanel">
+          <label class="button primary" for="cameraInput">直接拍照</label>
+          <input id="cameraInput" type="file" accept="image/*" capture="environment" />
+        </div>
+        <div id="libraryPanel">
+          <label class="button secondary" for="libraryInput">從相簿選擇</label>
+          <input id="libraryInput" type="file" accept="image/*" />
+        </div>
+        <button id="qrButton" class="button secondary hidden" type="button">掃描 QR Code</button>
+
+        <div id="previewPanel" class="preview hidden">
+          <img id="previewImage" alt="待辨識發票預覽" />
+          <div class="actions">
+            <button id="submitButton" class="button primary" type="button">使用這張照片</button>
+            <button id="resetButton" class="button ghost" type="button">重新選擇</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="status-card" aria-live="polite">
+        <p id="statusLine">正在準備安全上傳環境…</p>
+        <p id="statusHint"></p>
+      </section>
+
+      <button id="closeButton" class="button secondary hidden" type="button">回到 LINE</button>
+    </main>
+    <script src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
+    <script src="/liff/invoice/app.js"></script>
+  </body>
+</html>
