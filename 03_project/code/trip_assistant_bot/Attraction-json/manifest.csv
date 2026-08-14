@@ -1,0 +1,4 @@
+﻿name,schema,description,qcLevel
+AttractionList.json,schema-AttractionList.csv,景點基本資料,/Attractions
+AttractionServiceTimeList.json,schema-AttractionServiceTimeList.csv,景點營運時間資料,/AttractionServiceTimes
+AttractionFeeList.json,schema-AttractionFeeList.csv,景點收費資料,/AttractionFees
