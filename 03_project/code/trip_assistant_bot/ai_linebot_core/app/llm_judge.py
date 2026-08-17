@@ -521,6 +521,120 @@ def _apply_itinerary_generation_override(
     return normalized
 
 
+def _looks_like_direct_weather_question(text: str) -> bool:
+    latest_message = _latest_message_text(text)
+    normalized_text = latest_message.strip()
+    if not normalized_text:
+        return False
+
+    weather_terms = ("天氣", "下雨", "降雨", "氣溫", "溫度", "天候", "會不會熱", "會不會冷")
+    question_terms = ("嗎", "呢", "怎麼樣", "如何", "會不會", "有沒有", "?")
+    return any(term in normalized_text for term in weather_terms) and any(
+        term in normalized_text for term in question_terms
+    )
+
+
+def _apply_weather_query_override(
+    text: str,
+    normalized: dict[str, Any],
+) -> dict[str, Any]:
+    if not _looks_like_direct_weather_question(text):
+        return normalized
+
+    normalized["scenario_code"] = "劇本十七"
+    normalized["scenario_name"] = "戶外活動與天氣影響"
+    normalized["stage"] = "特殊情境"
+    normalized["should_intervene"] = True
+    normalized["reply_trigger"] = "functional_question"
+    normalized["intervention_type"] = "顯性介入"
+    normalized["requires_external_search"] = True
+    normalized["intermediate_reply"] = "我先幫你們看一下，等等整理給你們～"
+    normalized["confidence_score"] = max(
+        float(normalized.get("confidence_score", 0.0)),
+        0.85,
+    )
+
+    evidence = list(normalized.get("evidence") or [])
+    evidence.append("使用者直接詢問天氣資訊，屬於可執行的功能性查詢。")
+    normalized["evidence"] = evidence
+
+    behavior = list(normalized.get("system_behavior") or [])
+    for item in ("查詢天氣", "整理天氣資訊", "提供天氣建議"):
+        if item not in behavior:
+            behavior.append(item)
+    normalized["system_behavior"] = behavior
+
+    extracted_info = normalized.get("extracted_info") or {}
+    risk_info = extracted_info.get("risk_info") or []
+    if not isinstance(risk_info, list):
+        risk_info = [risk_info]
+    if "天氣" not in [str(item) for item in risk_info]:
+        risk_info.append("天氣")
+    extracted_info["risk_info"] = risk_info
+    extracted_info["need_type"] = extracted_info.get("need_type") or "補資訊"
+    normalized["extracted_info"] = extracted_info
+    return normalized
+
+
+def _looks_like_explicit_attraction_search_request(text: str) -> bool:
+    latest_message = _latest_message_text(text)
+    compact_latest = "".join(latest_message.split())
+    compact_text = "".join(str(text or "").split())
+
+    request_terms = ("幫我", "幫我們", "請", "可以請", "麻煩", "@")
+    search_terms = ("找", "推薦", "整理", "查")
+    attraction_terms = ("景點", "去哪裡", "哪裡玩", "可以玩", "走走")
+
+    return (
+        any(term in compact_latest for term in request_terms)
+        and any(term in compact_latest for term in search_terms)
+        and any(term in compact_text for term in attraction_terms)
+    )
+
+
+def _apply_attraction_search_override(
+    text: str,
+    normalized: dict[str, Any],
+) -> dict[str, Any]:
+    if not _looks_like_explicit_attraction_search_request(text):
+        return normalized
+
+    normalized["scenario_code"] = "劇本六"
+    normalized["scenario_name"] = "行程資訊補全"
+    normalized["stage"] = "方案產生階段"
+    normalized["should_intervene"] = True
+    normalized["reply_trigger"] = "explicit_request"
+    normalized["intervention_type"] = "顯性介入"
+    normalized["requires_external_search"] = True
+    normalized["intermediate_reply"] = "我先幫你們看一下，等等整理給你們～"
+    normalized["suggested_reply"] = ""
+    normalized["confidence_score"] = max(
+        float(normalized.get("confidence_score", 0.0)),
+        0.85,
+    )
+
+    evidence = list(normalized.get("evidence") or [])
+    evidence.append("使用者明確請 AI 協助查找景點，屬於需要外部資訊補全的查詢。")
+    normalized["evidence"] = evidence
+
+    behavior = list(normalized.get("system_behavior") or [])
+    for item in ("補充景點資訊", "提供推薦選項"):
+        if item not in behavior:
+            behavior.append(item)
+    normalized["system_behavior"] = behavior
+
+    extracted_info = normalized.get("extracted_info") or {}
+    activity_types = extracted_info.get("activity_types") or []
+    if not isinstance(activity_types, list):
+        activity_types = [activity_types]
+    if "景點" not in [str(item) for item in activity_types]:
+        activity_types.append("景點")
+    extracted_info["activity_types"] = activity_types
+    extracted_info["need_type"] = extracted_info.get("need_type") or "補資訊"
+    normalized["extracted_info"] = extracted_info
+    return normalized
+
+
 def _normalize_result(
     data: dict[str, Any],
     fallback_info: ExtractedInfo,
@@ -598,6 +712,8 @@ def _normalize_result(
         ),
         "extracted_info": merged_info,
     }
+    normalized = _apply_weather_query_override(source_text, normalized)
+    normalized = _apply_attraction_search_override(source_text, normalized)
     normalized = _apply_itinerary_generation_override(source_text, normalized)
     normalized = _apply_clarifying_question_override(source_text, normalized)
     return AnalysisResult.from_dict(normalized)
