@@ -1188,49 +1188,58 @@ def run_location_recommendation(
     location_source: str,
     beacon_context: BeaconContext | None = None,
 ) -> dict[str, Any]:
-    backend_url = os.getenv("LOCATION_RECOMMENDATION_API_URL", "").strip()
-    if backend_url:
-        return _request_backend_recommendation(
-            backend_url=backend_url,
-            line_user_id=line_user_id,
-            line_group_id=line_group_id,
+    try:
+        backend_url = os.getenv("LOCATION_RECOMMENDATION_API_URL", "").strip()
+        if backend_url:
+            return _request_backend_recommendation(
+                backend_url=backend_url,
+                line_user_id=line_user_id,
+                line_group_id=line_group_id,
+                query_text=query_text,
+                latitude=latitude,
+                longitude=longitude,
+                accuracy=accuracy,
+                location_source=location_source,
+                beacon_context=beacon_context,
+            )
+
+        if os.getenv("GOOGLE_PLACES_API_KEY", "").strip():
+            try:
+                return _build_google_places_recommendation(
+                    query_text=query_text,
+                    latitude=latitude,
+                    longitude=longitude,
+                    location_source=location_source,
+                    line_group_id=line_group_id,
+                )
+            except Exception as exc:
+                _log_external_failure("Google Places recommendation", exc)
+
+        if os.getenv("OPENAI_API_KEY", "").strip():
+            try:
+                return _build_openai_fallback_recommendation(
+                    query_text=query_text,
+                    latitude=latitude,
+                    longitude=longitude,
+                    location_source=location_source,
+                )
+            except Exception as exc:
+                _log_external_failure("OpenAI location fallback", exc)
+
+        return _build_local_fallback_recommendation(
             query_text=query_text,
             latitude=latitude,
             longitude=longitude,
-            accuracy=accuracy,
             location_source=location_source,
-            beacon_context=beacon_context,
         )
-
-    if os.getenv("GOOGLE_PLACES_API_KEY", "").strip():
-        try:
-            return _build_google_places_recommendation(
-                query_text=query_text,
-                latitude=latitude,
-                longitude=longitude,
-                location_source=location_source,
-                line_group_id=line_group_id,
-            )
-        except Exception as exc:
-            _log_external_failure("Google Places recommendation", exc)
-
-    if os.getenv("OPENAI_API_KEY", "").strip():
-        try:
-            return _build_openai_fallback_recommendation(
-                query_text=query_text,
-                latitude=latitude,
-                longitude=longitude,
-                location_source=location_source,
-            )
-        except Exception as exc:
-            _log_external_failure("OpenAI location fallback", exc)
-
-    return _build_local_fallback_recommendation(
-        query_text=query_text,
-        latitude=latitude,
-        longitude=longitude,
-        location_source=location_source,
-    )
+    except Exception as exc:
+        _log_external_failure("Location recommendation pipeline", exc)
+        return {
+            "group_message": "我有收到你的位置，但這次整理附近推薦時出了點問題，請稍後再試一次。",
+            "results": [],
+            "location_source": location_source,
+            "query_text": query_text,
+        }
 
 
 def run_text_location_recommendation(

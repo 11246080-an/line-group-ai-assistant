@@ -2488,6 +2488,14 @@ def receive_liff_location_recommendation():
             location_source="liff",
             beacon_context=None,
         )
+    except Exception as exc:
+        _log_failure("LIFF location recommendation", exc)
+        mark_session_failed(session_token, {"error_code": "recommendation_failed"})
+        return jsonify(
+            {"ok": False, "error": "The recommendation service is temporarily unavailable."}
+        ), 502
+
+    try:
         save_recent_location_context(
             conversation_key=session.conversation_key,
             line_user_id=session.line_user_id,
@@ -2497,11 +2505,7 @@ def receive_liff_location_recommendation():
             accuracy=accuracy_value,
         )
     except Exception as exc:
-        _log_failure("LIFF location recommendation", exc)
-        mark_session_failed(session_token, {"error_code": "recommendation_failed"})
-        return jsonify(
-            {"ok": False, "error": "The recommendation service is temporarily unavailable."}
-        ), 502
+        _log_failure("Save recent location context", exc)
 
     if not isinstance(result, dict):
         mark_session_failed(session_token, {"error_code": "invalid_backend_response"})
