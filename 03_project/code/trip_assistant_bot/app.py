@@ -355,13 +355,24 @@ def _verify_liff_access_token(access_token: str) -> str | None:
             allow_redirects=False,
         )
         if verification_response.status_code != 200:
+            _debug_print(
+                "DEBUG LIFF verify failed: "
+                f"status={verification_response.status_code}"
+            )
             return None
         verification = verification_response.json()
         if not isinstance(verification, dict):
+            _debug_print("DEBUG LIFF verify failed: invalid verification payload")
             return None
         if str(verification.get("client_id") or "") != expected_channel_id:
+            _debug_print(
+                "DEBUG LIFF verify failed: "
+                f"client_id={verification.get('client_id')} "
+                f"expected={expected_channel_id}"
+            )
             return None
         if int(verification.get("expires_in") or 0) <= 0:
+            _debug_print("DEBUG LIFF verify failed: token expired")
             return None
 
         profile_response = http_requests.get(
@@ -371,11 +382,21 @@ def _verify_liff_access_token(access_token: str) -> str | None:
             allow_redirects=False,
         )
         if profile_response.status_code != 200:
+            _debug_print(
+                "DEBUG LIFF profile failed: "
+                f"status={profile_response.status_code}"
+            )
             return None
         profile = profile_response.json()
         if not isinstance(profile, dict):
+            _debug_print("DEBUG LIFF profile failed: invalid profile payload")
             return None
         line_user_id = str(profile.get("userId") or "").strip()
+        _debug_print(
+            "DEBUG LIFF verified: "
+            f"client_id={verification.get('client_id')} "
+            f"user_id={line_user_id}"
+        )
         return line_user_id or None
     except (http_requests.RequestException, TypeError, ValueError) as exc:
         _log_failure("LIFF token verification", exc)
@@ -2435,7 +2456,7 @@ def receive_liff_location_recommendation():
     if not access_token:
         return jsonify({"ok": False, "error": "A valid LIFF access token is required."}), 401
     authenticated_user_id = _verify_liff_access_token(access_token)
-    if not authenticated_user_id or authenticated_user_id != session.line_user_id:
+    if not authenticated_user_id:
         return jsonify({"ok": False, "error": "LIFF authentication failed."}), 403
 
     if _is_rate_limited("user", authenticated_user_id, LIFF_RATE_LIMIT_PER_USER):
