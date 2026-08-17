@@ -115,6 +115,12 @@ def _deadline_text(poll: dict[str, Any]) -> str:
     return "稍後"
 
 
+def _mongo_utc_now() -> datetime:
+    # PyMongo returns datetimes as UTC but timezone-naive by default.
+    # Use the same shape when db.py compares now with deadline_at.
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
 def format_poll(poll: dict[str, Any], results: list[dict[str, Any]] | None = None) -> str:
     question = str(poll.get("question") or "群組投票")
     options = _option_rows(poll)
@@ -323,7 +329,7 @@ def handle_vote_postback(data: str, *, line_group_id: str, line_user_id: str) ->
             results = list(_db_function("get_vote_results")(poll_id=poll_id) or [])
             _db_function("mark_vote_result_announced")(
                 poll_id=poll_id,
-                announced_at=datetime.now(timezone.utc),
+                announced_at=_mongo_utc_now(),
             )
             return FlowResult(True, format_poll(poll, results))
         valid_options = {item["id"] for item in _option_rows(poll)}
@@ -337,14 +343,14 @@ def handle_vote_postback(data: str, *, line_group_id: str, line_user_id: str) ->
             poll_id=poll_id,
             voter_key=voter_key,
             option_id=option_id,
-            now=datetime.now(timezone.utc),
+            now=_mongo_utc_now(),
         )
         final_poll = outcome.get("poll") if isinstance(outcome, dict) else None
         if isinstance(final_poll, dict) and final_poll.get("status") != "active":
             results = list(_db_function("get_vote_results")(poll_id=poll_id) or [])
             _db_function("mark_vote_result_announced")(
                 poll_id=poll_id,
-                announced_at=datetime.now(timezone.utc),
+                announced_at=_mongo_utc_now(),
             )
             return FlowResult(True, format_poll(final_poll, results))
         # 保持群組安靜，且不讓其他人從 Bot 回覆推測投給哪個選項。
