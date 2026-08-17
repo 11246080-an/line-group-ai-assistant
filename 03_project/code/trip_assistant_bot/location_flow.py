@@ -329,6 +329,47 @@ def _build_google_places_cache_key(
     return hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
 
 
+def _has_no_spicy_constraint(constraints: list[str] | None) -> bool:
+    joined = " ".join(str(item).strip() for item in constraints or [] if str(item).strip())
+    return any(token in joined for token in ("不吃辣", "不要辣", "不能吃辣", "不辣", "怕辣"))
+
+
+def _is_likely_spicy_place(item: dict[str, Any]) -> bool:
+    searchable_text = " ".join(
+        str(item.get(key) or "")
+        for key in ("name", "subtitle", "description", "address")
+    )
+    spicy_signals = (
+        "麻辣",
+        "川菜",
+        "四川",
+        "串串",
+        "串串香",
+        "酸菜魚",
+        "水煮魚",
+        "辣",
+        "剁椒",
+        "湘菜",
+        "泰式",
+        "韓式",
+        "韓國",
+        "烤肉",
+        "火鍋",
+    )
+    return any(signal in searchable_text for signal in spicy_signals)
+
+
+def _filter_results_by_constraints(
+    results: list[dict[str, Any]],
+    constraints: list[str] | None,
+) -> list[dict[str, Any]]:
+    if not _has_no_spicy_constraint(constraints):
+        return results
+
+    filtered = [item for item in results if not _is_likely_spicy_place(item)]
+    return filtered if filtered else results
+
+
 def _format_google_place_description(place: dict[str, Any]) -> str:
     parts: list[str] = []
 
@@ -490,6 +531,7 @@ def _build_google_places_recommendation(
     longitude: float,
     location_source: str,
     line_group_id: str = "",
+    constraints: list[str] | None = None,
 ) -> dict[str, Any]:
     api_key = os.getenv("GOOGLE_PLACES_API_KEY", "").strip()
     if not api_key:
@@ -550,6 +592,7 @@ def _build_google_places_recommendation(
         if isinstance(place, dict)
     ]
     results = [item for item in results if item.get("name")]
+    results = _filter_results_by_constraints(results, constraints)
     LOGGER.info("Google Places coordinate search completed")
 
     payload = {
@@ -592,7 +635,16 @@ def _build_google_places_text_recommendation(
     if not text_query:
         raise RuntimeError("No text query available for Google Places text search.")
 
-    cache_key = hashlib.sha256(text_query.encode("utf-8")).hexdigest()
+    cache_basis = {
+        "text_query": text_query,
+        "constraints": [str(item).strip() for item in constraints or [] if str(item).strip()],
+        "activity_types": [
+            str(item).strip() for item in activity_types or [] if str(item).strip()
+        ],
+    }
+    cache_key = hashlib.sha256(
+        json.dumps(cache_basis, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()
     cached = get_api_query_cache(
         "google_places_text_query",
         line_group_id,
@@ -638,6 +690,7 @@ def _build_google_places_text_recommendation(
         normalized = _google_place_to_result(place, 0.0, 0.0)
         normalized["distance_km"] = None
         results.append(normalized)
+    results = _filter_results_by_constraints(results, constraints)
     LOGGER.info("Google Places text search completed")
 
     payload = {
