@@ -403,6 +403,45 @@ def _verify_liff_access_token(access_token: str) -> str | None:
         return None
 
 
+def _verify_liff_id_token(id_token: str) -> str | None:
+    expected_channel_id = _expected_liff_channel_id()
+    if not expected_channel_id or not id_token:
+        return None
+
+    try:
+        verification_response = http_requests.post(
+            "https://api.line.me/oauth2/v2.1/verify",
+            data={
+                "id_token": id_token,
+                "client_id": expected_channel_id,
+            },
+            timeout=LIFF_AUTH_TIMEOUT_SECONDS,
+            allow_redirects=False,
+        )
+        if verification_response.status_code != 200:
+            _debug_print(
+                "DEBUG LIFF id_token verify failed: "
+                f"status={verification_response.status_code}"
+            )
+            return None
+        verification = verification_response.json()
+        if not isinstance(verification, dict):
+            _debug_print("DEBUG LIFF id_token verify failed: invalid payload")
+            return None
+        line_user_id = str(verification.get("sub") or "").strip()
+        if not line_user_id:
+            _debug_print("DEBUG LIFF id_token verify failed: missing sub")
+            return None
+        _debug_print(
+            "DEBUG LIFF id_token verified: "
+            f"aud={verification.get('aud')} user_id={line_user_id}"
+        )
+        return line_user_id
+    except (http_requests.RequestException, TypeError, ValueError) as exc:
+        _log_failure("LIFF id_token verification", exc)
+        return None
+
+
 _rate_limit_lock = threading.Lock()
 _rate_limit_buckets: dict[tuple[str, str], deque[float]] = {}
 _webhook_dedup_lock = threading.Lock()
@@ -2425,6 +2464,7 @@ def receive_liff_location_recommendation():
     if not isinstance(payload, dict):
         return jsonify({"ok": False, "error": "Invalid JSON body."}), 400
     session_token = str(payload.get("session_token") or "").strip()
+    id_token = str(payload.get("id_token") or "").strip()
     latitude = payload.get("latitude")
     longitude = payload.get("longitude")
     accuracy = payload.get("accuracy")
@@ -2455,7 +2495,9 @@ def receive_liff_location_recommendation():
     access_token = _extract_bearer_token()
     if not access_token:
         return jsonify({"ok": False, "error": "A valid LIFF access token is required."}), 401
-    authenticated_user_id = _verify_liff_access_token(access_token)
+    authenticated_user_id = _verify_liff_id_token(id_token) or _verify_liff_access_token(
+        access_token
+    )
     if not authenticated_user_id:
         return jsonify({"ok": False, "error": "LIFF authentication failed."}), 403
 

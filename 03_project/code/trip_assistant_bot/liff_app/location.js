@@ -152,6 +152,10 @@
       window.liff && typeof window.liff.getAccessToken === "function"
         ? window.liff.getAccessToken() || ""
         : "";
+    const idToken =
+      window.liff && typeof window.liff.getIDToken === "function"
+        ? window.liff.getIDToken() || ""
+        : "";
 
     const response = await fetch("/api/liff/location/recommendation", {
       method: "POST",
@@ -161,6 +165,7 @@
       },
       body: JSON.stringify({
         session_token: sessionToken,
+        id_token: idToken,
         latitude: position.coords.latitude,
         longitude: position.coords.longitude,
         accuracy: position.coords.accuracy,
