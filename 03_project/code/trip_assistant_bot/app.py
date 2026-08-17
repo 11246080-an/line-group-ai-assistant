@@ -625,6 +625,8 @@ class ConversationState:
     # 保存網站匯入的行程與目前焦點景點。
     imported_itinerary: dict[str, Any] | None = None
     focused_spot: dict[str, Any] | None = None
+    # Bot 建議用投票決定後，暫存選項；使用者同意時直接建立投票。
+    pending_vote_proposal: dict[str, Any] | None = None
     last_accessed_at: float = field(default_factory=time.monotonic)
 
 
@@ -1896,6 +1898,7 @@ def _clear_discussion_after_poll(conversation_key: str) -> None:
         state.recent_participants.clear()
         state.participant_aliases.clear()
         state.current_topic = ""
+        state.pending_vote_proposal = None
         state.last_accessed_at = time.monotonic()
 
 
@@ -2012,6 +2015,164 @@ def _organize_auto_poll(
         "yes",
     }
     return question or fallback_question, organized[:6], model_urgent or urgent
+
+
+def _looks_like_poll_agreement(text: str) -> bool:
+    compact = "".join(str(text or "").strip().casefold().split())
+    if not compact:
+        return False
+    direct_agreements = {
+        "好",
+        "好啊",
+        "好呀",
+        "好喔",
+        "可以",
+        "可以啊",
+        "可以喔",
+        "ok",
+        "okay",
+        "沒問題",
+        "沒問題啊",
+        "也好",
+        "也可以",
+        "那就這樣",
+        "那就投票",
+        "投票吧",
+        "來投票",
+        "用投票",
+    }
+    if compact in direct_agreements:
+        return True
+    return any(
+        marker in compact
+        for marker in (
+            "可以投票",
+            "幫我們投票",
+            "幫忙投票",
+            "那就用投票",
+            "就投票",
+            "開投票",
+            "建立投票",
+        )
+    )
+
+
+def _build_pending_vote_question(
+    result: dict[str, Any],
+    suggested_reply: str,
+) -> str:
+    combined_text = "\n".join(
+        [
+            suggested_reply,
+            str(result.get("scenario_name") or ""),
+            "\n".join(str(item) for item in result.get("evidence") or []),
+            "\n".join(str(item) for item in result.get("system_behavior") or []),
+        ]
+    )
+    if any(word in combined_text for word in ("晚餐", "午餐", "聚餐", "吃", "餐廳")):
+        return "這次聚餐要選哪一個？"
+    if any(word in combined_text for word in ("景點", "出遊", "行程", "去哪")):
+        return "這次行程要選哪一個？"
+    return "大家最後想選哪一個？"
+
+
+def _store_pending_vote_proposal(
+    conversation_key: str,
+    *,
+    question: str,
+    options: list[str],
+    urgent: bool,
+) -> None:
+    clean_options: list[str] = []
+    for value in options:
+        label = redact_sensitive_identifiers(str(value).strip())[:80]
+        if label and label not in clean_options:
+            clean_options.append(label)
+    if len(clean_options) < 2:
+        return
+    fingerprint_source = json.dumps(
+        {"question": question, "options": clean_options},
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    with conversation_lock:
+        state = _get_or_create_state(conversation_key)
+        state.pending_vote_proposal = {
+            "question": redact_sensitive_identifiers(question.strip())[:200],
+            "options": clean_options[:6],
+            "urgent": bool(urgent),
+            "discussion_fingerprint": hashlib.sha256(
+                fingerprint_source.encode("utf-8")
+            ).hexdigest(),
+        }
+
+
+def _maybe_store_vote_proposal_from_reply(
+    conversation_key: str,
+    *,
+    result: dict[str, Any],
+    suggested_reply: str,
+    recent_messages: list[str],
+) -> None:
+    if not ENABLE_TRIP_MANAGEMENT_FEATURES:
+        return
+    reply_text = str(suggested_reply or "")
+    behavior_text = "\n".join(str(item) for item in result.get("system_behavior") or [])
+    if "投票" not in reply_text and "投票" not in behavior_text:
+        return
+    candidate_options = _clean_auto_poll_options(result)
+    if len(candidate_options) < 2:
+        return
+    _store_pending_vote_proposal(
+        conversation_key,
+        question=_build_pending_vote_question(result, reply_text),
+        options=candidate_options,
+        urgent=_has_urgent_poll_signal(recent_messages),
+    )
+
+
+def _take_pending_vote_proposal(conversation_key: str) -> dict[str, Any] | None:
+    with conversation_lock:
+        _prune_conversation_states_locked()
+        state = conversation_states.get(conversation_key)
+        if state is None or not state.pending_vote_proposal:
+            return None
+        proposal = dict(state.pending_vote_proposal)
+        state.pending_vote_proposal = None
+        state.last_accessed_at = time.monotonic()
+        return proposal
+
+
+def _try_start_pending_vote_from_agreement(
+    event: Any,
+    *,
+    conversation_key: str,
+    line_group_id: str,
+    line_user_id: str,
+    user_text: str,
+) -> bool:
+    if not ENABLE_TRIP_MANAGEMENT_FEATURES or not line_group_id:
+        return False
+    if not _looks_like_poll_agreement(user_text):
+        return False
+    proposal = _take_pending_vote_proposal(conversation_key)
+    if not proposal:
+        return False
+    flow_result = create_anonymous_poll(
+        line_group_id=line_group_id,
+        question=str(proposal.get("question") or "大家最後想選哪一個？"),
+        options=list(proposal.get("options") or []),
+        auto_created=False,
+        urgent=bool(proposal.get("urgent")),
+        discussion_fingerprint=str(proposal.get("discussion_fingerprint") or ""),
+        created_by_line_user_id=line_user_id,
+    )
+    if not flow_result.handled:
+        return False
+    _reply_feature_result(event, flow_result)
+    if isinstance(flow_result.data.get("anonymous_poll"), dict):
+        _clear_discussion_after_poll(conversation_key)
+    return True
 
 
 def _try_start_automatic_poll(
@@ -2679,6 +2840,15 @@ def _handle_feature_text(
             return True
         return False
 
+    if _try_start_pending_vote_from_agreement(
+        event,
+        conversation_key=conversation_key,
+        line_group_id=line_group_id,
+        line_user_id=line_user_id,
+        user_text=user_text,
+    ):
+        return True
+
     if user_text == "發票記帳":
         default_payer = _get_group_sender_display_name(line_group_id, line_user_id)
         result = start_invoice_flow(
@@ -3261,6 +3431,12 @@ def handle_message(event: MessageEvent) -> None:
                 _debug_print(f"準備回覆：{suggested_reply}")
                 _reply_text(line_bot_api, event.reply_token, suggested_reply)
                 _mark_reply_sent(conversation_key, scenario_code, suggested_reply)
+                _maybe_store_vote_proposal_from_reply(
+                    conversation_key,
+                    result=result,
+                    suggested_reply=suggested_reply,
+                    recent_messages=_recent_messages,
+                )
                 _debug_print("已送出 LINE 回覆。")
             else:
                 app.logger.info("AI selected intervention without reply text")
