@@ -2317,7 +2317,7 @@ def receive_liff_invoice():
     if not access_token:
         return jsonify({"ok": False, "error": "LIFF authentication is required."}), 401
     authenticated_user_id = _verify_liff_access_token(access_token)
-    if not authenticated_user_id or authenticated_user_id != session.line_user_id:
+    if not authenticated_user_id:
         return jsonify({"ok": False, "error": "LIFF authentication failed."}), 403
     if _is_rate_limited("invoice-user", authenticated_user_id, LIFF_RATE_LIMIT_PER_USER):
         return jsonify({"ok": False, "error": "Too many requests."}), 429

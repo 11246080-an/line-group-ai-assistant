@@ -1097,8 +1097,10 @@ def claim_recommendation_session(
         session = _recommendation_sessions.get(session_token)
         if session is None:
             return None, "expired"
-        if session.line_user_id != line_user_id:
+        if session.line_user_id and session.line_user_id != line_user_id:
             return None, "forbidden"
+        if not session.line_user_id:
+            session.line_user_id = line_user_id
         if session.status != "pending":
             return None, "used"
         session.status = "processing"
