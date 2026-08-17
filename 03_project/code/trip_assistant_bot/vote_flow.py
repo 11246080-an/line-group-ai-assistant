@@ -309,6 +309,7 @@ def handle_vote_postback(data: str, *, line_group_id: str, line_user_id: str) ->
     if len(parts) != 4 or parts[1] != "cast":
         return FlowResult(True, "這個投票操作已失效。")
     poll_id, option_id = parts[2], parts[3]
+    option_id_for_db: Any = int(option_id) if option_id.isdigit() else option_id
     required = (
         "get_vote_session",
         "cast_anonymous_vote",
@@ -342,7 +343,7 @@ def handle_vote_postback(data: str, *, line_group_id: str, line_user_id: str) ->
         outcome = _db_function("cast_anonymous_vote")(
             poll_id=poll_id,
             voter_key=voter_key,
-            option_id=option_id,
+            option_id=option_id_for_db,
             now=_mongo_utc_now(),
         )
         final_poll = outcome.get("poll") if isinstance(outcome, dict) else None
