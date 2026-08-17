@@ -148,10 +148,16 @@
   }
 
   async function submitLocation(position) {
+    const accessToken =
+      window.liff && typeof window.liff.getAccessToken === "function"
+        ? window.liff.getAccessToken() || ""
+        : "";
+
     const response = await fetch("/api/liff/location/recommendation", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
+        ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
       },
       body: JSON.stringify({
         session_token: sessionToken,
