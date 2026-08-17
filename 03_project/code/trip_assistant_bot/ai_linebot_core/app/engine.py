@@ -80,7 +80,7 @@ def analyze_dialogue(
             info,
             on_processing_required=on_processing_required,
         )
-    except LLMJudgeError as exc:
+    except (LLMJudgeError, TypeError, ValueError) as exc:
         # 如果 LLM 失敗，就改用備援方案。
         # fallback 可以理解成「主方案壞掉時的替代方案」。
         fallback_reason = str(exc)
