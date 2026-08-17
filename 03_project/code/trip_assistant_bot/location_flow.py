@@ -1164,6 +1164,7 @@ def build_liff_url(session_token: str, request_base_url: str) -> str:
     if liff_id:
         query_params = [(key, value) for key, value in query_params if key != "liff_id"]
         query_params.append(("liff_id", liff_id))
+    query_params.append(("session_token", session_token))
 
     return urlunsplit(
         (
@@ -1171,7 +1172,7 @@ def build_liff_url(session_token: str, request_base_url: str) -> str:
             endpoint_parts.netloc,
             endpoint_parts.path,
             urlencode(query_params),
-            urlencode({"session_token": session_token}),
+            "",
         )
     )
 

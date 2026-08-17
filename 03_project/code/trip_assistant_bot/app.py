@@ -1064,6 +1064,17 @@ def _should_route_to_location_flow(
     return _is_location_recommendation_request(user_text, analysis_result)
 
 
+def _looks_like_current_location_request(user_text: str) -> bool:
+    normalized_text = str(user_text or "").strip()
+    if not normalized_text:
+        return False
+
+    return any(
+        token in normalized_text
+        for token in ("附近", "我附近", "這裡附近", "目前位置", "現在位置", "當前位置")
+    )
+
+
 def _extract_text_location_query_payload(
     user_text: str,
     analysis_result: dict[str, Any],
@@ -2980,7 +2991,9 @@ def handle_message(event: MessageEvent) -> None:
         )
         raw_result = analyze_dialogue(
             context_text,
-            on_processing_required=_send_processing_hint,
+            on_processing_required=(
+                None if _looks_like_current_location_request(user_text) else _send_processing_hint
+            ),
         )
         app.logger.debug(
             "AI analysis raw result type=%s",
