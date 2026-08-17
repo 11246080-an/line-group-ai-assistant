@@ -465,6 +465,62 @@ def _apply_clarifying_question_override(
     return normalized
 
 
+def _looks_like_itinerary_generation_request(text: str) -> bool:
+    latest_message = _latest_message_text(text)
+    compact_text = "".join(str(text or "").split())
+    compact_latest = "".join(latest_message.split())
+
+    explicit_request_markers = ("幫我", "幫我們", "請", "可以請", "麻煩", "@")
+    itinerary_markers = ("排行程", "排半日", "排一日", "規劃行程", "安排行程", "行程草案")
+
+    if any(marker in compact_latest for marker in itinerary_markers):
+        return True
+
+    return (
+        any(marker in compact_latest for marker in explicit_request_markers)
+        and "行程" in compact_text
+        and any(marker in compact_latest for marker in ("排", "規劃", "安排"))
+    )
+
+
+def _apply_itinerary_generation_override(
+    text: str,
+    normalized: dict[str, Any],
+) -> dict[str, Any]:
+    if not _looks_like_itinerary_generation_request(text):
+        return normalized
+
+    extracted_info = normalized.get("extracted_info") or {}
+    normalized["scenario_code"] = "劇本四"
+    normalized["scenario_name"] = "自動行程生成"
+    normalized["stage"] = "方案產生階段"
+    normalized["should_intervene"] = True
+    normalized["reply_trigger"] = "explicit_request"
+    normalized["intervention_type"] = "顯性介入"
+    normalized["requires_external_search"] = False
+    normalized["intermediate_reply"] = ""
+    normalized["confidence_score"] = max(
+        float(normalized.get("confidence_score", 0.0)),
+        0.85,
+    )
+
+    suggested_reply = str(normalized.get("suggested_reply") or "").strip()
+    if not suggested_reply or "反問" in suggested_reply:
+        normalized["suggested_reply"] = _default_suggested_reply_for_scenario("劇本四")
+
+    evidence = list(normalized.get("evidence") or [])
+    evidence.append("使用者明確要求 AI 協助產生行程草案，因此校正為自動行程生成情境。")
+    normalized["evidence"] = evidence
+
+    behavior = list(normalized.get("system_behavior") or [])
+    for item in ("生成初步行程", "整理時間順序", "提供行程草案"):
+        if item not in behavior:
+            behavior.append(item)
+    normalized["system_behavior"] = behavior
+    normalized["extracted_info"] = extracted_info
+    return normalized
+
+
 def _normalize_result(
     data: dict[str, Any],
     fallback_info: ExtractedInfo,
@@ -542,6 +598,7 @@ def _normalize_result(
         ),
         "extracted_info": merged_info,
     }
+    normalized = _apply_itinerary_generation_override(source_text, normalized)
     normalized = _apply_clarifying_question_override(source_text, normalized)
     return AnalysisResult.from_dict(normalized)
 
