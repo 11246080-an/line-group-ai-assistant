@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 import hashlib
 import hmac
+import logging
 import os
 import re
 import secrets
@@ -25,6 +26,7 @@ _POLL_PREFIXES = ("建立投票", "新增投票", "發起投票")
 _DEADLINE_RE = re.compile(r"(?:限時|截止)\s*(\d{1,3})\s*(分鐘|小時|天)")
 _NORMAL_MINUTES = max(1, int(os.getenv("AUTO_POLL_NORMAL_MINUTES", "10")))
 _URGENT_MINUTES = max(1, int(os.getenv("AUTO_POLL_URGENT_MINUTES", "3")))
+_LOGGER = logging.getLogger(__name__)
 
 
 def _anonymization_secret() -> str:
@@ -165,6 +167,48 @@ def _poll_result(poll: dict[str, Any]) -> FlowResult:
     )
 
 
+def _create_vote_session_compatible(
+    *,
+    line_group_id: str,
+    question: str,
+    clean_options: list[str],
+    deadline_at: datetime,
+    created_by_key: str,
+    anonymity_salt: str,
+    eligible_keys: list[str],
+    close_when_all_eligible: bool,
+    auto_created: bool,
+    discussion_fingerprint: str,
+) -> dict:
+    create_vote_session = _db_function("create_vote_session")
+    common_args = {
+        "line_group_id": line_group_id,
+        "question": redact_sensitive_identifiers(question.strip())[:200],
+        "deadline_at": deadline_at,
+        "created_by_key": created_by_key,
+        "anonymity_salt": anonymity_salt,
+        "eligible_voter_keys": eligible_keys,
+        "close_when_all_eligible": close_when_all_eligible,
+        "auto_created": bool(auto_created),
+        "discussion_fingerprint": discussion_fingerprint[:64],
+    }
+    try:
+        return create_vote_session(
+            options=[
+                {"option_id": index, "label": label}
+                for index, label in enumerate(clean_options, start=1)
+            ],
+            **common_args,
+        )
+    except TypeError as first_error:
+        # Some teammates may still have the older db.py contract checked out.
+        # Retry with plain strings so vote_flow can work across both versions.
+        try:
+            return create_vote_session(options=clean_options, **common_args)
+        except Exception:
+            raise first_error
+
+
 def create_anonymous_poll(
     *,
     line_group_id: str,
@@ -213,14 +257,14 @@ def create_anonymous_poll(
                 anonymity_salt=anonymity_salt,
                 line_user_id=created_by_line_user_id,
             )
-        poll = _db_function("create_vote_session")(
+        poll = _create_vote_session_compatible(
             line_group_id=line_group_id,
-            question=redact_sensitive_identifiers(question.strip())[:200],
-            options=clean_options,
+            question=question,
+            clean_options=clean_options,
             deadline_at=deadline_at,
             created_by_key=creator_key,
             anonymity_salt=anonymity_salt,
-            eligible_voter_keys=eligible_keys,
+            eligible_keys=eligible_keys,
             close_when_all_eligible=bool(auto_created and len(eligible_keys) >= 2),
             auto_created=bool(auto_created),
             discussion_fingerprint=discussion_fingerprint[:64],
@@ -230,7 +274,10 @@ def create_anonymous_poll(
         return _poll_result(poll)
     except DatabaseFeatureUnavailable:
         return database_unavailable_result()
-    except Exception:
+    except Exception as exc:
+        if exc.__class__.__name__ in {"DbConflictError", "DuplicateKeyError"}:
+            return FlowResult(True, "目前已有一個進行中的投票，請等它截止後再建立新的投票。")
+        _LOGGER.exception("Vote creation failed (%s)", type(exc).__name__)
         return FlowResult(True, "建立匿名投票時發生錯誤，請稍後再試。")
 
 
@@ -309,5 +356,6 @@ def handle_vote_postback(data: str, *, line_group_id: str, line_user_id: str) ->
         if "截止" in message or "結束" in message:
             return FlowResult(True, "投票已截止，結果將由 Bot 公布。")
         return FlowResult(True, "這個投票操作無法完成，請重新開啟投票卡片。")
-    except Exception:
+    except Exception as exc:
+        _LOGGER.exception("Vote casting failed (%s)", type(exc).__name__)
         return FlowResult(True, "投票時發生錯誤，請稍後再試。")
