@@ -501,10 +501,11 @@ def _build_google_places_recommendation(
         longitude=longitude,
         location_source=location_source,
     )
-    scoped_cache_key = (
-        f"{line_group_id}:{cache_key}" if line_group_id else cache_key
+    cached = get_api_query_cache(
+        "google_places_text_search",
+        line_group_id,
+        cache_key,
     )
-    cached = get_api_query_cache("google_places_text_search", scoped_cache_key)
     if isinstance(cached, dict):
         LOGGER.info("Google Places coordinate cache hit")
         return cached
@@ -560,7 +561,8 @@ def _build_google_places_recommendation(
     }
     save_api_query_cache(
         "google_places_text_search",
-        scoped_cache_key,
+        line_group_id,
+        cache_key,
         payload,
         query_params=request_body,
         ttl_seconds=GOOGLE_PLACES_CACHE_TTL_SECONDS,
@@ -591,10 +593,11 @@ def _build_google_places_text_recommendation(
         raise RuntimeError("No text query available for Google Places text search.")
 
     cache_key = hashlib.sha256(text_query.encode("utf-8")).hexdigest()
-    scoped_cache_key = (
-        f"{line_group_id}:{cache_key}" if line_group_id else cache_key
+    cached = get_api_query_cache(
+        "google_places_text_query",
+        line_group_id,
+        cache_key,
     )
-    cached = get_api_query_cache("google_places_text_query", scoped_cache_key)
     if isinstance(cached, dict):
         LOGGER.info("Google Places text cache hit")
         return cached
@@ -650,7 +653,8 @@ def _build_google_places_text_recommendation(
     }
     save_api_query_cache(
         "google_places_text_query",
-        scoped_cache_key,
+        line_group_id,
+        cache_key,
         payload,
         query_params=request_body,
         ttl_seconds=GOOGLE_PLACES_CACHE_TTL_SECONDS,

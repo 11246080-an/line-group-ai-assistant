@@ -227,16 +227,13 @@ def run_weather_recommendation(
         raise RuntimeError("CWA_AUTHORIZATION_KEY is not configured.")
 
     cache_key = _build_weather_cache_key(county_name, query_text, time_text)
-    scoped_cache_key = (
-        f"{line_group_id}:{cache_key}" if line_group_id else cache_key
-    )
-    cached = get_api_query_cache("weather_cwa_36h", scoped_cache_key)
+    cached = get_api_query_cache("weather_cwa_36h", line_group_id, cache_key)
     if isinstance(cached, dict):
         _debug_print(
             "CWA weather cache hit:",
             {
                 "line_group_id": line_group_id,
-                "cache_key": scoped_cache_key,
+                "cache_key": cache_key,
                 "county_name": county_name,
                 "query_text": query_text,
             },
@@ -277,7 +274,8 @@ def run_weather_recommendation(
     }
     save_api_query_cache(
         "weather_cwa_36h",
-        scoped_cache_key,
+        line_group_id,
+        cache_key,
         payload,
         query_params=params,
         ttl_seconds=CWA_WEATHER_CACHE_TTL_SECONDS,
@@ -286,7 +284,7 @@ def run_weather_recommendation(
         "CWA weather cache save:",
         {
             "line_group_id": line_group_id,
-            "cache_key": scoped_cache_key,
+            "cache_key": cache_key,
             "county_name": county_name,
             "query_text": query_text,
             "ttl_seconds": CWA_WEATHER_CACHE_TTL_SECONDS,
