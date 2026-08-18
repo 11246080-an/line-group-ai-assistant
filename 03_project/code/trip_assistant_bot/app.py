@@ -1919,6 +1919,33 @@ def _clean_auto_poll_options(result: dict[str, Any]) -> list[str]:
     return options[:6]
 
 
+def _recent_message_body_text(recent_messages: list[str]) -> str:
+    bodies: list[str] = []
+    for raw_line in recent_messages:
+        line = str(raw_line or "").strip()
+        if not line:
+            continue
+        if "：" in line:
+            _, line = line.split("：", 1)
+        bodies.append(line)
+    return "\n".join(bodies)
+
+
+def _filter_poll_options_to_recent_messages(
+    options: list[str],
+    recent_messages: list[str],
+) -> list[str]:
+    recent_text = _recent_message_body_text(recent_messages)
+    compact_recent_text = "".join(recent_text.split())
+    filtered: list[str] = []
+    for option in options:
+        label = redact_sensitive_identifiers(str(option).strip())[:80]
+        compact_label = "".join(label.split())
+        if compact_label and compact_label in compact_recent_text and label not in filtered:
+            filtered.append(label)
+    return filtered[:6]
+
+
 def _is_llm_analysis_result(result: dict[str, Any]) -> bool:
     evidence = result.get("evidence") or []
     if not isinstance(evidence, list):
@@ -2125,7 +2152,10 @@ def _maybe_store_vote_proposal_from_reply(
     behavior_text = "\n".join(str(item) for item in result.get("system_behavior") or [])
     if "投票" not in reply_text and "投票" not in behavior_text:
         return
-    candidate_options = _clean_auto_poll_options(result)
+    candidate_options = _filter_poll_options_to_recent_messages(
+        _clean_auto_poll_options(result),
+        recent_messages,
+    )
     if len(candidate_options) < 2:
         return
     _store_pending_vote_proposal(
@@ -2198,7 +2228,10 @@ def _try_start_vote_from_current_agreement(
     if not _is_llm_analysis_result(result):
         return False
 
-    candidate_options = _clean_auto_poll_options(result)
+    candidate_options = _filter_poll_options_to_recent_messages(
+        _clean_auto_poll_options(result),
+        recent_messages,
+    )
     if len(candidate_options) < 2:
         return False
 
@@ -2256,7 +2289,10 @@ def _try_start_automatic_poll(
         return False
     scenario_code = str(result.get("scenario_code") or "").strip()
     scenario_name = str(result.get("scenario_name") or "").strip()
-    candidate_options = _clean_auto_poll_options(result)
+    candidate_options = _filter_poll_options_to_recent_messages(
+        _clean_auto_poll_options(result),
+        recent_messages,
+    )
     is_vote_scenario = scenario_code == "劇本九" or scenario_name == "投票決策"
     if not is_vote_scenario and not _is_semantic_poll_decision(
         result,
