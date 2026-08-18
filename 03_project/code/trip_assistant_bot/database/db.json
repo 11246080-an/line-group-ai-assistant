@@ -1,0 +1,159 @@
+{
+  "groups": {
+    "collection_name": "groups",
+    "fields": {
+      "group_id": "int",
+      "line_group_id": "string",
+      "group_name": "string",
+      "created_at": "datetime"
+    },
+    "indexes": ["line_group_id"]
+  },
+
+  "users": {
+    "collection_name": "users",
+    "fields": {
+      "user_id": "int",
+      "line_user_id": "string",
+      "display_name": "string",
+      "created_at": "datetime"
+    },
+    "indexes": ["line_user_id"]
+  },
+
+  "group_members": {
+    "collection_name": "group_members",
+    "fields": {
+      "group_id": "int",
+      "user_id": "int",
+      "joined_at": "datetime"
+    },
+    "indexes": ["group_id", "user_id"]
+  },
+
+  "messages": {
+    "collection_name": "messages",
+    "fields": {
+      "message_id": "int",
+      "line_message_id": "string",
+      "group_id": "int",
+      "user_id": "int",
+      "message_text": "text",
+      "sent_at": "datetime"
+    },
+    "indexes": ["group_id", "sent_at"]
+  },
+
+  "summaries": {
+    "collection_name": "summaries",
+    "fields": {
+      "summary_id": "int",
+      "group_id": "int",
+      "window_start": "datetime",
+      "window_end": "datetime",
+      "summary_text": "text",
+      "travel_date_start": "date",
+      "travel_date_end": "date",
+      "destination_city": "string",
+      "destination_country": "string",
+      "budget_min": "int",
+      "budget_max": "int",
+      "budget_currency": "char(3)",
+      "decision_state": "enum",
+      "need_type": "enum",
+      "need_conflict": "tinyint",
+      "conflict_description": "text"
+    },
+    "indexes": ["group_id", "window_start"]
+  },
+
+  "scenario_results": {
+    "collection_name": "scenario_results",
+    "fields": {
+      "result_id": "int",
+      "summary_id": "int",
+      "scenario_code": "string",
+      "scenario_name": "string",
+      "should_intervene": "tinyint",
+      "intervention_type": "enum",
+      "confidence_score": "decimal",
+      "suggested_reply": "text"
+    },
+    "indexes": ["summary_id", "scenario_code"]
+  },
+
+  "itineraries": {
+    "collection_name": "itineraries",
+    "fields": {
+      "itinerary_id": "int",
+      "summary_id": "int",
+      "group_id": "int",
+      "itinerary_text": "text",
+      "created_at": "datetime"
+    },
+    "indexes": ["group_id", "created_at"]
+  },
+
+  "itinerary_stops": {
+    "collection_name": "itinerary_stops",
+    "fields": {
+      "stop_id": "int",
+      "itinerary_id": "int",
+      "stop_order": "int",
+      "stop_name": "string",
+      "location": "string",
+      "arrive_time": "time",
+      "stay_minutes": "int",
+      "category": "string"
+    },
+    "indexes": ["itinerary_id", "stop_order"]
+  },
+
+  "vote_sessions": {
+    "collection_name": "vote_sessions",
+    "fields": {
+      "session_id": "int",
+      "group_id": "int",
+      "title": "string",
+      "status": "enum",
+      "created_at": "datetime",
+      "closed_at": "datetime"
+    },
+    "indexes": ["group_id", "status"]
+  },
+
+  "vote_options": {
+    "collection_name": "vote_options",
+    "fields": {
+      "option_id": "int",
+      "session_id": "int",
+      "option_text": "string"
+    },
+    "indexes": ["session_id"]
+  },
+
+  "votes": {
+    "collection_name": "votes",
+    "fields": {
+      "vote_id": "int",
+      "option_id": "int",
+      "user_id": "int",
+      "voted_at": "datetime"
+    },
+    "indexes": ["option_id", "user_id"],
+    "unique_keys": ["option_id", "user_id"]
+  },
+
+  "user_preferences": {
+    "collection_name": "user_preferences",
+    "fields": {
+      "preference_id": "int",
+      "user_id": "int",
+      "group_id": "int",
+      "preference_type": "string",
+      "preference_value": "text",
+      "updated_at": "datetime"
+    },
+    "indexes": ["group_id", "user_id", "preference_type"]
+  }
+}

@@ -1,0 +1,28 @@
+[
+  {
+    "line_group_id": "C1234567890",
+    "window_start": "2026-01-02T12:00:00",
+    "window_end": "2026-01-02T13:00:00",
+    "summary_text": "討論台中三天兩夜行程",
+    "travel_date_start": "2026-02-01",
+    "travel_date_end": "2026-02-03",
+    "destination_city": "台中",
+    "destination_country": "台灣",
+    "budget_min": 3000,
+    "budget_max": 8000,
+    "budget_currency": "TWD",
+    "people_count": 4,
+    "decision_state": "討論中",
+    "need_type": "行程需求",
+    "has_conflict": false,
+    "conflict_description": null,
+    "scenario_result": {
+      "scenario_code": "S001",
+      "scenario_name": "行程衝突提醒",
+      "should_intervene": true,
+      "intervention_type": "顯性",
+      "confidence_score": 0.87,
+      "suggested_reply": "目前時間安排有衝突，建議重新調整出發時間"
+    }
+  }
+]
