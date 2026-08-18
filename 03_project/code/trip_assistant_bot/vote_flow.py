@@ -412,8 +412,8 @@ def handle_vote_postback(data: str, *, line_group_id: str, line_user_id: str) ->
                 announced_at=_mongo_utc_now(),
             )
             return FlowResult(True, format_poll(final_poll, results))
-        # 保持群組安靜，且不讓其他人從 Bot 回覆推測投給哪個選項。
-        return FlowResult(True, "")
+        # 不公開選項內容，只讓使用者知道按鈕已成功送出。
+        return FlowResult(True, "已收到你的投票，可在截止前重新選擇。")
     except DatabaseFeatureUnavailable:
         return database_unavailable_result()
     except ValueError as exc:

@@ -2180,6 +2180,69 @@ def _try_start_pending_vote_from_agreement(
     return True
 
 
+def _try_start_vote_from_current_agreement(
+    event: Any,
+    *,
+    conversation_key: str,
+    line_group_id: str,
+    line_user_id: str,
+    user_text: str,
+    context_text: str,
+    recent_messages: list[str],
+    result: dict[str, Any],
+) -> bool:
+    if not ENABLE_TRIP_MANAGEMENT_FEATURES or not line_group_id:
+        return False
+    if not _looks_like_poll_agreement(user_text):
+        return False
+    if not _is_llm_analysis_result(result):
+        return False
+
+    candidate_options = _clean_auto_poll_options(result)
+    if len(candidate_options) < 2:
+        return False
+
+    suggested_reply = str(result.get("suggested_reply") or "")
+    behavior_text = "\n".join(str(item) for item in result.get("system_behavior") or [])
+    scenario_code = str(result.get("scenario_code") or "").strip()
+    scenario_name = str(result.get("scenario_name") or "").strip()
+    has_vote_signal = (
+        "投票" in suggested_reply
+        or "投票" in behavior_text
+        or scenario_code in {"劇本七", "劇本九"}
+        or scenario_name in {"多人決策與衝突處理", "投票決策"}
+    )
+    if not has_vote_signal:
+        return False
+
+    question, options, urgent = _organize_auto_poll(
+        context_text,
+        result,
+        candidate_options,
+        recent_messages,
+    )
+    fingerprint_source = json.dumps(
+        {"question": question, "options": options},
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    flow_result = create_anonymous_poll(
+        line_group_id=line_group_id,
+        question=question,
+        options=options,
+        auto_created=False,
+        urgent=urgent,
+        discussion_fingerprint=hashlib.sha256(fingerprint_source.encode("utf-8")).hexdigest(),
+        created_by_line_user_id=line_user_id,
+    )
+    if not flow_result.handled:
+        return False
+    _reply_feature_result(event, flow_result)
+    if isinstance(flow_result.data.get("anonymous_poll"), dict):
+        _clear_discussion_after_poll(conversation_key)
+    return True
+
+
 def _try_start_automatic_poll(
     event: Any,
     *,
@@ -3290,6 +3353,22 @@ def handle_message(event: MessageEvent) -> None:
             return
     except Exception as exc:
         _log_failure("Automatic poll flow", exc)
+
+    try:
+        if _try_start_vote_from_current_agreement(
+            event,
+            conversation_key=conversation_key,
+            line_group_id=line_group_id,
+            line_user_id=line_user_id,
+            user_text=user_text,
+            context_text=context_text,
+            recent_messages=_recent_messages,
+            result=result,
+        ):
+            _debug_print("Anonymous poll created from current agreement")
+            return
+    except Exception as exc:
+        _log_failure("Vote agreement flow", exc)
 
     try:
         if should_optimize_route(result):
