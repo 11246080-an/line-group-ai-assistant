@@ -23,6 +23,7 @@ from privacy_redaction import redact_sensitive_identifiers
 
 
 _POLL_PREFIXES = ("建立投票", "新增投票", "發起投票")
+_END_POLL_COMMANDS = ("結束投票", "截止投票", "關閉投票")
 _DEADLINE_RE = re.compile(r"(?:限時|截止)\s*(\d{1,3})\s*(分鐘|小時|天)")
 _NORMAL_MINUTES = max(1, int(os.getenv("AUTO_POLL_NORMAL_MINUTES", "10")))
 _URGENT_MINUTES = max(1, int(os.getenv("AUTO_POLL_URGENT_MINUTES", "3")))
@@ -116,9 +117,8 @@ def _deadline_text(poll: dict[str, Any]) -> str:
 
 
 def _mongo_utc_now() -> datetime:
-    # PyMongo returns datetimes as UTC but timezone-naive by default.
-    # Use the same shape when db.py compares now with deadline_at.
-    return datetime.now(timezone.utc).replace(tzinfo=None)
+    # db.py normalizes MongoDB datetimes to timezone-aware UTC before comparing.
+    return datetime.now(timezone.utc)
 
 
 def format_poll(poll: dict[str, Any], results: list[dict[str, Any]] | None = None) -> str:
@@ -300,6 +300,64 @@ def handle_vote_text(text: str, *, line_group_id: str, line_user_id: str) -> Flo
         deadline_at=parsed.get("deadline_at"),
         created_by_line_user_id=line_user_id,
     )
+
+
+def handle_end_vote_text(text: str, *, line_group_id: str, line_user_id: str) -> FlowResult:
+    normalized = redact_sensitive_identifiers(text.strip())
+    if not any(normalized.startswith(command) for command in _END_POLL_COMMANDS):
+        return FlowResult(False)
+    if not line_group_id:
+        return FlowResult(True, "投票只能在 LINE 群組中使用。")
+
+    required = (
+        "get_db",
+        "get_active_vote_session",
+        "get_vote_results",
+        "mark_vote_result_announced",
+    )
+    if not database_contract_ready(required):
+        return database_unavailable_result()
+
+    try:
+        poll = _db_function("get_active_vote_session")(line_group_id=line_group_id)
+        if not isinstance(poll, dict):
+            return FlowResult(True, "目前沒有進行中的投票。")
+
+        now = _mongo_utc_now()
+        db = _db_function("get_db")()
+        update_result = db.vote_sessions.update_one(
+            {
+                "_id": poll.get("_id"),
+                "line_group_id": line_group_id,
+                "status": "active",
+            },
+            {
+                "$set": {
+                    "status": "closed",
+                    "closed_at": now,
+                    "closed_reason": "manual",
+                }
+            },
+        )
+        if getattr(update_result, "modified_count", 0) < 1:
+            return FlowResult(True, "投票已經截止或不存在，請重新確認。")
+
+        closed_poll = dict(poll)
+        closed_poll["status"] = "closed"
+        closed_poll["closed_at"] = now
+        closed_poll["closed_reason"] = "manual"
+        poll_id = _poll_id(closed_poll)
+        results = list(_db_function("get_vote_results")(poll_id=poll_id) or [])
+        _db_function("mark_vote_result_announced")(
+            poll_id=poll_id,
+            announced_at=now,
+        )
+        return FlowResult(True, format_poll(closed_poll, results))
+    except DatabaseFeatureUnavailable:
+        return database_unavailable_result()
+    except Exception as exc:
+        _LOGGER.exception("Vote closing failed (%s)", type(exc).__name__)
+        return FlowResult(True, "結束投票時發生錯誤，請稍後再試。")
 
 
 def handle_vote_postback(data: str, *, line_group_id: str, line_user_id: str) -> FlowResult:

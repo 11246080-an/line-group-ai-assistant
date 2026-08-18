@@ -129,7 +129,12 @@ from invoice_flow import (
 from privacy_redaction import redact_sensitive_identifiers, redact_structure
 from scheduled_tasks import run_due_tasks
 from trip_schedule_flow import handle_schedule_postback, handle_schedule_text
-from vote_flow import create_anonymous_poll, handle_vote_postback, handle_vote_text
+from vote_flow import (
+    create_anonymous_poll,
+    handle_end_vote_text,
+    handle_vote_postback,
+    handle_vote_text,
+)
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = max(
@@ -2805,6 +2810,9 @@ def _is_explicit_feature_command(text: str) -> bool:
             "重新開啟帳本",
             "設定行程時間",
             "建立投票",
+            "結束投票",
+            "截止投票",
+            "關閉投票",
             "開啟投票",
             "發起投票",
         )
@@ -2877,7 +2885,7 @@ def _handle_feature_text(
         _reply_feature_result(event, result)
         return True
 
-    for handler_function in (handle_vote_text, handle_schedule_text):
+    for handler_function in (handle_end_vote_text, handle_vote_text, handle_schedule_text):
         result = handler_function(
             user_text,
             line_group_id=line_group_id,
