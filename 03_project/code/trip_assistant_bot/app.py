@@ -1678,8 +1678,16 @@ def _judge_same_topic_with_llm(
         user_prompt=(
             f"最近對話：\n{history_text}\n\n"
             f"新訊息：\n{normalized_text}\n\n"
-            "如果新訊息明顯延續原本討論，same_topic=true；"
-            "如果新訊息已切到新的安排、新的地點、新的活動或新的決策方向，same_topic=false。"
+            "請用『討論目的』判斷，而不是只看表面詞是否相同。"
+            "如果新訊息是在補充、同意、反對、提出替代選項、表達偏好、補條件，"
+            "而目的仍是同一件事，same_topic=true。"
+            "例如同一場晚餐討論中，火鍋、熱炒、夜市、壽司都是候選選項，"
+            "不是切換話題，same_topic=true。"
+            "例如同一場出遊討論中，淡水、動物園、宜蘭可能是候選地點，"
+            "若仍在討論同一次出遊，也算同一主題，same_topic=true。"
+            "只有在新訊息明顯改成另一個獨立任務、另一個日期安排、"
+            "或明確表示不再討論前一件事時，same_topic=false。"
+            "如果不確定，優先判斷 same_topic=true，避免過早清空群組討論脈絡。"
         ),
     )
     if not isinstance(result, dict) or "same_topic" not in result:
