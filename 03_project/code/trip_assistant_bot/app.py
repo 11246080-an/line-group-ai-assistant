@@ -85,6 +85,7 @@ from db import (
     upsert_member,
 )
 from location_flow import (
+    TOURISM_CITY_ALIASES,
     build_liff_url,
     claim_recommendation_session,
     clear_recent_location_context,
@@ -1142,6 +1143,56 @@ def _looks_like_current_location_request(user_text: str) -> bool:
     )
 
 
+TEXT_LOCATION_LOOKUP_TERMS = (
+    "景點",
+    "活動",
+    "展覽",
+    "節慶",
+    "市集",
+    "觀光",
+    "旅遊",
+    "可以玩",
+)
+
+
+def _infer_text_location_from_user_text(user_text: str) -> str:
+    normalized_text = str(user_text or "").strip()
+    if not normalized_text:
+        return ""
+
+    for alias in sorted(TOURISM_CITY_ALIASES, key=len, reverse=True):
+        if alias and alias in normalized_text:
+            return alias
+    return ""
+
+
+def _infer_text_activity_types_from_user_text(user_text: str) -> list[str]:
+    normalized_text = str(user_text or "").strip()
+    if not normalized_text:
+        return []
+
+    inferred_types: list[str] = []
+    if any(term in normalized_text for term in ("活動", "展覽", "節慶", "市集")):
+        inferred_types.append("活動")
+    if any(term in normalized_text for term in ("景點", "觀光", "旅遊", "可以玩")):
+        inferred_types.append("景點")
+    return inferred_types
+
+
+def _looks_like_text_location_lookup(user_text: str) -> bool:
+    normalized_text = str(user_text or "").strip()
+    if not normalized_text:
+        return False
+    if _has_weather_request_signal(normalized_text, {}):
+        return False
+    if _looks_like_current_location_request(normalized_text):
+        return False
+    return bool(
+        _infer_text_location_from_user_text(normalized_text)
+        and any(term in normalized_text for term in TEXT_LOCATION_LOOKUP_TERMS)
+    )
+
+
 def _extract_text_location_query_payload(
     user_text: str,
     analysis_result: dict[str, Any],
@@ -1149,10 +1200,12 @@ def _extract_text_location_query_payload(
     if _has_weather_request_signal(user_text, analysis_result):
         return None
 
-    if not bool(analysis_result.get("requires_external_search")):
-        return None
-
-    if not bool(analysis_result.get("should_intervene")):
+    has_ai_text_location_signal = bool(
+        analysis_result.get("requires_external_search")
+        and analysis_result.get("should_intervene")
+    )
+    has_direct_text_location_signal = _looks_like_text_location_lookup(user_text)
+    if not has_ai_text_location_signal and not has_direct_text_location_signal:
         return None
 
     extracted_info = analysis_result.get("extracted_info") or {}
@@ -1173,6 +1226,9 @@ def _extract_text_location_query_payload(
         if str(item).strip()
     ]
     if not normalized_locations:
+        inferred_location = _infer_text_location_from_user_text(user_text)
+        normalized_locations = [inferred_location] if inferred_location else []
+    if not normalized_locations:
         return None
 
     location_text = normalized_locations[0]
@@ -1181,11 +1237,20 @@ def _extract_text_location_query_payload(
     if location_text == "附近":
         return None
 
+    normalized_activity_types = [
+        str(item).strip()
+        for item in activity_types
+        if str(item).strip()
+    ]
+    for inferred_type in _infer_text_activity_types_from_user_text(user_text):
+        if inferred_type not in normalized_activity_types:
+            normalized_activity_types.append(inferred_type)
+
     return {
         "query_text": user_text.strip(),
         "location_text": location_text,
         "constraints": [str(item).strip() for item in constraints if str(item).strip()],
-        "activity_types": [str(item).strip() for item in activity_types if str(item).strip()],
+        "activity_types": normalized_activity_types,
     }
 
 
