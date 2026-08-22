@@ -322,32 +322,20 @@ def _shorten_tourism_text(value: Any, max_length: int = 42) -> str:
 def _format_tourism_description(item: dict[str, Any], *, item_type: str) -> str:
     parts: list[str] = []
 
-    fee_info = _shorten_tourism_text(item.get("fee_info"), 28)
+    fee_info = _shorten_tourism_text(item.get("fee_info"), 48)
     if fee_info:
-        parts.append(f"票價：{fee_info}")
+        parts.append(f"門票：{fee_info}")
     elif item.get("is_accessible_for_free") is True:
-        parts.append("票價：免費")
+        parts.append("門票：免費")
 
     if item_type == "event":
         start_time = _shorten_tourism_text(item.get("start_time"), 16)
         if start_time:
             parts.append(f"開始：{start_time}")
-    else:
-        classes = item.get("attraction_classes")
-        if isinstance(classes, list) and classes:
-            class_names = [
-                str(entry.get("Name") or entry.get("name") or entry).strip()
-                if isinstance(entry, dict)
-                else str(entry).strip()
-                for entry in classes
-            ]
-            class_text = "、".join(name for name in class_names if name)
-            if class_text:
-                parts.append(f"類型：{_shorten_tourism_text(class_text, 18)}")
 
-    website_url = _shorten_tourism_text(item.get("website_url"), 36)
+    website_url = str(item.get("website_url") or "").strip()
     if website_url:
-        parts.append(f"連結：{website_url}")
+        parts.append(f"網址：{website_url}")
 
     return "｜".join(parts)
 
@@ -2093,6 +2081,8 @@ def _format_group_message(
                             normalized_parts.append(
                                 part if "：" in part else part.replace("類型", "類型：", 1)
                             )
+                        elif part.startswith(("門票", "票價", "網址", "連結", "開始")):
+                            normalized_parts.append(part)
                         else:
                             normalized_parts.append(f"類型：{part}")
                     detail_line = "｜".join(normalized_parts)
