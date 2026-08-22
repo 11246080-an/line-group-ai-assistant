@@ -14,7 +14,12 @@ from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import requests
-from db import get_api_query_cache, save_api_query_cache
+from db import (
+    get_api_query_cache,
+    get_tourism_attractions,
+    get_tourism_events,
+    save_api_query_cache,
+)
 
 
 LOGGER = logging.getLogger(__name__)
@@ -174,6 +179,44 @@ LOCATION_TEXT_ALIASES = {
     "台大": "台灣大學",
     "師大": "師大夜市",
 }
+TOURISM_CITY_ALIASES = {
+    "基隆": "基隆市",
+    "臺北": "臺北市",
+    "台北": "臺北市",
+    "新北": "新北市",
+    "淡水": "新北市",
+    "淡水老街": "新北市",
+    "八里": "新北市",
+    "九份": "新北市",
+    "瑞芳": "新北市",
+    "桃園": "桃園市",
+    "新竹市": "新竹市",
+    "新竹縣": "新竹縣",
+    "苗栗": "苗栗縣",
+    "臺中": "臺中市",
+    "台中": "臺中市",
+    "彰化": "彰化縣",
+    "南投": "南投縣",
+    "雲林": "雲林縣",
+    "嘉義市": "嘉義市",
+    "嘉義縣": "嘉義縣",
+    "臺南": "臺南市",
+    "台南": "臺南市",
+    "高雄": "高雄市",
+    "屏東": "屏東縣",
+    "宜蘭": "宜蘭縣",
+    "礁溪": "宜蘭縣",
+    "羅東": "宜蘭縣",
+    "蘇澳": "宜蘭縣",
+    "冬山河": "宜蘭縣",
+    "花蓮": "花蓮縣",
+    "太魯閣": "花蓮縣",
+    "臺東": "臺東縣",
+    "台東": "臺東縣",
+    "澎湖": "澎湖縣",
+    "金門": "金門縣",
+    "連江": "連江縣",
+}
 
 
 def _coerce_float(value: Any) -> float | None:
@@ -216,6 +259,200 @@ def _infer_intent_from_activity_types(activity_types: list[str] | None) -> str:
     if _contains_any_keyword(joined, ATTRACTION_QUERY_KEYWORDS):
         return "attraction"
     return "general"
+
+
+def _effective_recommendation_intent(
+    query_text: str,
+    activity_types: list[str] | None = None,
+) -> str:
+    query_intent = _detect_query_intent(query_text)
+    if query_intent != "general":
+        return query_intent
+    return _infer_intent_from_activity_types(activity_types)
+
+
+def _normalize_tourism_city(location_text: str, query_text: str = "") -> str:
+    candidates = [
+        str(location_text or "").strip(),
+        str(query_text or "").strip(),
+    ]
+    for candidate in candidates:
+        if not candidate:
+            continue
+        for alias in sorted(TOURISM_CITY_ALIASES, key=len, reverse=True):
+            if alias and alias in candidate:
+                return TOURISM_CITY_ALIASES[alias]
+    return ""
+
+
+def _is_tourism_lookup_request(
+    query_text: str,
+    activity_types: list[str] | None = None,
+) -> bool:
+    if _effective_recommendation_intent(query_text, activity_types) == "food":
+        return False
+
+    combined = " ".join(
+        [query_text]
+        + [str(item) for item in activity_types or [] if str(item).strip()]
+    )
+    return _contains_any_keyword(
+        combined,
+        ATTRACTION_QUERY_KEYWORDS
+        + (
+            "景區",
+            "觀光",
+            "活動",
+            "展覽",
+            "節慶",
+            "博物館",
+            "公園",
+            "老街",
+        ),
+    )
+
+
+def _shorten_tourism_text(value: Any, max_length: int = 42) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if len(text) <= max_length:
+        return text
+    return f"{text[:max_length].rstrip()}..."
+
+
+def _format_tourism_description(item: dict[str, Any], *, item_type: str) -> str:
+    parts: list[str] = []
+
+    fee_info = _shorten_tourism_text(item.get("fee_info"), 28)
+    if fee_info:
+        parts.append(f"票價：{fee_info}")
+    elif item.get("is_accessible_for_free") is True:
+        parts.append("票價：免費")
+
+    if item_type == "event":
+        start_time = _shorten_tourism_text(item.get("start_time"), 16)
+        if start_time:
+            parts.append(f"開始：{start_time}")
+    else:
+        classes = item.get("attraction_classes")
+        if isinstance(classes, list) and classes:
+            class_names = [
+                str(entry.get("Name") or entry.get("name") or entry).strip()
+                if isinstance(entry, dict)
+                else str(entry).strip()
+                for entry in classes
+            ]
+            class_text = "、".join(name for name in class_names if name)
+            if class_text:
+                parts.append(f"類型：{_shorten_tourism_text(class_text, 18)}")
+
+    website_url = _shorten_tourism_text(item.get("website_url"), 36)
+    if website_url:
+        parts.append(f"連結：{website_url}")
+
+    return "｜".join(parts)
+
+
+def _tourism_item_to_result(item: dict[str, Any], *, item_type: str) -> dict[str, Any]:
+    city = str(item.get("city") or "").strip()
+    town = str(item.get("town") or "").strip()
+    address = str(item.get("address") or "").strip()
+    subtitle = address or " ".join(part for part in (city, town) if part).strip()
+
+    return {
+        "name": str(item.get("name") or "未命名景點").strip(),
+        "subtitle": subtitle,
+        "description": _format_tourism_description(item, item_type=item_type),
+        "distance_km": None,
+        "address": address,
+        "maps_url": str(item.get("website_url") or "").strip(),
+        "latitude": _coerce_float(item.get("latitude")),
+        "longitude": _coerce_float(item.get("longitude")),
+        "provider": f"tourism_{item_type}",
+    }
+
+
+def _merge_recommendation_results(
+    primary_results: list[dict[str, Any]],
+    secondary_results: list[dict[str, Any]],
+    *,
+    limit: int,
+) -> list[dict[str, Any]]:
+    merged: list[dict[str, Any]] = []
+    seen_names: set[str] = set()
+
+    for item in primary_results + secondary_results:
+        name = str(item.get("name") or "").strip()
+        if not name:
+            continue
+        normalized_name = re.sub(r"\s+", "", name).casefold()
+        if normalized_name in seen_names:
+            continue
+        seen_names.add(normalized_name)
+        merged.append(item)
+        if len(merged) >= limit:
+            break
+
+    return merged
+
+
+def _build_tourism_text_recommendation(
+    *,
+    query_text: str,
+    location_text: str,
+    activity_types: list[str] | None = None,
+) -> dict[str, Any] | None:
+    if not _is_tourism_lookup_request(query_text, activity_types):
+        return None
+
+    city = _normalize_tourism_city(location_text, query_text)
+    if not city:
+        return None
+
+    include_events = _contains_any_keyword(
+        " ".join([query_text] + [str(item) for item in activity_types or []]),
+        ("活動", "展覽", "節慶", "市集", "演出", "表演"),
+    )
+
+    results: list[dict[str, Any]] = []
+    try:
+        attractions = get_tourism_attractions(city=city, limit=LIFF_RESULT_LIMIT)
+        results.extend(
+            _tourism_item_to_result(item, item_type="attraction")
+            for item in attractions
+            if isinstance(item, dict)
+        )
+        if include_events:
+            events = get_tourism_events(city=city, limit=LIFF_RESULT_LIMIT)
+            results.extend(
+                _tourism_item_to_result(item, item_type="event")
+                for item in events
+                if isinstance(item, dict)
+            )
+    except Exception as exc:
+        _log_external_failure("Tourism open data recommendation", exc)
+        return None
+
+    results = [item for item in results if item.get("name")]
+    if not results:
+        return None
+
+    text_query = _build_text_search_query(
+        query_text=query_text,
+        location_text=location_text,
+        activity_types=activity_types,
+    )
+    return {
+        "group_message": _format_group_message(
+            results,
+            text_query or query_text,
+            "text_location",
+        ),
+        "results": results,
+        "location_source": "text_location",
+        "query_text": text_query or query_text,
+        "provider": "tourism_open_data",
+        "tourism_city": city,
+    }
 
 
 def _get_openai_client() -> Any | None:
@@ -1309,8 +1546,14 @@ def run_text_location_recommendation(
     activity_types: list[str] | None = None,
     line_group_id: str = "",
 ) -> dict[str, Any]:
+    tourism_payload = _build_tourism_text_recommendation(
+        query_text=query_text,
+        location_text=location_text,
+        activity_types=activity_types,
+    )
+
     if os.getenv("GOOGLE_PLACES_API_KEY", "").strip():
-        return _build_google_places_text_recommendation(
+        google_payload = _build_google_places_text_recommendation(
             query_text=query_text,
             location_text=location_text,
             constraints=constraints,
@@ -1318,6 +1561,33 @@ def run_text_location_recommendation(
             location_source="text_location",
             line_group_id=line_group_id,
         )
+        if tourism_payload:
+            merged_results = _merge_recommendation_results(
+                list(tourism_payload.get("results") or []),
+                list(google_payload.get("results") or []),
+                limit=LIFF_RESULT_LIMIT,
+            )
+            merged_query_text = str(
+                tourism_payload.get("query_text")
+                or google_payload.get("query_text")
+                or query_text
+            )
+            return {
+                "group_message": _format_group_message(
+                    merged_results,
+                    merged_query_text,
+                    "text_location",
+                ),
+                "results": merged_results,
+                "location_source": "text_location",
+                "query_text": merged_query_text,
+                "provider": "tourism_open_data+google_places_text",
+                "tourism_city": tourism_payload.get("tourism_city"),
+            }
+        return google_payload
+
+    if tourism_payload:
+        return tourism_payload
 
     raise RuntimeError("GOOGLE_PLACES_API_KEY is not configured.")
 
