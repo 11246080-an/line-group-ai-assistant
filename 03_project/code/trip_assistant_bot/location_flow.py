@@ -285,6 +285,79 @@ def _normalize_tourism_city(location_text: str, query_text: str = "") -> str:
     return ""
 
 
+def _normalize_tourism_area(location_text: str, query_text: str = "") -> str:
+    candidates = [
+        str(location_text or "").strip(),
+        str(query_text or "").strip(),
+    ]
+    for candidate in candidates:
+        if not candidate:
+            continue
+        cleaned = re.sub(
+            r"(附近|周邊|有什麼|可以玩|景點|活動|推薦|想去|想玩|旅遊|行程)",
+            "",
+            candidate,
+        ).strip()
+        for alias in sorted(TOURISM_CITY_ALIASES, key=len, reverse=True):
+            if alias and alias in cleaned:
+                return alias
+    return ""
+
+
+def _tourism_area_score(item: dict[str, Any], area_text: str) -> int:
+    if not area_text:
+        return 0
+
+    score = 0
+    town = str(item.get("town") or "")
+    name = str(item.get("name") or "")
+    address = str(item.get("address") or "")
+    description = str(item.get("description") or "")
+
+    if area_text in town:
+        score += 8
+    if area_text in name:
+        score += 5
+    if area_text in address:
+        score += 4
+    if area_text in description:
+        score += 1
+    return score
+
+
+def _rank_tourism_items_by_area(
+    items: list[dict[str, Any]],
+    *,
+    area_text: str,
+    city: str,
+) -> list[dict[str, Any]]:
+    if not items:
+        return []
+
+    city_aliases = {
+        alias
+        for alias, canonical_city in TOURISM_CITY_ALIASES.items()
+        if canonical_city == city
+    }
+    should_filter_by_area = bool(area_text and area_text not in city_aliases)
+    scored_items = [
+        (_tourism_area_score(item, area_text), index, item)
+        for index, item in enumerate(items)
+    ]
+
+    if should_filter_by_area:
+        area_matches = [
+            (score, index, item)
+            for score, index, item in scored_items
+            if score > 0
+        ]
+        if area_matches:
+            scored_items = area_matches
+
+    scored_items.sort(key=lambda entry: (-entry[0], entry[1]))
+    return [item for _score, _index, item in scored_items]
+
+
 def _is_tourism_lookup_request(
     query_text: str,
     activity_types: list[str] | None = None,
@@ -395,6 +468,7 @@ def _build_tourism_text_recommendation(
     city = _normalize_tourism_city(location_text, query_text)
     if not city:
         return None
+    area_text = _normalize_tourism_area(location_text, query_text)
 
     include_events = _contains_any_keyword(
         " ".join([query_text] + [str(item) for item in activity_types or []]),
@@ -403,17 +477,28 @@ def _build_tourism_text_recommendation(
 
     results: list[dict[str, Any]] = []
     try:
-        attractions = get_tourism_attractions(city=city, limit=LIFF_RESULT_LIMIT)
+        lookup_limit = max(LIFF_RESULT_LIMIT * 8, 80)
+        attractions = get_tourism_attractions(city=city, limit=lookup_limit)
+        attractions = _rank_tourism_items_by_area(
+            attractions,
+            area_text=area_text,
+            city=city,
+        )
         results.extend(
             _tourism_item_to_result(item, item_type="attraction")
-            for item in attractions
+            for item in attractions[:LIFF_RESULT_LIMIT]
             if isinstance(item, dict)
         )
         if include_events:
-            events = get_tourism_events(city=city, limit=LIFF_RESULT_LIMIT)
+            events = get_tourism_events(city=city, limit=lookup_limit)
+            events = _rank_tourism_items_by_area(
+                events,
+                area_text=area_text,
+                city=city,
+            )
             results.extend(
                 _tourism_item_to_result(item, item_type="event")
-                for item in events
+                for item in events[:LIFF_RESULT_LIMIT]
                 if isinstance(item, dict)
             )
     except Exception as exc:
@@ -440,6 +525,7 @@ def _build_tourism_text_recommendation(
         "query_text": text_query or query_text,
         "provider": "tourism_open_data",
         "tourism_city": city,
+        "tourism_area": area_text,
     }
 
 
