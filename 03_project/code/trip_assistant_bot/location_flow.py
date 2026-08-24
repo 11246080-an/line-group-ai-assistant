@@ -179,6 +179,10 @@ LOCATION_TEXT_ALIASES = {
     "台大": "台灣大學",
     "師大": "師大夜市",
 }
+AMBIGUOUS_TOURISM_CITY_ALIASES = {
+    "嘉義": ["嘉義市", "嘉義縣"],
+    "新竹": ["新竹市", "新竹縣"],
+}
 TOURISM_CITY_ALIASES = {
     "基隆": "基隆市",
     "臺北": "臺北市",
@@ -190,6 +194,8 @@ TOURISM_CITY_ALIASES = {
     "九份": "新北市",
     "瑞芳": "新北市",
     "桃園": "桃園市",
+    "嘉義": "嘉義市",
+    "新竹": "新竹市",
     "新竹市": "新竹市",
     "新竹縣": "新竹縣",
     "苗栗": "苗栗縣",
@@ -272,6 +278,11 @@ def _effective_recommendation_intent(
 
 
 def _normalize_tourism_city(location_text: str, query_text: str = "") -> str:
+    cities = _normalize_tourism_cities(location_text, query_text)
+    return cities[0] if cities else ""
+
+
+def _normalize_tourism_cities(location_text: str, query_text: str = "") -> list[str]:
     candidates = [
         str(location_text or "").strip(),
         str(query_text or "").strip(),
@@ -280,9 +291,17 @@ def _normalize_tourism_city(location_text: str, query_text: str = "") -> str:
         if not candidate:
             continue
         for alias in sorted(TOURISM_CITY_ALIASES, key=len, reverse=True):
+            if alias in AMBIGUOUS_TOURISM_CITY_ALIASES:
+                continue
             if alias and alias in candidate:
-                return TOURISM_CITY_ALIASES[alias]
-    return ""
+                return [TOURISM_CITY_ALIASES[alias]]
+        for alias in sorted(AMBIGUOUS_TOURISM_CITY_ALIASES, key=len, reverse=True):
+            if alias and alias in candidate:
+                return list(AMBIGUOUS_TOURISM_CITY_ALIASES[alias])
+        for alias in sorted(TOURISM_CITY_ALIASES, key=len, reverse=True):
+            if alias and alias in candidate:
+                return [TOURISM_CITY_ALIASES[alias]]
+    return []
 
 
 def _normalize_tourism_area(location_text: str, query_text: str = "") -> str:
@@ -339,7 +358,11 @@ def _rank_tourism_items_by_area(
         for alias, canonical_city in TOURISM_CITY_ALIASES.items()
         if canonical_city == city
     }
-    should_filter_by_area = bool(area_text and area_text not in city_aliases)
+    should_filter_by_area = bool(
+        area_text
+        and area_text not in city_aliases
+        and area_text not in AMBIGUOUS_TOURISM_CITY_ALIASES
+    )
     scored_items = [
         (_tourism_area_score(item, area_text), index, item)
         for index, item in enumerate(items)
@@ -479,9 +502,10 @@ def _build_tourism_text_recommendation(
     if not _is_tourism_lookup_request(query_text, activity_types):
         return None
 
-    city = _normalize_tourism_city(location_text, query_text)
-    if not city:
+    cities = _normalize_tourism_cities(location_text, query_text)
+    if not cities:
         return None
+    city_label = "、".join(cities)
     area_text = _normalize_tourism_area(location_text, query_text)
 
     event_lookup = _is_tourism_event_lookup_request(query_text, activity_types)
@@ -489,43 +513,45 @@ def _build_tourism_text_recommendation(
     results: list[dict[str, Any]] = []
     try:
         lookup_limit = max(LIFF_RESULT_LIMIT * 8, 80)
-        if event_lookup:
-            events = get_tourism_events(city=city, limit=lookup_limit)
-            events = _rank_tourism_items_by_area(
-                events,
-                area_text=area_text,
-                city=city,
-            )
-            results.extend(
-                _tourism_item_to_result(item, item_type="event")
-                for item in events[:LIFF_RESULT_LIMIT]
-                if isinstance(item, dict)
-            )
-        else:
-            attractions = get_tourism_attractions(city=city, limit=lookup_limit)
-            attractions = _rank_tourism_items_by_area(
-                attractions,
-                area_text=area_text,
-                city=city,
-            )
-            results.extend(
-                _tourism_item_to_result(item, item_type="attraction")
-                for item in attractions[:LIFF_RESULT_LIMIT]
-                if isinstance(item, dict)
-            )
+        for city in cities:
+            if event_lookup:
+                events = get_tourism_events(city=city, limit=lookup_limit)
+                events = _rank_tourism_items_by_area(
+                    events,
+                    area_text=area_text,
+                    city=city,
+                )
+                results.extend(
+                    _tourism_item_to_result(item, item_type="event")
+                    for item in events[:LIFF_RESULT_LIMIT]
+                    if isinstance(item, dict)
+                )
+            else:
+                attractions = get_tourism_attractions(city=city, limit=lookup_limit)
+                attractions = _rank_tourism_items_by_area(
+                    attractions,
+                    area_text=area_text,
+                    city=city,
+                )
+                results.extend(
+                    _tourism_item_to_result(item, item_type="attraction")
+                    for item in attractions[:LIFF_RESULT_LIMIT]
+                    if isinstance(item, dict)
+                )
     except Exception as exc:
         _log_external_failure("Tourism open data recommendation", exc)
         return None
 
     results = [item for item in results if item.get("name")]
+    results = _merge_recommendation_results(results, [], limit=LIFF_RESULT_LIMIT)
     if not results and event_lookup:
         return {
-            "group_message": f"我查了一下觀光署活動資料，目前沒有找到{city}近期適合顯示的活動。",
+            "group_message": f"我查了一下觀光署活動資料，目前沒有找到{city_label}近期適合顯示的活動。",
             "results": [],
             "location_source": "text_location",
             "query_text": query_text.strip(),
             "provider": "tourism_open_data",
-            "tourism_city": city,
+            "tourism_city": city_label,
             "tourism_area": area_text,
             "tourism_kind": "event",
         }
@@ -547,7 +573,7 @@ def _build_tourism_text_recommendation(
         "location_source": "text_location",
         "query_text": text_query or query_text,
         "provider": "tourism_open_data",
-        "tourism_city": city,
+        "tourism_city": city_label,
         "tourism_area": area_text,
         "tourism_kind": "event" if event_lookup else "attraction",
     }
