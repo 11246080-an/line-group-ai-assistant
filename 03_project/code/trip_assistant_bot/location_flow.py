@@ -456,6 +456,29 @@ def _format_tourism_datetime(value: Any) -> str:
     return parsed.strftime("%Y/%m/%d %H:%M")
 
 
+def _format_tourism_period_date(value: Any) -> str:
+    parsed = _parse_tourism_datetime(value)
+    if parsed is None:
+        return _shorten_tourism_text(value, 16)
+    if parsed.hour == 0 and parsed.minute == 0 and parsed.second == 0:
+        return parsed.strftime("%Y/%m/%d")
+    return parsed.strftime("%Y/%m/%d %H:%M")
+
+
+def _format_tourism_event_period(start_value: Any, end_value: Any) -> str:
+    start_time = _format_tourism_period_date(start_value)
+    end_time = _format_tourism_period_date(end_value)
+    if start_time and end_time:
+        if start_time == end_time:
+            return f"活動日期：{start_time}"
+        return f"活動期間：{start_time} - {end_time}"
+    if start_time:
+        return f"開始：{start_time}"
+    if end_time:
+        return f"結束：{end_time}"
+    return ""
+
+
 def _is_active_tourism_event(item: dict[str, Any]) -> bool:
     end_time = _parse_tourism_datetime(item.get("end_time"))
     if end_time is None:
@@ -474,12 +497,12 @@ def _format_tourism_description(item: dict[str, Any], *, item_type: str) -> str:
         parts.append("門票：免費")
 
     if item_type == "event":
-        start_time = _format_tourism_datetime(item.get("start_time"))
-        if start_time:
-            parts.append(f"開始：{start_time}")
-        end_time = _format_tourism_datetime(item.get("end_time"))
-        if end_time:
-            parts.append(f"結束：{end_time}")
+        event_period = _format_tourism_event_period(
+            item.get("start_time"),
+            item.get("end_time"),
+        )
+        if event_period:
+            parts.append(event_period)
 
     return "｜".join(parts)
 
@@ -2260,7 +2283,18 @@ def _format_group_message(
                             normalized_parts.append(
                                 part if "：" in part else part.replace("類型", "類型：", 1)
                             )
-                        elif part.startswith(("門票", "票價", "網址", "連結", "開始", "結束")):
+                        elif part.startswith(
+                            (
+                                "門票",
+                                "票價",
+                                "網址",
+                                "連結",
+                                "開始",
+                                "結束",
+                                "活動期間",
+                                "活動日期",
+                            )
+                        ):
                             normalized_parts.append(part)
                         else:
                             normalized_parts.append(f"類型：{part}")
