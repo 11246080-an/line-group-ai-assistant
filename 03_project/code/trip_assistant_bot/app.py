@@ -3533,6 +3533,8 @@ def handle_message(event: MessageEvent) -> None:
     try:
         text_location_payload = _extract_text_location_query_payload(user_text, result)
         if text_location_payload:
+            if not processing_hint_sent:
+                _send_processing_hint("text_location_recommendation")
             if _handle_text_location_recommendation_request(
                 event,
                 conversation_key,

@@ -2263,7 +2263,7 @@ def _format_group_message(
                             normalized_parts.append(
                                 part if "：" in part else part.replace("類型", "類型：", 1)
                             )
-                        elif part.startswith(("門票", "票價", "網址", "連結", "開始")):
+                        elif part.startswith(("門票", "票價", "網址", "連結", "開始", "結束")):
                             normalized_parts.append(part)
                         else:
                             normalized_parts.append(f"類型：{part}")
