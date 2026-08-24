@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import logging
@@ -429,6 +430,40 @@ def _shorten_tourism_text(value: Any, max_length: int = 42) -> str:
     return f"{text[:max_length].rstrip()}..."
 
 
+TAIPEI_TIMEZONE = timezone(timedelta(hours=8))
+
+
+def _parse_tourism_datetime(value: Any) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+
+    normalized = text.replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=TAIPEI_TIMEZONE)
+    return parsed.astimezone(TAIPEI_TIMEZONE)
+
+
+def _format_tourism_datetime(value: Any) -> str:
+    parsed = _parse_tourism_datetime(value)
+    if parsed is None:
+        return _shorten_tourism_text(value, 16)
+    return parsed.strftime("%Y/%m/%d %H:%M")
+
+
+def _is_active_tourism_event(item: dict[str, Any]) -> bool:
+    end_time = _parse_tourism_datetime(item.get("end_time"))
+    if end_time is None:
+        return True
+    now = datetime.now(TAIPEI_TIMEZONE)
+    return end_time >= now
+
+
 def _format_tourism_description(item: dict[str, Any], *, item_type: str) -> str:
     parts: list[str] = []
 
@@ -439,9 +474,12 @@ def _format_tourism_description(item: dict[str, Any], *, item_type: str) -> str:
         parts.append("門票：免費")
 
     if item_type == "event":
-        start_time = _shorten_tourism_text(item.get("start_time"), 16)
+        start_time = _format_tourism_datetime(item.get("start_time"))
         if start_time:
             parts.append(f"開始：{start_time}")
+        end_time = _format_tourism_datetime(item.get("end_time"))
+        if end_time:
+            parts.append(f"結束：{end_time}")
 
     website_url = str(item.get("website_url") or "").strip()
     if website_url:
@@ -516,6 +554,11 @@ def _build_tourism_text_recommendation(
         for city in cities:
             if event_lookup:
                 events = get_tourism_events(city=city, limit=lookup_limit)
+                events = [
+                    item
+                    for item in events
+                    if isinstance(item, dict) and _is_active_tourism_event(item)
+                ]
                 events = _rank_tourism_items_by_area(
                     events,
                     area_text=area_text,
@@ -524,7 +567,6 @@ def _build_tourism_text_recommendation(
                 results.extend(
                     _tourism_item_to_result(item, item_type="event")
                     for item in events[:LIFF_RESULT_LIMIT]
-                    if isinstance(item, dict)
                 )
             else:
                 attractions = get_tourism_attractions(city=city, limit=lookup_limit)
