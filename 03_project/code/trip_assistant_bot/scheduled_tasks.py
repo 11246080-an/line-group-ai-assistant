@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import logging
 from typing import Callable
 
 from expense_flow import _book_id, _db_function, build_expense_report, database_contract_ready
@@ -11,6 +12,7 @@ from vote_flow import format_poll
 
 PushCallback = Callable[[str, str], None]
 ExpenseReportPushCallback = Callable[[str, dict, list[dict]], None]
+_LOGGER = logging.getLogger(__name__)
 
 
 def run_due_tasks(
@@ -44,7 +46,8 @@ def run_due_tasks(
                     sent_at=current,
                 )
                 result["books_closed"] += 1
-            except Exception:
+            except Exception as exc:
+                _LOGGER.error("Scheduled expense report failed (%s)", type(exc).__name__)
                 result["push_failures"] += 1
 
     poll_contract = (
@@ -58,16 +61,16 @@ def run_due_tasks(
             try:
                 poll_id = str(poll.get("poll_id") or poll.get("_id") or "")
                 results = list(_db_function("get_vote_results")(poll_id=poll_id) or [])
-                push_text(
-                    str(poll.get("line_group_id") or ""),
-                    "投票已截止。\n\n" + format_poll(poll, results),
-                )
+                push_target_id = str(poll.get("line_group_id") or "")
+                result_text = "投票已截止。\n\n" + format_poll(poll, results)
+                push_text(push_target_id, result_text)
                 _db_function("mark_vote_result_announced")(
                     poll_id=poll_id,
                     announced_at=current,
                 )
                 result["polls_closed"] += 1
-            except Exception:
+            except Exception as exc:
+                _LOGGER.error("Scheduled poll result failed (%s)", type(exc).__name__)
                 result["push_failures"] += 1
 
     return result

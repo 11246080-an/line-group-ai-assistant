@@ -10,12 +10,16 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import importlib
+import logging
 import os
 import re
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
 from privacy_redaction import redact_sensitive_identifiers, redact_structure
+
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class DatabaseFeatureUnavailable(RuntimeError):
@@ -111,6 +115,40 @@ def _person_name(value: Any, *, max_length: int = 40) -> str:
     if isinstance(value, dict):
         value = value.get("display_name") or value.get("name") or ""
     return _clean_name(value, max_length=max_length)
+
+
+def normalize_participants_for_storage(participants: Any) -> list[dict[str, Any]]:
+    """Convert draft participant names into the member records expected by db.py."""
+    if not isinstance(participants, (list, tuple)):
+        return []
+
+    normalized: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for participant in participants:
+        if isinstance(participant, dict):
+            line_user_id = str(participant.get("line_user_id") or "").strip()
+            display_name = _person_name(participant)
+            member_type = "line" if line_user_id else "manual"
+        else:
+            line_user_id = ""
+            display_name = _person_name(participant)
+            member_type = "manual"
+
+        if member_type == "manual" and not display_name:
+            continue
+        identity = line_user_id if member_type == "line" else display_name
+        key = (member_type, identity)
+        if not identity or key in seen:
+            continue
+        seen.add(key)
+        normalized.append(
+            {
+                "type": member_type,
+                "line_user_id": line_user_id or None,
+                "display_name": display_name,
+            }
+        )
+    return normalized
 
 
 def _split_people(value: str) -> list[str]:
@@ -486,7 +524,12 @@ def _book_id(book: dict[str, Any]) -> Any:
     return book.get("_id") or book.get("id")
 
 
-def _create_book(line_group_id: str, line_user_id: str, name: str) -> FlowResult:
+def _create_book(
+    line_group_id: str,
+    line_user_id: str,
+    name: str,
+    creator_display_name: str = "",
+) -> FlowResult:
     if not database_contract_ready(("create_expense_book",)):
         return database_unavailable_result()
     clean_name = _clean_name(name) or "未命名行程"
@@ -494,7 +537,15 @@ def _create_book(line_group_id: str, line_user_id: str, name: str) -> FlowResult
         line_group_id=line_group_id,
         name=clean_name,
         created_by=line_user_id,
-        members=[],
+        members=normalize_participants_for_storage(
+            [
+                {
+                    "type": "line",
+                    "line_user_id": line_user_id,
+                    "display_name": creator_display_name,
+                }
+            ]
+        ),
         start_at=None,
         end_at=None,
         timezone="Asia/Taipei",
@@ -546,9 +597,13 @@ def _confirm_expense(line_group_id: str, line_user_id: str) -> FlowResult:
         )
     if payload.get("missing"):
         return _draft_result_after_edit("expense", payload)
+    expense_payload = {
+        **payload,
+        "participants": normalize_participants_for_storage(payload.get("participants")),
+    }
     expense = _db_function("create_expense")(
         book_id=payload.get("book_id"),
-        expense=redact_structure(payload),
+        expense=redact_structure(expense_payload),
         created_by=line_user_id,
     )
     _db_function("delete_feature_draft")(
@@ -667,6 +722,9 @@ def handle_expense_text(
             "產生花費明細",
             "結束行程",
             "重新開啟帳本",
+            "加入帳本",
+            "加入帳本成員",
+            "查看帳本成員",
         )
     )
     if not expense_signal:
@@ -676,14 +734,77 @@ def handle_expense_text(
                 line_group_id=line_group_id,
                 line_user_id=line_user_id,
             )
-        except Exception:
+        except Exception as exc:
+            _LOGGER.exception(
+                "Custom expense field handling failed (%s)",
+                type(exc).__name__,
+            )
             return FlowResult(False)
     if not line_group_id:
         return FlowResult(True, "行程記帳目前只支援 LINE 群組。")
 
     try:
         if normalized.startswith("開始記帳"):
-            return _create_book(line_group_id, line_user_id, normalized[len("開始記帳") :].strip())
+            return _create_book(
+                line_group_id,
+                line_user_id,
+                normalized[len("開始記帳") :].strip(),
+                creator_display_name=default_payer,
+            )
+        if normalized == "查看帳本成員":
+            if not database_contract_ready(("get_active_expense_book",)):
+                return database_unavailable_result()
+            book, error = _active_book_or_result(line_group_id)
+            if error:
+                return error
+            members = (book or {}).get("members") or []
+            visible_members = normalize_participants_for_storage(members)
+            if not visible_members:
+                return FlowResult(True, "帳本內目前沒有已登記的成員。")
+            return FlowResult(
+                True,
+                "帳本成員：\n" + "\n".join(
+                    f"{index}. {_person_name(member)}"
+                    f"（{'LINE' if member.get('type') == 'line' else '手動'}）"
+                    for index, member in enumerate(visible_members, start=1)
+                ),
+            )
+        if normalized == "加入帳本" or normalized.startswith("加入帳本成員"):
+            if not database_contract_ready(("get_active_expense_book", "add_expense_book_member")):
+                return database_unavailable_result()
+            book, error = _active_book_or_result(line_group_id)
+            if error:
+                return error
+            if normalized == "加入帳本":
+                display_name = _clean_name(default_payer, max_length=40)
+                if not display_name:
+                    return FlowResult(True, "目前無法取得你的 LINE 暱稱，請改用「加入帳本成員 名稱」。")
+                members = [
+                    {
+                        "type": "line",
+                        "line_user_id": line_user_id,
+                        "display_name": display_name,
+                    }
+                ]
+            else:
+                member_text = normalized[len("加入帳本成員") :].strip(" ：:")
+                names = _split_people(member_text)
+                if not names:
+                    return FlowResult(True, "請輸入成員名稱，例如：加入帳本成員 小明、小華。")
+                members = [
+                    {"type": "manual", "line_user_id": None, "display_name": name}
+                    for name in names
+                ]
+            for member in members:
+                _db_function("add_expense_book_member")(
+                    book_id=_book_id(book or {}),
+                    member=redact_structure(member),
+                    updated_by=line_user_id,
+                )
+            return FlowResult(
+                True,
+                "已登記帳本成員：" + "、".join(_person_name(member) for member in members),
+            )
         if normalized.startswith("修改帳本名稱"):
             new_name = _clean_name(normalized[len("修改帳本名稱") :].strip(" ：:"), max_length=120)
             if not new_name:
@@ -876,7 +997,8 @@ def handle_expense_text(
             return FlowResult(True, f"已重新開啟帳本「{_clean_name((book or {}).get('name'))}」。")
     except DatabaseFeatureUnavailable:
         return database_unavailable_result()
-    except Exception:
+    except Exception as exc:
+        _LOGGER.exception("Expense text flow failed (%s)", type(exc).__name__)
         return FlowResult(True, "記帳功能暫時無法完成這個操作，請稍後再試。")
     return FlowResult(False)
 
@@ -981,7 +1103,8 @@ def handle_expense_postback(
             return _draft_result_after_edit("expense", payload)
     except DatabaseFeatureUnavailable:
         return database_unavailable_result()
-    except Exception:
+    except Exception as exc:
+        _LOGGER.exception("Expense postback flow failed (%s)", type(exc).__name__)
         return FlowResult(True, "記帳功能暫時無法完成這個操作，請稍後再試。")
     return FlowResult(True, "這個記帳操作已失效，請重新輸入。")
 
@@ -991,6 +1114,7 @@ def ensure_book_from_itinerary(
     line_group_id: str,
     line_user_id: str,
     itinerary: dict[str, Any],
+    creator_display_name: str = "",
 ) -> None:
     if not line_group_id or not database_contract_ready(("get_active_expense_book", "create_expense_book")):
         return
@@ -1000,7 +1124,15 @@ def ensure_book_from_itinerary(
         line_group_id=line_group_id,
         name=_clean_name(itinerary.get("title") or "行程"),
         created_by=line_user_id,
-        members=[],
+        members=normalize_participants_for_storage(
+            [
+                {
+                    "type": "line",
+                    "line_user_id": line_user_id,
+                    "display_name": creator_display_name,
+                }
+            ]
+        ),
         start_at=None,
         end_at=None,
         timezone="Asia/Taipei",

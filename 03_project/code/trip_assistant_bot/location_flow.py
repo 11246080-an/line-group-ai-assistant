@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import logging
@@ -180,10 +179,6 @@ LOCATION_TEXT_ALIASES = {
     "台大": "台灣大學",
     "師大": "師大夜市",
 }
-AMBIGUOUS_TOURISM_CITY_ALIASES = {
-    "嘉義": ["嘉義市", "嘉義縣"],
-    "新竹": ["新竹市", "新竹縣"],
-}
 TOURISM_CITY_ALIASES = {
     "基隆": "基隆市",
     "臺北": "臺北市",
@@ -195,8 +190,6 @@ TOURISM_CITY_ALIASES = {
     "九份": "新北市",
     "瑞芳": "新北市",
     "桃園": "桃園市",
-    "嘉義": "嘉義市",
-    "新竹": "新竹市",
     "新竹市": "新竹市",
     "新竹縣": "新竹縣",
     "苗栗": "苗栗縣",
@@ -279,11 +272,6 @@ def _effective_recommendation_intent(
 
 
 def _normalize_tourism_city(location_text: str, query_text: str = "") -> str:
-    cities = _normalize_tourism_cities(location_text, query_text)
-    return cities[0] if cities else ""
-
-
-def _normalize_tourism_cities(location_text: str, query_text: str = "") -> list[str]:
     candidates = [
         str(location_text or "").strip(),
         str(query_text or "").strip(),
@@ -292,17 +280,9 @@ def _normalize_tourism_cities(location_text: str, query_text: str = "") -> list[
         if not candidate:
             continue
         for alias in sorted(TOURISM_CITY_ALIASES, key=len, reverse=True):
-            if alias in AMBIGUOUS_TOURISM_CITY_ALIASES:
-                continue
             if alias and alias in candidate:
-                return [TOURISM_CITY_ALIASES[alias]]
-        for alias in sorted(AMBIGUOUS_TOURISM_CITY_ALIASES, key=len, reverse=True):
-            if alias and alias in candidate:
-                return list(AMBIGUOUS_TOURISM_CITY_ALIASES[alias])
-        for alias in sorted(TOURISM_CITY_ALIASES, key=len, reverse=True):
-            if alias and alias in candidate:
-                return [TOURISM_CITY_ALIASES[alias]]
-    return []
+                return TOURISM_CITY_ALIASES[alias]
+    return ""
 
 
 def _normalize_tourism_area(location_text: str, query_text: str = "") -> str:
@@ -359,11 +339,7 @@ def _rank_tourism_items_by_area(
         for alias, canonical_city in TOURISM_CITY_ALIASES.items()
         if canonical_city == city
     }
-    should_filter_by_area = bool(
-        area_text
-        and area_text not in city_aliases
-        and area_text not in AMBIGUOUS_TOURISM_CITY_ALIASES
-    )
+    should_filter_by_area = bool(area_text and area_text not in city_aliases)
     scored_items = [
         (_tourism_area_score(item, area_text), index, item)
         for index, item in enumerate(items)
@@ -409,82 +385,11 @@ def _is_tourism_lookup_request(
     )
 
 
-def _is_tourism_event_lookup_request(
-    query_text: str,
-    activity_types: list[str] | None = None,
-) -> bool:
-    combined = " ".join(
-        [query_text]
-        + [str(item) for item in activity_types or [] if str(item).strip()]
-    )
-    return _contains_any_keyword(
-        combined,
-        ("活動", "展覽", "節慶", "市集", "演出", "表演"),
-    )
-
-
 def _shorten_tourism_text(value: Any, max_length: int = 42) -> str:
     text = re.sub(r"\s+", " ", str(value or "")).strip()
     if len(text) <= max_length:
         return text
     return f"{text[:max_length].rstrip()}..."
-
-
-TAIPEI_TIMEZONE = timezone(timedelta(hours=8))
-
-
-def _parse_tourism_datetime(value: Any) -> datetime | None:
-    text = str(value or "").strip()
-    if not text:
-        return None
-
-    normalized = text.replace("Z", "+00:00")
-    try:
-        parsed = datetime.fromisoformat(normalized)
-    except ValueError:
-        return None
-
-    if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=TAIPEI_TIMEZONE)
-    return parsed.astimezone(TAIPEI_TIMEZONE)
-
-
-def _format_tourism_datetime(value: Any) -> str:
-    parsed = _parse_tourism_datetime(value)
-    if parsed is None:
-        return _shorten_tourism_text(value, 16)
-    return parsed.strftime("%Y/%m/%d %H:%M")
-
-
-def _format_tourism_period_date(value: Any) -> str:
-    parsed = _parse_tourism_datetime(value)
-    if parsed is None:
-        return _shorten_tourism_text(value, 16)
-    if parsed.hour == 0 and parsed.minute == 0 and parsed.second == 0:
-        return parsed.strftime("%Y/%m/%d")
-    return parsed.strftime("%Y/%m/%d %H:%M")
-
-
-def _format_tourism_event_period(start_value: Any, end_value: Any) -> str:
-    start_time = _format_tourism_period_date(start_value)
-    end_time = _format_tourism_period_date(end_value)
-    if start_time and end_time:
-        if start_time == end_time:
-            return f"活動日期：{start_time}"
-        return f"活動期間：{start_time} - {end_time}"
-    if start_time:
-        return f"開始：{start_time}"
-    if end_time:
-        return f"結束：{end_time}"
-    return ""
-
-
-def _is_active_tourism_event(item: dict[str, Any]) -> bool:
-    end_time = _parse_tourism_datetime(item.get("end_time"))
-    if end_time is None:
-        return True
-    now = datetime.now(TAIPEI_TIMEZONE)
-    return end_time >= now
 
 
 def _format_tourism_description(item: dict[str, Any], *, item_type: str) -> str:
@@ -497,12 +402,13 @@ def _format_tourism_description(item: dict[str, Any], *, item_type: str) -> str:
         parts.append("門票：免費")
 
     if item_type == "event":
-        event_period = _format_tourism_event_period(
-            item.get("start_time"),
-            item.get("end_time"),
-        )
-        if event_period:
-            parts.append(event_period)
+        start_time = _shorten_tourism_text(item.get("start_time"), 16)
+        if start_time:
+            parts.append(f"開始：{start_time}")
+
+    website_url = str(item.get("website_url") or "").strip()
+    if website_url:
+        parts.append(f"網址：{website_url}")
 
     return "｜".join(parts)
 
@@ -559,63 +465,47 @@ def _build_tourism_text_recommendation(
     if not _is_tourism_lookup_request(query_text, activity_types):
         return None
 
-    cities = _normalize_tourism_cities(location_text, query_text)
-    if not cities:
+    city = _normalize_tourism_city(location_text, query_text)
+    if not city:
         return None
-    city_label = "、".join(cities)
     area_text = _normalize_tourism_area(location_text, query_text)
 
-    event_lookup = _is_tourism_event_lookup_request(query_text, activity_types)
+    include_events = _contains_any_keyword(
+        " ".join([query_text] + [str(item) for item in activity_types or []]),
+        ("活動", "展覽", "節慶", "市集", "演出", "表演"),
+    )
 
     results: list[dict[str, Any]] = []
     try:
         lookup_limit = max(LIFF_RESULT_LIMIT * 8, 80)
-        for city in cities:
-            if event_lookup:
-                events = get_tourism_events(city=city, limit=lookup_limit)
-                events = [
-                    item
-                    for item in events
-                    if isinstance(item, dict) and _is_active_tourism_event(item)
-                ]
-                events = _rank_tourism_items_by_area(
-                    events,
-                    area_text=area_text,
-                    city=city,
-                )
-                results.extend(
-                    _tourism_item_to_result(item, item_type="event")
-                    for item in events[:LIFF_RESULT_LIMIT]
-                )
-            else:
-                attractions = get_tourism_attractions(city=city, limit=lookup_limit)
-                attractions = _rank_tourism_items_by_area(
-                    attractions,
-                    area_text=area_text,
-                    city=city,
-                )
-                results.extend(
-                    _tourism_item_to_result(item, item_type="attraction")
-                    for item in attractions[:LIFF_RESULT_LIMIT]
-                    if isinstance(item, dict)
-                )
+        attractions = get_tourism_attractions(city=city, limit=lookup_limit)
+        attractions = _rank_tourism_items_by_area(
+            attractions,
+            area_text=area_text,
+            city=city,
+        )
+        results.extend(
+            _tourism_item_to_result(item, item_type="attraction")
+            for item in attractions[:LIFF_RESULT_LIMIT]
+            if isinstance(item, dict)
+        )
+        if include_events:
+            events = get_tourism_events(city=city, limit=lookup_limit)
+            events = _rank_tourism_items_by_area(
+                events,
+                area_text=area_text,
+                city=city,
+            )
+            results.extend(
+                _tourism_item_to_result(item, item_type="event")
+                for item in events[:LIFF_RESULT_LIMIT]
+                if isinstance(item, dict)
+            )
     except Exception as exc:
         _log_external_failure("Tourism open data recommendation", exc)
         return None
 
     results = [item for item in results if item.get("name")]
-    results = _merge_recommendation_results(results, [], limit=LIFF_RESULT_LIMIT)
-    if not results and event_lookup:
-        return {
-            "group_message": f"我查了一下觀光署活動資料，目前沒有找到{city_label}近期適合顯示的活動。",
-            "results": [],
-            "location_source": "text_location",
-            "query_text": query_text.strip(),
-            "provider": "tourism_open_data",
-            "tourism_city": city_label,
-            "tourism_area": area_text,
-            "tourism_kind": "event",
-        }
     if not results:
         return None
 
@@ -634,9 +524,8 @@ def _build_tourism_text_recommendation(
         "location_source": "text_location",
         "query_text": text_query or query_text,
         "provider": "tourism_open_data",
-        "tourism_city": city_label,
+        "tourism_city": city,
         "tourism_area": area_text,
-        "tourism_kind": "event" if event_lookup else "attraction",
     }
 
 
@@ -1736,8 +1625,6 @@ def run_text_location_recommendation(
         location_text=location_text,
         activity_types=activity_types,
     )
-    if tourism_payload and tourism_payload.get("tourism_kind") == "event":
-        return tourism_payload
 
     if os.getenv("GOOGLE_PLACES_API_KEY", "").strip():
         google_payload = _build_google_places_text_recommendation(
@@ -2209,7 +2096,6 @@ def _format_group_message(
     prefix: str = "",
 ) -> str:
     lines: list[str] = []
-    detail_links: list[tuple[int, str, str]] = []
     if prefix:
         lines.append(prefix)
 
@@ -2231,9 +2117,7 @@ def _format_group_message(
         else:
             source_label = "定位"
 
-        if "活動" in query_text or "展覽" in query_text or "節慶" in query_text or "市集" in query_text:
-            lines.append("我幫你看了一下，這幾個近期活動可以先參考：")
-        elif intent == "attraction":
+        if intent == "attraction":
             lines.append("我幫你看了一下，附近有幾個可以去走走的地方：")
         elif "購物" in query_text or "逛" in query_text or "百貨" in query_text or "夜市" in query_text:
             lines.append("我幫你找了幾個附近可以逛的地方：")
@@ -2283,37 +2167,15 @@ def _format_group_message(
                             normalized_parts.append(
                                 part if "：" in part else part.replace("類型", "類型：", 1)
                             )
-                        elif part.startswith(
-                            (
-                                "門票",
-                                "票價",
-                                "網址",
-                                "連結",
-                                "開始",
-                                "結束",
-                                "活動期間",
-                                "活動日期",
-                            )
-                        ):
+                        elif part.startswith(("門票", "票價", "網址", "連結", "開始")):
                             normalized_parts.append(part)
                         else:
                             normalized_parts.append(f"類型：{part}")
                     detail_line = "｜".join(normalized_parts)
                 lines.append(detail_line)
 
-            maps_url = str(item.get("maps_url") or item.get("mapsUrl") or "").strip()
-            provider = str(item.get("provider") or "")
-            if maps_url and provider.startswith("tourism_"):
-                detail_links.append((index, str(item.get("name") or "詳細資訊"), maps_url))
-
             if index != min(len(results), GROUP_RESULT_LIMIT):
                 lines.append("")
-
-        if detail_links:
-            lines.append("")
-            lines.append("詳細連結：")
-            for index, name, url in detail_links[:GROUP_RESULT_LIMIT]:
-                lines.append(f"{index}. {name}：{url}")
 
     return "\n".join(lines).strip()
 

@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import io
 import json
+import logging
 import os
 import re
 import threading
@@ -29,10 +30,12 @@ from expense_flow import (
     database_unavailable_result,
     format_expense_draft,
     infer_category,
+    normalize_participants_for_storage,
 )
 from privacy_redaction import redact_sensitive_identifiers, redact_structure
 
 
+_LOGGER = logging.getLogger(__name__)
 INVOICE_SESSION_TTL_SECONDS = max(60, int(os.getenv("INVOICE_SESSION_TTL_SECONDS", "900")))
 INVOICE_MAX_IMAGE_BYTES = max(100_000, int(os.getenv("INVOICE_MAX_IMAGE_BYTES", str(8 * 1024 * 1024))))
 INVOICE_OCR_MODEL = os.getenv("INVOICE_OCR_MODEL", "gpt-4.1-mini").strip()
@@ -212,7 +215,8 @@ def start_invoice_flow(
         )
     except DatabaseFeatureUnavailable:
         return database_unavailable_result()
-    except Exception:
+    except Exception as exc:
+        _LOGGER.exception("Invoice flow startup failed (%s)", type(exc).__name__)
         return FlowResult(True, "目前無法啟動發票記帳，請稍後再試。")
 
 
@@ -433,13 +437,35 @@ def _save_invoice_draft(session: InvoiceCaptureSession, draft: dict[str, Any], f
     if session.payer_display_name and not payload.get("payer"):
         payload["payer"] = session.payer_display_name
         payload["missing"] = [item for item in (payload.get("missing") or []) if item != "付款人"]
+    items = payload.get("items") or []
+    if len(items) <= 1:
+        payload["mode"] = "merge"
     _db_function("save_feature_draft")(
         line_group_id=session.line_group_id,
         line_user_id=session.line_user_id,
         draft_type="invoice",
         payload=payload,
     )
-    items = payload.get("items") or []
+    if len(items) <= 1:
+        next_step = _draft_result_after_edit("invoice", payload)
+        warning = ""
+        if int(payload.get("amount") or 0) <= 0:
+            warning = "\n\n⚠️ 無法可靠辨識總金額，這份草稿暫時不能確認，請取消後改用手動記帳。"
+        recognition_note = (
+            "只辨識到一個商品，已自動合併成一筆支出。"
+            if items
+            else "沒有可展開的商品明細，已自動合併成一筆支出。"
+        )
+        return FlowResult(
+            True,
+            "已完成雲端辨識。"
+            + recognition_note
+            + "\n\n"
+            + next_step.text
+            + warning,
+            actions=next_step.actions,
+            data={"draft": payload},
+        )
     actions = [ActionSpec("合併成一筆", "postback", "invoice|mode|merge")]
     if items:
         actions.append(ActionSpec(f"展開成 {len(items)} 筆"[:20], "postback", "invoice|mode|split"))
@@ -469,8 +495,9 @@ def handle_invoice_image_bytes(
         result = _save_invoice_draft(session, draft, fingerprint)
         mark_capture_session(session, "consumed")
         return result
-    except Exception:
+    except Exception as exc:
         mark_capture_session(session, "pending")
+        _LOGGER.exception("Invoice chat image recognition failed (%s)", type(exc).__name__)
         return FlowResult(True, "無法辨識這張圖片，請確認發票清晰完整後重新拍攝。")
 
 
@@ -505,6 +532,55 @@ def _invoice_draft(line_group_id: str, line_user_id: str) -> tuple[dict[str, Any
         return None, None
     payload = stored.get("payload") if isinstance(stored.get("payload"), dict) else stored
     return stored, payload
+
+
+def _invoice_expense_payload(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """Build the finalized expense rows required by create_expenses_from_invoice()."""
+    mode = str(payload.get("mode") or "")
+    participants = normalize_participants_for_storage(payload.get("participants"))
+    common = {
+        "currency": str(payload.get("currency") or "TWD"),
+        "participants": participants,
+        "consumed_at": payload.get("consumed_at"),
+        "merchant": str(payload.get("merchant") or "")[:120],
+        "category": str(payload.get("category") or "其他")[:40],
+        "payer": payload.get("payer"),
+        "source": payload.get("source"),
+        "note": str(payload.get("note") or "")[:500],
+    }
+
+    if mode == "merge":
+        return [
+            {
+                **common,
+                "item": str(payload.get("item") or payload.get("merchant") or "發票消費")[:120],
+                "amount": int(payload.get("amount") or 0),
+            }
+        ]
+
+    if mode != "split":
+        raise ValueError("invoice_mode_not_selected")
+
+    rows: list[dict[str, Any]] = []
+    for item in payload.get("items") or []:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or item.get("item") or "").strip()[:120]
+        amount = int(item.get("amount") or 0)
+        if name and amount:
+            rows.append({**common, "item": name, "amount": amount})
+
+    adjustments = (
+        ("服務費", int(payload.get("service_fee") or 0)),
+        ("折扣", -int(payload.get("discount") or 0)),
+        ("其他調整", int(payload.get("other_adjustment") or 0)),
+    )
+    rows.extend({**common, "item": label, "amount": amount} for label, amount in adjustments if amount)
+
+    expected_total = int(payload.get("amount") or 0)
+    if not rows or sum(int(row["amount"]) for row in rows) != expected_total:
+        raise ValueError("invoice_detail_total_mismatch")
+    return rows
 
 
 def handle_invoice_postback(
@@ -628,12 +704,26 @@ def handle_invoice_postback(
                 )
             if payload.get("missing") or payload.get("mode") not in {"merge", "split"}:
                 return _draft_result_after_edit("invoice", payload)
+            expense_payload = _invoice_expense_payload(payload)
             expenses = _db_function("create_expenses_from_invoice")(
                 book_id=payload.get("book_id"),
                 invoice_import_id=payload.get("invoice_import_id"),
-                payload=redact_structure(payload),
+                payload=redact_structure(expense_payload),
                 created_by=line_user_id,
             )
+            if database_contract_ready(("add_expense_book_member",)):
+                for member in expense_payload[0].get("participants") or []:
+                    try:
+                        _db_function("add_expense_book_member")(
+                            book_id=payload.get("book_id"),
+                            member=member,
+                            updated_by=line_user_id,
+                        )
+                    except Exception as member_exc:
+                        _LOGGER.warning(
+                            "Confirmed invoice member sync failed (%s)",
+                            type(member_exc).__name__,
+                        )
             _db_function("delete_feature_draft")(
                 line_group_id=line_group_id,
                 line_user_id=line_user_id,
@@ -655,6 +745,7 @@ def handle_invoice_postback(
             return FlowResult(True, f"發票記帳完成，共建立 {count} 筆支出。")
     except DatabaseFeatureUnavailable:
         return database_unavailable_result()
-    except Exception:
+    except Exception as exc:
+        _LOGGER.exception("Invoice postback flow failed (%s)", type(exc).__name__)
         return FlowResult(True, "發票記帳暫時無法完成這個操作，請稍後再試。")
     return FlowResult(True, "這個發票操作已失效。")

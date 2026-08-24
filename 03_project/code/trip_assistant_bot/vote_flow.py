@@ -23,10 +23,12 @@ from privacy_redaction import redact_sensitive_identifiers
 
 
 _POLL_PREFIXES = ("建立投票", "新增投票", "發起投票")
-_END_POLL_COMMANDS = ("結束投票", "截止投票", "關閉投票")
 _DEADLINE_RE = re.compile(r"(?:限時|截止)\s*(\d{1,3})\s*(分鐘|小時|天)")
 _NORMAL_MINUTES = max(1, int(os.getenv("AUTO_POLL_NORMAL_MINUTES", "10")))
 _URGENT_MINUTES = max(1, int(os.getenv("AUTO_POLL_URGENT_MINUTES", "3")))
+_PROPOSAL_TTL = timedelta(minutes=2)
+_PROPOSAL_DRAFT_TYPE = "vote_proposal"
+_PROPOSAL_GROUP_OWNER = "__group_vote_proposal__"
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -173,7 +175,7 @@ def _poll_result(poll: dict[str, Any]) -> FlowResult:
     )
 
 
-def _create_vote_session_compatible(
+def _create_prepared_poll(
     *,
     line_group_id: str,
     question: str,
@@ -185,34 +187,36 @@ def _create_vote_session_compatible(
     close_when_all_eligible: bool,
     auto_created: bool,
     discussion_fingerprint: str,
-) -> dict:
-    create_vote_session = _db_function("create_vote_session")
-    common_args = {
-        "line_group_id": line_group_id,
-        "question": redact_sensitive_identifiers(question.strip())[:200],
-        "deadline_at": deadline_at,
-        "created_by_key": created_by_key,
-        "anonymity_salt": anonymity_salt,
-        "eligible_voter_keys": eligible_keys,
-        "close_when_all_eligible": close_when_all_eligible,
-        "auto_created": bool(auto_created),
-        "discussion_fingerprint": discussion_fingerprint[:64],
-    }
+) -> FlowResult:
     try:
-        return create_vote_session(
+        active = _db_function("get_active_vote_session")(line_group_id=line_group_id)
+        if isinstance(active, dict):
+            return FlowResult(True, "目前已有一個進行中的投票，請等它截止後再建立新的投票。")
+        poll = _db_function("create_vote_session")(
+            line_group_id=line_group_id,
+            question=redact_sensitive_identifiers(question.strip())[:200],
             options=[
                 {"option_id": index, "label": label}
                 for index, label in enumerate(clean_options, start=1)
             ],
-            **common_args,
+            deadline_at=deadline_at,
+            created_by_key=created_by_key,
+            anonymity_salt=anonymity_salt,
+            eligible_voter_keys=eligible_keys,
+            close_when_all_eligible=close_when_all_eligible,
+            auto_created=bool(auto_created),
+            discussion_fingerprint=discussion_fingerprint[:64],
         )
-    except TypeError as first_error:
-        # Some teammates may still have the older db.py contract checked out.
-        # Retry with plain strings so vote_flow can work across both versions.
-        try:
-            return create_vote_session(options=clean_options, **common_args)
-        except Exception:
-            raise first_error
+        if not isinstance(poll, dict):
+            raise ValueError("invalid poll response")
+        return _poll_result(poll)
+    except DatabaseFeatureUnavailable:
+        return database_unavailable_result()
+    except Exception as exc:
+        if exc.__class__.__name__ in {"DbConflictError", "DuplicateKeyError"}:
+            return FlowResult(True, "目前已有一個進行中的投票，請等它截止後再建立新的投票。")
+        _LOGGER.exception("Vote creation failed (%s)", type(exc).__name__)
+        return FlowResult(True, "建立匿名投票時發生錯誤，請稍後再試。")
 
 
 def create_anonymous_poll(
@@ -247,9 +251,6 @@ def create_anonymous_poll(
         deadline_at = current + timedelta(minutes=minutes)
     anonymity_salt = secrets.token_hex(16)
     try:
-        active = _db_function("get_active_vote_session")(line_group_id=line_group_id)
-        if isinstance(active, dict):
-            return FlowResult(False) if auto_created else FlowResult(True, "目前已有一個進行中的投票，請等它截止後再建立新的投票。")
         eligible_keys = sorted(
             {
                 _anonymous_voter_key(anonymity_salt=anonymity_salt, line_user_id=user_id)
@@ -263,7 +264,7 @@ def create_anonymous_poll(
                 anonymity_salt=anonymity_salt,
                 line_user_id=created_by_line_user_id,
             )
-        poll = _create_vote_session_compatible(
+        return _create_prepared_poll(
             line_group_id=line_group_id,
             question=question,
             clean_options=clean_options,
@@ -275,15 +276,195 @@ def create_anonymous_poll(
             auto_created=bool(auto_created),
             discussion_fingerprint=discussion_fingerprint[:64],
         )
-        if not isinstance(poll, dict):
-            raise ValueError("invalid poll response")
-        return _poll_result(poll)
     except DatabaseFeatureUnavailable:
         return database_unavailable_result()
     except Exception as exc:
-        if exc.__class__.__name__ in {"DbConflictError", "DuplicateKeyError"}:
-            return FlowResult(True, "目前已有一個進行中的投票，請等它截止後再建立新的投票。")
-        _LOGGER.exception("Vote creation failed (%s)", type(exc).__name__)
+        _LOGGER.exception("Vote identity preparation failed (%s)", type(exc).__name__)
+        return FlowResult(True, "建立匿名投票時發生錯誤，請稍後再試。")
+
+
+def _as_aware_utc(value: Any) -> datetime | None:
+    if not isinstance(value, datetime):
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _proposal_actions(proposal_id: str) -> list[ActionSpec]:
+    return [
+        ActionSpec("建立匿名投票", "postback", f"vote_proposal|confirm|{proposal_id}"),
+        ActionSpec("先繼續討論", "postback", f"vote_proposal|decline|{proposal_id}"),
+    ]
+
+
+def _proposal_text(question: str, options: list[str]) -> str:
+    lines = ["看起來大家目前有幾個不同方向：", ""]
+    lines.extend(f"{index}. {label}" for index, label in enumerate(options, start=1))
+    lines.extend(["", f"需要我以「{question}」建立匿名投票嗎？"])
+    return redact_sensitive_identifiers("\n".join(lines))
+
+
+def _get_vote_proposal(line_group_id: str) -> dict[str, Any] | None:
+    stored = _db_function("get_feature_draft")(
+        line_group_id=line_group_id,
+        line_user_id=_PROPOSAL_GROUP_OWNER,
+        draft_type=_PROPOSAL_DRAFT_TYPE,
+    )
+    if not isinstance(stored, dict):
+        return None
+    payload = stored.get("payload")
+    if not isinstance(payload, dict):
+        return None
+    expires_at = _as_aware_utc(payload.get("proposal_expires_at"))
+    if expires_at is None or expires_at <= _mongo_utc_now():
+        _db_function("delete_feature_draft")(
+            line_group_id=line_group_id,
+            line_user_id=_PROPOSAL_GROUP_OWNER,
+            draft_type=_PROPOSAL_DRAFT_TYPE,
+        )
+        return None
+    return payload
+
+
+def create_vote_proposal(
+    *,
+    line_group_id: str,
+    question: str,
+    options: list[str],
+    eligible_line_user_ids: list[str],
+    urgent: bool = False,
+    discussion_fingerprint: str = "",
+) -> FlowResult:
+    """Persist a short-lived, group-level proposal without storing raw LINE IDs."""
+    if not line_group_id:
+        return FlowResult(False)
+    if not _anonymization_secret():
+        return FlowResult(True, "投票匿名化密鑰尚未設定，請先在 .env 設定 VOTE_ANONYMIZATION_SECRET。")
+    required = (
+        "get_active_vote_session",
+        "save_feature_draft",
+        "get_feature_draft",
+        "delete_feature_draft",
+    )
+    if not database_contract_ready(required):
+        return database_unavailable_result()
+
+    clean_options: list[str] = []
+    for value in options:
+        label = redact_sensitive_identifiers(str(value).strip())[:80]
+        if label and label not in clean_options:
+            clean_options.append(label)
+    if not 2 <= len(clean_options) <= 6:
+        return FlowResult(False)
+
+    clean_question = redact_sensitive_identifiers(question.strip())[:200] or "大家最後想選哪一個？"
+    fingerprint = discussion_fingerprint[:64]
+    try:
+        active = _db_function("get_active_vote_session")(line_group_id=line_group_id)
+        if isinstance(active, dict):
+            return FlowResult(True, "")
+
+        existing = _get_vote_proposal(line_group_id)
+        if isinstance(existing, dict) and fingerprint and existing.get("discussion_fingerprint") == fingerprint:
+            return FlowResult(True, "")
+
+        anonymity_salt = secrets.token_hex(16)
+        eligible_keys = sorted(
+            {
+                _anonymous_voter_key(anonymity_salt=anonymity_salt, line_user_id=user_id)
+                for user_id in eligible_line_user_ids
+                if user_id
+            }
+        )
+        if len(eligible_keys) < 2:
+            return FlowResult(False)
+
+        proposal_id = secrets.token_urlsafe(12)
+        payload = {
+            "proposal_id": proposal_id,
+            "question": clean_question,
+            "options": clean_options,
+            "urgent": bool(urgent),
+            "anonymity_salt": anonymity_salt,
+            "eligible_voter_keys": eligible_keys,
+            "discussion_fingerprint": fingerprint,
+            "proposal_expires_at": _mongo_utc_now() + _PROPOSAL_TTL,
+        }
+        _db_function("save_feature_draft")(
+            line_group_id=line_group_id,
+            line_user_id=_PROPOSAL_GROUP_OWNER,
+            draft_type=_PROPOSAL_DRAFT_TYPE,
+            payload=payload,
+        )
+        return FlowResult(
+            True,
+            _proposal_text(clean_question, clean_options),
+            actions=_proposal_actions(proposal_id),
+            data={"vote_proposal": {"proposal_id": proposal_id}},
+        )
+    except DatabaseFeatureUnavailable:
+        return database_unavailable_result()
+    except Exception as exc:
+        _LOGGER.exception("Vote proposal creation failed (%s)", type(exc).__name__)
+        return FlowResult(True, "目前無法準備投票，請稍後再試。")
+
+
+def _delete_vote_proposal(line_group_id: str) -> None:
+    _db_function("delete_feature_draft")(
+        line_group_id=line_group_id,
+        line_user_id=_PROPOSAL_GROUP_OWNER,
+        draft_type=_PROPOSAL_DRAFT_TYPE,
+    )
+
+
+def _confirm_vote_proposal(
+    *,
+    line_group_id: str,
+    line_user_id: str,
+    proposal_id: str | None = None,
+) -> FlowResult:
+    required = (
+        "get_active_vote_session",
+        "create_vote_session",
+        "get_feature_draft",
+        "delete_feature_draft",
+    )
+    if not database_contract_ready(required):
+        return database_unavailable_result()
+    try:
+        proposal = _get_vote_proposal(line_group_id)
+        if not isinstance(proposal, dict):
+            return FlowResult(True, "這個投票提案已經失效，請繼續討論後再試一次。")
+        stored_proposal_id = str(proposal.get("proposal_id") or "")
+        if proposal_id and proposal_id != stored_proposal_id:
+            return FlowResult(True, "這不是目前最新的投票提案，請使用最新的按鈕。")
+
+        anonymity_salt = str(proposal.get("anonymity_salt") or "")
+        creator_key = _anonymous_voter_key(
+            anonymity_salt=anonymity_salt,
+            line_user_id=line_user_id,
+        )
+        urgent = bool(proposal.get("urgent"))
+        minutes = _URGENT_MINUTES if urgent else _NORMAL_MINUTES
+        result = _create_prepared_poll(
+            line_group_id=line_group_id,
+            question=str(proposal.get("question") or "大家最後想選哪一個？"),
+            clean_options=[str(value) for value in proposal.get("options") or []],
+            deadline_at=_mongo_utc_now() + timedelta(minutes=minutes),
+            created_by_key=creator_key,
+            anonymity_salt=anonymity_salt,
+            eligible_keys=[str(value) for value in proposal.get("eligible_voter_keys") or []],
+            close_when_all_eligible=True,
+            auto_created=True,
+            discussion_fingerprint=str(proposal.get("discussion_fingerprint") or ""),
+        )
+        _delete_vote_proposal(line_group_id)
+        return result
+    except DatabaseFeatureUnavailable:
+        return database_unavailable_result()
+    except Exception as exc:
+        _LOGGER.exception("Vote proposal confirmation failed (%s)", type(exc).__name__)
         return FlowResult(True, "建立匿名投票時發生錯誤，請稍後再試。")
 
 
@@ -302,65 +483,39 @@ def handle_vote_text(text: str, *, line_group_id: str, line_user_id: str) -> Flo
     )
 
 
-def handle_end_vote_text(text: str, *, line_group_id: str, line_user_id: str) -> FlowResult:
-    normalized = redact_sensitive_identifiers(text.strip())
-    if not any(normalized.startswith(command) for command in _END_POLL_COMMANDS):
-        return FlowResult(False)
-    if not line_group_id:
-        return FlowResult(True, "投票只能在 LINE 群組中使用。")
-
-    required = (
-        "get_db",
-        "get_active_vote_session",
-        "get_vote_results",
-        "mark_vote_result_announced",
-    )
-    if not database_contract_ready(required):
-        return database_unavailable_result()
-
-    try:
-        poll = _db_function("get_active_vote_session")(line_group_id=line_group_id)
-        if not isinstance(poll, dict):
-            return FlowResult(True, "目前沒有進行中的投票。")
-
-        now = _mongo_utc_now()
-        db = _db_function("get_db")()
-        update_result = db.vote_sessions.update_one(
-            {
-                "_id": poll.get("_id"),
-                "line_group_id": line_group_id,
-                "status": "active",
-            },
-            {
-                "$set": {
-                    "status": "closed",
-                    "closed_at": now,
-                    "closed_reason": "manual",
-                }
-            },
-        )
-        if getattr(update_result, "modified_count", 0) < 1:
-            return FlowResult(True, "投票已經截止或不存在，請重新確認。")
-
-        closed_poll = dict(poll)
-        closed_poll["status"] = "closed"
-        closed_poll["closed_at"] = now
-        closed_poll["closed_reason"] = "manual"
-        poll_id = _poll_id(closed_poll)
-        results = list(_db_function("get_vote_results")(poll_id=poll_id) or [])
-        _db_function("mark_vote_result_announced")(
-            poll_id=poll_id,
-            announced_at=now,
-        )
-        return FlowResult(True, format_poll(closed_poll, results))
-    except DatabaseFeatureUnavailable:
-        return database_unavailable_result()
-    except Exception as exc:
-        _LOGGER.exception("Vote closing failed (%s)", type(exc).__name__)
-        return FlowResult(True, "結束投票時發生錯誤，請稍後再試。")
-
-
 def handle_vote_postback(data: str, *, line_group_id: str, line_user_id: str) -> FlowResult:
+    if data.startswith("vote_proposal|"):
+        parts = data.split("|")
+        if len(parts) != 3 or parts[1] not in {"confirm", "decline"}:
+            return FlowResult(True, "這個投票提案操作已失效。")
+        action, proposal_id = parts[1], parts[2]
+        required = ("get_feature_draft", "delete_feature_draft")
+        if not database_contract_ready(required):
+            return database_unavailable_result()
+        try:
+            proposal = _get_vote_proposal(line_group_id)
+            if not isinstance(proposal, dict):
+                return FlowResult(True, "這個投票提案已經失效，請繼續討論後再試一次。")
+            if proposal_id != str(proposal.get("proposal_id") or ""):
+                return FlowResult(True, "這不是目前最新的投票提案，請使用最新的按鈕。")
+            if action == "decline":
+                _delete_vote_proposal(line_group_id)
+                return FlowResult(
+                    True,
+                    "好，先繼續討論；有需要時我再幫大家整理投票。",
+                    data={"vote_proposal_declined": True},
+                )
+            return _confirm_vote_proposal(
+                line_group_id=line_group_id,
+                line_user_id=line_user_id,
+                proposal_id=proposal_id,
+            )
+        except DatabaseFeatureUnavailable:
+            return database_unavailable_result()
+        except Exception as exc:
+            _LOGGER.exception("Vote proposal postback failed (%s)", type(exc).__name__)
+            return FlowResult(True, "目前無法處理投票提案，請稍後再試。")
+
     if not data.startswith("vote|"):
         return FlowResult(False)
     parts = data.split("|")

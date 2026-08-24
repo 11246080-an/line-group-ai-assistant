@@ -131,8 +131,7 @@ from privacy_redaction import redact_sensitive_identifiers, redact_structure
 from scheduled_tasks import run_due_tasks
 from trip_schedule_flow import handle_schedule_postback, handle_schedule_text
 from vote_flow import (
-    create_anonymous_poll,
-    handle_end_vote_text,
+    create_vote_proposal,
     handle_vote_postback,
     handle_vote_text,
 )
@@ -150,6 +149,8 @@ ENABLE_VERBOSE_DEBUG = os.getenv("ENABLE_VERBOSE_DEBUG", "false").strip().lower(
     "on",
 }
 PROCESSING_HINT_TEXT = "目前 AI 正在找資料，這個回答可能需要一點時間，請稍等一下。"
+LINE_PUSH_RETRY_ATTEMPTS = 3
+LINE_PUSH_RETRY_BASE_DELAY_SECONDS = 0.5
 
 
 def _debug_print(message: str) -> None:
@@ -631,8 +632,6 @@ class ConversationState:
     # 保存網站匯入的行程與目前焦點景點。
     imported_itinerary: dict[str, Any] | None = None
     focused_spot: dict[str, Any] | None = None
-    # Bot 建議用投票決定後，暫存選項；使用者同意時直接建立投票。
-    pending_vote_proposal: dict[str, Any] | None = None
     last_accessed_at: float = field(default_factory=time.monotonic)
 
 
@@ -818,6 +817,33 @@ def _reply_text_if_allowed(
     _reply_text_and_mark(event, conversation_key, scenario_code, normalized_text)
 
 
+def _push_message_batch(
+    line_bot_api: MessagingApi,
+    push_target_id: str,
+    messages: list[Any],
+) -> None:
+    """Push one LINE batch with a stable retry key to avoid duplicate delivery."""
+    retry_key = str(uuid4())
+    for attempt in range(1, LINE_PUSH_RETRY_ATTEMPTS + 1):
+        try:
+            line_bot_api.push_message(
+                PushMessageRequest(to=push_target_id, messages=messages),
+                x_line_retry_key=retry_key,
+            )
+            return
+        except Exception as exc:
+            if attempt >= LINE_PUSH_RETRY_ATTEMPTS:
+                _log_failure("LINE push after retries", exc)
+                raise
+            app.logger.warning(
+                "LINE push attempt %d/%d failed (%s); retrying",
+                attempt,
+                LINE_PUSH_RETRY_ATTEMPTS,
+                type(exc).__name__,
+            )
+            time.sleep(LINE_PUSH_RETRY_BASE_DELAY_SECONDS * (2 ** (attempt - 1)))
+
+
 def _push_text(push_target_id: str, text: str) -> None:
     if not push_target_id:
         return
@@ -827,10 +853,7 @@ def _push_text(push_target_id: str, text: str) -> None:
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
         for batch in _message_batches(messages):
-            line_bot_api.push_message(
-                PushMessageRequest(to=push_target_id, messages=batch),
-                x_line_retry_key=str(uuid4()),
-            )
+            _push_message_batch(line_bot_api, push_target_id, batch)
 
 
 def _reply_message_object(
@@ -1030,10 +1053,7 @@ def _reply_feature_result(event: Any, result: FlowResult) -> None:
         push_target_id = _get_push_target_id(event) or ""
         if push_target_id:
             for batch in batches[1:]:
-                line_bot_api.push_message(
-                    PushMessageRequest(to=push_target_id, messages=batch),
-                    x_line_retry_key=str(uuid4()),
-                )
+                _push_message_batch(line_bot_api, push_target_id, batch)
 
 
 def _push_feature_result(push_target_id: str, result: FlowResult) -> None:
@@ -1046,10 +1066,7 @@ def _push_feature_result(push_target_id: str, result: FlowResult) -> None:
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
         for batch in _message_batches(messages):
-                line_bot_api.push_message(
-                    PushMessageRequest(to=push_target_id, messages=batch),
-                    x_line_retry_key=str(uuid4()),
-                )
+            _push_message_batch(line_bot_api, push_target_id, batch)
 
 
 def _push_expense_report(
@@ -1982,7 +1999,6 @@ def _clear_discussion_after_poll(conversation_key: str) -> None:
         state.recent_participants.clear()
         state.participant_aliases.clear()
         state.current_topic = ""
-        state.pending_vote_proposal = None
         state.last_accessed_at = time.monotonic()
 
 
@@ -2085,89 +2101,6 @@ def _has_urgent_poll_signal(messages: list[str]) -> bool:
     )
 
 
-def _organize_auto_poll(
-    context_text: str,
-    result: dict[str, Any],
-    candidate_options: list[str],
-    recent_messages: list[str],
-) -> tuple[str, list[str], bool]:
-    fallback_question = "大家最後想選哪一個？"
-    urgent = _has_urgent_poll_signal(recent_messages)
-    payload = _call_small_json_model(
-        model=OPENAI_TOPIC_JUDGE_MODEL,
-        purpose="Automatic poll organizer",
-        system_prompt=(
-            "你負責把已經卡住的群組討論整理成匿名投票。"
-            "只能使用候選選項中已經存在的原文選項，不得新增、合併或改寫選項。"
-            "問題要中立、簡短且不暗示偏好。"
-            "只有必須在幾分鐘內決定才將 urgent 設為 true。"
-            "只輸出 JSON：{\"question\":\"...\",\"options\":[\"...\"],\"urgent\":false}。"
-        ),
-        user_prompt=(
-            f"候選選項：{json.dumps(candidate_options, ensure_ascii=False)}\n"
-            f"AI 分析：{json.dumps(result, ensure_ascii=False)}\n"
-            f"最近討論：\n{context_text[-4000:]}"
-        ),
-    )
-    if not isinstance(payload, dict):
-        return fallback_question, candidate_options, urgent
-    question = redact_sensitive_identifiers(str(payload.get("question") or "").strip())[:200]
-    allowed = {value: value for value in candidate_options}
-    organized: list[str] = []
-    for value in payload.get("options") or []:
-        exact = allowed.get(str(value).strip())
-        if exact and exact not in organized:
-            organized.append(exact)
-    if len(organized) < 2:
-        organized = candidate_options
-    model_urgent = payload.get("urgent") is True or str(payload.get("urgent") or "").casefold() in {
-        "1",
-        "true",
-        "yes",
-    }
-    return question or fallback_question, organized[:6], model_urgent or urgent
-
-
-def _looks_like_poll_agreement(text: str) -> bool:
-    compact = "".join(str(text or "").strip().casefold().split())
-    if not compact:
-        return False
-    direct_agreements = {
-        "好",
-        "好啊",
-        "好呀",
-        "好喔",
-        "可以",
-        "可以啊",
-        "可以喔",
-        "ok",
-        "okay",
-        "沒問題",
-        "沒問題啊",
-        "也好",
-        "也可以",
-        "那就這樣",
-        "那就投票",
-        "投票吧",
-        "來投票",
-        "用投票",
-    }
-    if compact in direct_agreements:
-        return True
-    return any(
-        marker in compact
-        for marker in (
-            "可以投票",
-            "幫我們投票",
-            "幫忙投票",
-            "那就用投票",
-            "就投票",
-            "開投票",
-            "建立投票",
-        )
-    )
-
-
 def _build_pending_vote_question(
     result: dict[str, Any],
     suggested_reply: str,
@@ -2187,180 +2120,11 @@ def _build_pending_vote_question(
     return "大家最後想選哪一個？"
 
 
-def _store_pending_vote_proposal(
-    conversation_key: str,
-    *,
-    question: str,
-    options: list[str],
-    urgent: bool,
-) -> None:
-    clean_options: list[str] = []
-    for value in options:
-        label = redact_sensitive_identifiers(str(value).strip())[:80]
-        if label and label not in clean_options:
-            clean_options.append(label)
-    if len(clean_options) < 2:
-        return
-    fingerprint_source = json.dumps(
-        {"question": question, "options": clean_options},
-        ensure_ascii=False,
-        sort_keys=True,
-    )
-    with conversation_lock:
-        state = _get_or_create_state(conversation_key)
-        state.pending_vote_proposal = {
-            "question": redact_sensitive_identifiers(question.strip())[:200],
-            "options": clean_options[:6],
-            "urgent": bool(urgent),
-            "discussion_fingerprint": hashlib.sha256(
-                fingerprint_source.encode("utf-8")
-            ).hexdigest(),
-        }
-
-
-def _maybe_store_vote_proposal_from_reply(
-    conversation_key: str,
-    *,
-    result: dict[str, Any],
-    suggested_reply: str,
-    recent_messages: list[str],
-) -> None:
-    if not ENABLE_TRIP_MANAGEMENT_FEATURES:
-        return
-    reply_text = str(suggested_reply or "")
-    behavior_text = "\n".join(str(item) for item in result.get("system_behavior") or [])
-    if "投票" not in reply_text and "投票" not in behavior_text:
-        return
-    candidate_options = _filter_poll_options_to_recent_messages(
-        _clean_auto_poll_options(result),
-        recent_messages,
-    )
-    if len(candidate_options) < 2:
-        return
-    _store_pending_vote_proposal(
-        conversation_key,
-        question=_build_pending_vote_question(result, reply_text),
-        options=candidate_options,
-        urgent=_has_urgent_poll_signal(recent_messages),
-    )
-
-
-def _take_pending_vote_proposal(conversation_key: str) -> dict[str, Any] | None:
-    with conversation_lock:
-        _prune_conversation_states_locked()
-        state = conversation_states.get(conversation_key)
-        if state is None or not state.pending_vote_proposal:
-            return None
-        proposal = dict(state.pending_vote_proposal)
-        state.pending_vote_proposal = None
-        state.last_accessed_at = time.monotonic()
-        return proposal
-
-
-def _try_start_pending_vote_from_agreement(
+def _try_propose_automatic_poll(
     event: Any,
     *,
     conversation_key: str,
     line_group_id: str,
-    line_user_id: str,
-    user_text: str,
-) -> bool:
-    if not ENABLE_TRIP_MANAGEMENT_FEATURES or not line_group_id:
-        return False
-    if not _looks_like_poll_agreement(user_text):
-        return False
-    proposal = _take_pending_vote_proposal(conversation_key)
-    if not proposal:
-        return False
-    flow_result = create_anonymous_poll(
-        line_group_id=line_group_id,
-        question=str(proposal.get("question") or "大家最後想選哪一個？"),
-        options=list(proposal.get("options") or []),
-        auto_created=False,
-        urgent=bool(proposal.get("urgent")),
-        discussion_fingerprint=str(proposal.get("discussion_fingerprint") or ""),
-        created_by_line_user_id=line_user_id,
-    )
-    if not flow_result.handled:
-        return False
-    _reply_feature_result(event, flow_result)
-    if isinstance(flow_result.data.get("anonymous_poll"), dict):
-        _clear_discussion_after_poll(conversation_key)
-    return True
-
-
-def _try_start_vote_from_current_agreement(
-    event: Any,
-    *,
-    conversation_key: str,
-    line_group_id: str,
-    line_user_id: str,
-    user_text: str,
-    context_text: str,
-    recent_messages: list[str],
-    result: dict[str, Any],
-) -> bool:
-    if not ENABLE_TRIP_MANAGEMENT_FEATURES or not line_group_id:
-        return False
-    if not _looks_like_poll_agreement(user_text):
-        return False
-    if not _is_llm_analysis_result(result):
-        return False
-
-    candidate_options = _filter_poll_options_to_recent_messages(
-        _clean_auto_poll_options(result),
-        recent_messages,
-    )
-    if len(candidate_options) < 2:
-        return False
-
-    suggested_reply = str(result.get("suggested_reply") or "")
-    behavior_text = "\n".join(str(item) for item in result.get("system_behavior") or [])
-    scenario_code = str(result.get("scenario_code") or "").strip()
-    scenario_name = str(result.get("scenario_name") or "").strip()
-    has_vote_signal = (
-        "投票" in suggested_reply
-        or "投票" in behavior_text
-        or scenario_code in {"劇本七", "劇本九"}
-        or scenario_name in {"多人決策與衝突處理", "投票決策"}
-    )
-    if not has_vote_signal:
-        return False
-
-    question, options, urgent = _organize_auto_poll(
-        context_text,
-        result,
-        candidate_options,
-        recent_messages,
-    )
-    fingerprint_source = json.dumps(
-        {"question": question, "options": options},
-        ensure_ascii=False,
-        sort_keys=True,
-    )
-    flow_result = create_anonymous_poll(
-        line_group_id=line_group_id,
-        question=question,
-        options=options,
-        auto_created=False,
-        urgent=urgent,
-        discussion_fingerprint=hashlib.sha256(fingerprint_source.encode("utf-8")).hexdigest(),
-        created_by_line_user_id=line_user_id,
-    )
-    if not flow_result.handled:
-        return False
-    _reply_feature_result(event, flow_result)
-    if isinstance(flow_result.data.get("anonymous_poll"), dict):
-        _clear_discussion_after_poll(conversation_key)
-    return True
-
-
-def _try_start_automatic_poll(
-    event: Any,
-    *,
-    conversation_key: str,
-    line_group_id: str,
-    context_text: str,
     recent_messages: list[str],
     result: dict[str, Any],
 ) -> bool:
@@ -2385,30 +2149,26 @@ def _try_start_automatic_poll(
     participants = _recent_discussion_participants(conversation_key)
     if len(candidate_options) < 2 or len(participants) < 2:
         return False
-    question, options, urgent = _organize_auto_poll(
-        context_text,
+    question = _build_pending_vote_question(
         result,
-        candidate_options,
-        recent_messages,
+        str(result.get("suggested_reply") or ""),
     )
     fingerprint_source = json.dumps(
-        {"question": question, "options": options},
+        {"question": question, "options": candidate_options},
         ensure_ascii=False,
         sort_keys=True,
     )
-    flow_result = create_anonymous_poll(
+    flow_result = create_vote_proposal(
         line_group_id=line_group_id,
         question=question,
-        options=options,
+        options=candidate_options,
         eligible_line_user_ids=participants,
-        auto_created=True,
-        urgent=urgent,
+        urgent=_has_urgent_poll_signal(recent_messages),
         discussion_fingerprint=hashlib.sha256(fingerprint_source.encode("utf-8")).hexdigest(),
     )
-    if not isinstance(flow_result.data.get("anonymous_poll"), dict):
+    if not flow_result.handled:
         return False
     _reply_feature_result(event, flow_result)
-    _clear_discussion_after_poll(conversation_key)
     return True
 
 
@@ -2986,6 +2746,9 @@ def _is_explicit_feature_command(text: str) -> bool:
             "產生花費明細",
             "結束行程",
             "重新開啟帳本",
+            "加入帳本",
+            "加入帳本成員",
+            "查看帳本成員",
             "設定行程時間",
             "建立投票",
             "結束投票",
@@ -3026,15 +2789,6 @@ def _handle_feature_text(
             return True
         return False
 
-    if _try_start_pending_vote_from_agreement(
-        event,
-        conversation_key=conversation_key,
-        line_group_id=line_group_id,
-        line_user_id=line_user_id,
-        user_text=user_text,
-    ):
-        return True
-
     if user_text == "發票記帳":
         default_payer = _get_group_sender_display_name(line_group_id, line_user_id)
         result = start_invoice_flow(
@@ -3050,7 +2804,7 @@ def _handle_feature_text(
 
     default_payer = (
         _get_group_sender_display_name(line_group_id, line_user_id)
-        if user_text.startswith("記帳")
+        if user_text.startswith(("記帳", "開始記帳", "加入帳本"))
         else ""
     )
     result = handle_expense_text(
@@ -3063,7 +2817,7 @@ def _handle_feature_text(
         _reply_feature_result(event, result)
         return True
 
-    for handler_function in (handle_end_vote_text, handle_vote_text, handle_schedule_text):
+    for handler_function in (handle_vote_text, handle_schedule_text):
         result = handler_function(
             user_text,
             line_group_id=line_group_id,
@@ -3146,6 +2900,11 @@ def handle_feature_postback(event: PostbackEvent) -> None:
             line_user_id=line_user_id,
         )
         if result.handled:
+            if (
+                isinstance(result.data.get("anonymous_poll"), dict)
+                or result.data.get("vote_proposal_declined") is True
+            ):
+                _clear_discussion_after_poll(_get_conversation_key(event))
             _reply_feature_result(event, result)
             return
     _reply_feature_result(event, FlowResult(True, "這個操作已失效，請重新執行指令。"))
@@ -3324,6 +3083,10 @@ def handle_message(event: MessageEvent) -> None:
                             line_group_id=line_group_id,
                             line_user_id=line_user_id,
                             itinerary=imported_itinerary,
+                            creator_display_name=_get_group_sender_display_name(
+                                line_group_id,
+                                line_user_id,
+                            ),
                         )
             save_message(
                 line_group_id,
@@ -3456,34 +3219,17 @@ def handle_message(event: MessageEvent) -> None:
         confidence_score = 0.0
 
     try:
-        if _try_start_automatic_poll(
+        if _try_propose_automatic_poll(
             event,
             conversation_key=conversation_key,
             line_group_id=line_group_id,
-            context_text=context_text,
             recent_messages=_recent_messages,
             result=result,
         ):
-            _debug_print("Automatic anonymous poll created from scenario nine")
+            _debug_print("Anonymous poll proposal created from scenario nine")
             return
     except Exception as exc:
-        _log_failure("Automatic poll flow", exc)
-
-    try:
-        if _try_start_vote_from_current_agreement(
-            event,
-            conversation_key=conversation_key,
-            line_group_id=line_group_id,
-            line_user_id=line_user_id,
-            user_text=user_text,
-            context_text=context_text,
-            recent_messages=_recent_messages,
-            result=result,
-        ):
-            _debug_print("Anonymous poll created from current agreement")
-            return
-    except Exception as exc:
-        _log_failure("Vote agreement flow", exc)
+        _log_failure("Automatic poll proposal flow", exc)
 
     try:
         if should_optimize_route(result):
@@ -3533,8 +3279,6 @@ def handle_message(event: MessageEvent) -> None:
     try:
         text_location_payload = _extract_text_location_query_payload(user_text, result)
         if text_location_payload:
-            if not processing_hint_sent:
-                _send_processing_hint("text_location_recommendation")
             if _handle_text_location_recommendation_request(
                 event,
                 conversation_key,
@@ -3635,12 +3379,6 @@ def handle_message(event: MessageEvent) -> None:
                 _debug_print(f"準備回覆：{suggested_reply}")
                 _reply_text(line_bot_api, event.reply_token, suggested_reply)
                 _mark_reply_sent(conversation_key, scenario_code, suggested_reply)
-                _maybe_store_vote_proposal_from_reply(
-                    conversation_key,
-                    result=result,
-                    suggested_reply=suggested_reply,
-                    recent_messages=_recent_messages,
-                )
                 _debug_print("已送出 LINE 回覆。")
             else:
                 app.logger.info("AI selected intervention without reply text")
