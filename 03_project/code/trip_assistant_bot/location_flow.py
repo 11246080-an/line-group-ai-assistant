@@ -385,6 +385,20 @@ def _is_tourism_lookup_request(
     )
 
 
+def _is_tourism_event_lookup_request(
+    query_text: str,
+    activity_types: list[str] | None = None,
+) -> bool:
+    combined = " ".join(
+        [query_text]
+        + [str(item) for item in activity_types or [] if str(item).strip()]
+    )
+    return _contains_any_keyword(
+        combined,
+        ("活動", "展覽", "節慶", "市集", "演出", "表演"),
+    )
+
+
 def _shorten_tourism_text(value: Any, max_length: int = 42) -> str:
     text = re.sub(r"\s+", " ", str(value or "")).strip()
     if len(text) <= max_length:
@@ -470,26 +484,12 @@ def _build_tourism_text_recommendation(
         return None
     area_text = _normalize_tourism_area(location_text, query_text)
 
-    include_events = _contains_any_keyword(
-        " ".join([query_text] + [str(item) for item in activity_types or []]),
-        ("活動", "展覽", "節慶", "市集", "演出", "表演"),
-    )
+    event_lookup = _is_tourism_event_lookup_request(query_text, activity_types)
 
     results: list[dict[str, Any]] = []
     try:
         lookup_limit = max(LIFF_RESULT_LIMIT * 8, 80)
-        attractions = get_tourism_attractions(city=city, limit=lookup_limit)
-        attractions = _rank_tourism_items_by_area(
-            attractions,
-            area_text=area_text,
-            city=city,
-        )
-        results.extend(
-            _tourism_item_to_result(item, item_type="attraction")
-            for item in attractions[:LIFF_RESULT_LIMIT]
-            if isinstance(item, dict)
-        )
-        if include_events:
+        if event_lookup:
             events = get_tourism_events(city=city, limit=lookup_limit)
             events = _rank_tourism_items_by_area(
                 events,
@@ -501,11 +501,34 @@ def _build_tourism_text_recommendation(
                 for item in events[:LIFF_RESULT_LIMIT]
                 if isinstance(item, dict)
             )
+        else:
+            attractions = get_tourism_attractions(city=city, limit=lookup_limit)
+            attractions = _rank_tourism_items_by_area(
+                attractions,
+                area_text=area_text,
+                city=city,
+            )
+            results.extend(
+                _tourism_item_to_result(item, item_type="attraction")
+                for item in attractions[:LIFF_RESULT_LIMIT]
+                if isinstance(item, dict)
+            )
     except Exception as exc:
         _log_external_failure("Tourism open data recommendation", exc)
         return None
 
     results = [item for item in results if item.get("name")]
+    if not results and event_lookup:
+        return {
+            "group_message": f"我查了一下觀光署活動資料，目前沒有找到{city}近期適合顯示的活動。",
+            "results": [],
+            "location_source": "text_location",
+            "query_text": query_text.strip(),
+            "provider": "tourism_open_data",
+            "tourism_city": city,
+            "tourism_area": area_text,
+            "tourism_kind": "event",
+        }
     if not results:
         return None
 
@@ -526,6 +549,7 @@ def _build_tourism_text_recommendation(
         "provider": "tourism_open_data",
         "tourism_city": city,
         "tourism_area": area_text,
+        "tourism_kind": "event" if event_lookup else "attraction",
     }
 
 
@@ -1625,6 +1649,8 @@ def run_text_location_recommendation(
         location_text=location_text,
         activity_types=activity_types,
     )
+    if tourism_payload and tourism_payload.get("tourism_kind") == "event":
+        return tourism_payload
 
     if os.getenv("GOOGLE_PLACES_API_KEY", "").strip():
         google_payload = _build_google_places_text_recommendation(
@@ -2117,7 +2143,9 @@ def _format_group_message(
         else:
             source_label = "定位"
 
-        if intent == "attraction":
+        if "活動" in query_text or "展覽" in query_text or "節慶" in query_text or "市集" in query_text:
+            lines.append("我幫你看了一下，這幾個近期活動可以先參考：")
+        elif intent == "attraction":
             lines.append("我幫你看了一下，附近有幾個可以去走走的地方：")
         elif "購物" in query_text or "逛" in query_text or "百貨" in query_text or "夜市" in query_text:
             lines.append("我幫你找了幾個附近可以逛的地方：")
