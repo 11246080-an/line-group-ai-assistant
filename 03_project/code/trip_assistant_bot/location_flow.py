@@ -481,10 +481,6 @@ def _format_tourism_description(item: dict[str, Any], *, item_type: str) -> str:
         if end_time:
             parts.append(f"結束：{end_time}")
 
-    website_url = str(item.get("website_url") or "").strip()
-    if website_url:
-        parts.append(f"網址：{website_url}")
-
     return "｜".join(parts)
 
 
@@ -2190,6 +2186,7 @@ def _format_group_message(
     prefix: str = "",
 ) -> str:
     lines: list[str] = []
+    detail_links: list[tuple[int, str, str]] = []
     if prefix:
         lines.append(prefix)
 
@@ -2270,8 +2267,19 @@ def _format_group_message(
                     detail_line = "｜".join(normalized_parts)
                 lines.append(detail_line)
 
+            maps_url = str(item.get("maps_url") or item.get("mapsUrl") or "").strip()
+            provider = str(item.get("provider") or "")
+            if maps_url and provider.startswith("tourism_"):
+                detail_links.append((index, str(item.get("name") or "詳細資訊"), maps_url))
+
             if index != min(len(results), GROUP_RESULT_LIMIT):
                 lines.append("")
+
+        if detail_links:
+            lines.append("")
+            lines.append("詳細連結：")
+            for index, name, url in detail_links[:GROUP_RESULT_LIMIT]:
+                lines.append(f"{index}. {name}：{url}")
 
     return "\n".join(lines).strip()
 
