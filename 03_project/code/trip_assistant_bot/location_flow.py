@@ -409,6 +409,7 @@ def _shorten_tourism_text(value: Any, max_length: int = 42) -> str:
 
 
 TAIPEI_TIMEZONE = timezone(timedelta(hours=8))
+RECENT_TOURISM_EVENT_WINDOW_DAYS = 45
 
 
 def _parse_tourism_datetime(value: Any) -> datetime | None:
@@ -458,6 +459,35 @@ def _is_active_tourism_event(item: dict[str, Any]) -> bool:
     if end_time is None:
         return True
     return end_time >= datetime.now(TAIPEI_TIMEZONE)
+
+
+def _tourism_event_time_score(item: dict[str, Any], index: int) -> tuple[int, int, int]:
+    now = datetime.now(TAIPEI_TIMEZONE)
+    start_at = _parse_tourism_datetime(item.get("start_time"))
+    end_at = _parse_tourism_datetime(item.get("end_time"))
+
+    if start_at and end_at and start_at <= now <= end_at:
+        return (0, 0, index)
+    if start_at and start_at >= now:
+        days_until_start = (start_at.date() - now.date()).days
+        if days_until_start <= RECENT_TOURISM_EVENT_WINDOW_DAYS:
+            return (1, days_until_start, index)
+        return (2, days_until_start, index)
+    if end_at and end_at >= now:
+        return (0, 0, index)
+    return (3, 9999, index)
+
+
+def _rank_tourism_events_by_time(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not items:
+        return []
+    scored_items = [
+        (_tourism_event_time_score(item, index), item)
+        for index, item in enumerate(items)
+        if isinstance(item, dict)
+    ]
+    scored_items.sort(key=lambda entry: entry[0])
+    return [item for _score, item in scored_items]
 
 
 def _is_tourism_event_lookup_request(
@@ -564,6 +594,7 @@ def _build_tourism_text_recommendation(
                     for item in events
                     if isinstance(item, dict) and _is_active_tourism_event(item)
                 ]
+                events = _rank_tourism_events_by_time(events)
                 events = _rank_tourism_items_by_area(
                     events,
                     area_text=area_text,
