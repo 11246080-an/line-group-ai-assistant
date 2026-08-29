@@ -1,23 +1,25 @@
 from __future__ import annotations
 
-from datetime import datetime
-import hashlib
+from datetime import datetime, timedelta, timezone
 import os
 from typing import Any
 
 import requests
 
-from db import get_api_query_cache, save_api_query_cache
+from db import get_weather_daily_cache, save_weather_daily_cache
 
 
 CWA_FORECAST_36H_URL = (
     "https://opendata.cwa.gov.tw/api/v1/rest/datastore/F-C0032-001"
 )
 CWA_API_TIMEOUT_SECONDS = float(os.getenv("CWA_API_TIMEOUT_SECONDS", "10"))
-CWA_WEATHER_CACHE_TTL_SECONDS = max(
-    60,
-    int(os.getenv("CWA_WEATHER_CACHE_TTL_SECONDS", "3600")),
+CWA_DAILY_CACHE_TTL_SECONDS = max(
+    3600,
+    int(os.getenv("CWA_DAILY_CACHE_TTL_SECONDS", str(2 * 24 * 60 * 60))),
 )
+TAIPEI_TZ = timezone(timedelta(hours=8))
+CWA_PROVIDER = "cwa_weather"
+CWA_FORECAST_TYPE = "36h"
 ENABLE_VERBOSE_DEBUG = os.getenv("ENABLE_VERBOSE_DEBUG", "false").strip().lower() in {
     "1",
     "true",
@@ -77,6 +79,7 @@ COUNTY_ALIASES = {
     "金門": "金門縣",
     "連江": "連江縣",
 }
+ALL_CWA_COUNTIES = sorted(set(COUNTY_ALIASES.values()))
 
 
 def _normalize_county_name(location_text: str, query_text: str = "") -> str:
@@ -90,9 +93,132 @@ def _normalize_county_name(location_text: str, query_text: str = "") -> str:
     return ""
 
 
-def _build_weather_cache_key(county_name: str, query_text: str, time_text: str) -> str:
-    payload = f"{county_name}|{query_text.strip()}|{time_text.strip()}"
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+def _source_date(now: datetime | None = None) -> str:
+    current = now or datetime.now(TAIPEI_TZ)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=TAIPEI_TZ)
+    return current.astimezone(TAIPEI_TZ).date().isoformat()
+
+
+def _authorization_key() -> str:
+    return os.getenv("CWA_AUTHORIZATION_KEY", "").strip()
+
+
+def _fetch_cwa_weather(county_name: str = "") -> dict[str, Any]:
+    authorization_key = _authorization_key()
+    if not authorization_key:
+        raise RuntimeError("CWA_AUTHORIZATION_KEY is not configured.")
+
+    params = {
+        "Authorization": authorization_key,
+        "format": "JSON",
+    }
+    if county_name:
+        params["locationName"] = county_name
+
+    response = requests.get(
+        CWA_FORECAST_36H_URL,
+        params=params,
+        timeout=CWA_API_TIMEOUT_SECONDS,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+def _locations_by_county(raw: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    records = raw.get("records") or {}
+    locations = records.get("location") or []
+    result: dict[str, dict[str, Any]] = {}
+    for location in locations:
+        if not isinstance(location, dict):
+            continue
+        county_name = str(location.get("locationName") or "").strip()
+        if county_name:
+            result[county_name] = location
+    return result
+
+
+def _single_location_raw(location_record: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "success": "true",
+        "records": {
+            "location": [location_record],
+        },
+    }
+
+
+def _location_record_from_daily_cache(
+    county_name: str,
+    source_date: str,
+) -> dict[str, Any] | None:
+    cached = get_weather_daily_cache(
+        CWA_PROVIDER,
+        county_name,
+        source_date,
+        forecast_type=CWA_FORECAST_TYPE,
+    )
+    if not isinstance(cached, dict):
+        return None
+    raw_data = cached.get("raw_data") or {}
+    locations = _locations_by_county(raw_data)
+    return locations.get(county_name)
+
+
+def _save_daily_location_record(
+    *,
+    county_name: str,
+    source_date: str,
+    location_record: dict[str, Any],
+) -> None:
+    save_weather_daily_cache(
+        CWA_PROVIDER,
+        county_name,
+        source_date,
+        _single_location_raw(location_record),
+        forecast_type=CWA_FORECAST_TYPE,
+        ttl_seconds=CWA_DAILY_CACHE_TTL_SECONDS,
+    )
+
+
+def sync_cwa_weather_daily_cache(
+    *,
+    now: datetime | None = None,
+    counties: list[str] | None = None,
+) -> dict[str, int | str]:
+    """每天固定同步一次中央氣象署 36 小時天氣資料到 weather_daily_cache。"""
+    source_date = _source_date(now)
+    county_names = counties or ALL_CWA_COUNTIES
+    missing_counties = [
+        county_name
+        for county_name in county_names
+        if _location_record_from_daily_cache(county_name, source_date) is None
+    ]
+    if not missing_counties:
+        return {"source_date": source_date, "saved": 0, "skipped": len(county_names)}
+
+    raw = _fetch_cwa_weather()
+    locations = _locations_by_county(raw)
+    saved = 0
+    for county_name in missing_counties:
+        location_record = locations.get(county_name)
+        if not location_record:
+            continue
+        _save_daily_location_record(
+            county_name=county_name,
+            source_date=source_date,
+            location_record=location_record,
+        )
+        saved += 1
+
+    _debug_print(
+        "CWA weather daily sync:",
+        {
+            "source_date": source_date,
+            "saved": saved,
+            "requested": len(missing_counties),
+        },
+    )
+    return {"source_date": source_date, "saved": saved, "skipped": len(county_names) - saved}
 
 
 def _extract_time_map(location_record: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
@@ -237,43 +363,40 @@ def run_weather_recommendation(
             "results": [],
         }
 
-    authorization_key = os.getenv("CWA_AUTHORIZATION_KEY", "").strip()
-    if not authorization_key:
-        raise RuntimeError("CWA_AUTHORIZATION_KEY is not configured.")
-
-    cache_key = _build_weather_cache_key(county_name, query_text, time_text)
-    cached = get_api_query_cache("weather_cwa_36h", line_group_id, cache_key)
-    if isinstance(cached, dict):
+    source_date = _source_date()
+    location_record = _location_record_from_daily_cache(county_name, source_date)
+    if isinstance(location_record, dict):
+        group_message = _build_weather_message(
+            county_name=county_name,
+            query_text=query_text,
+            time_text=time_text,
+            location_record=location_record,
+        )
+        payload = {
+            "provider": CWA_PROVIDER,
+            "county_name": county_name,
+            "source_date": source_date,
+            "query_text": query_text,
+            "group_message": group_message,
+            "results": [],
+        }
         _debug_print(
-            "CWA weather cache hit:",
+            "CWA weather daily cache hit:",
             {
                 "line_group_id": line_group_id,
-                "cache_key": cache_key,
                 "county_name": county_name,
+                "source_date": source_date,
                 "query_text": query_text,
             },
         )
-        return cached
+        return payload
 
-    params = {
-        "Authorization": authorization_key,
-        "format": "JSON",
-        "locationName": county_name,
-    }
-    response = requests.get(
-        CWA_FORECAST_36H_URL,
-        params=params,
-        timeout=CWA_API_TIMEOUT_SECONDS,
-    )
-    response.raise_for_status()
-    raw = response.json()
-
-    records = raw.get("records") or {}
-    locations = records.get("location") or []
-    if not locations:
+    raw = _fetch_cwa_weather(county_name)
+    locations = _locations_by_county(raw)
+    location_record = locations.get(county_name)
+    if not location_record:
         raise RuntimeError(f"CWA weather returned no location data for {county_name}.")
 
-    location_record = locations[0]
     group_message = _build_weather_message(
         county_name=county_name,
         query_text=query_text,
@@ -281,28 +404,26 @@ def run_weather_recommendation(
         location_record=location_record,
     )
     payload = {
-        "provider": "cwa_weather",
+        "provider": CWA_PROVIDER,
         "county_name": county_name,
+        "source_date": source_date,
         "query_text": query_text,
         "group_message": group_message,
         "results": [],
     }
-    save_api_query_cache(
-        "weather_cwa_36h",
-        line_group_id,
-        cache_key,
-        payload,
-        query_params=params,
-        ttl_seconds=CWA_WEATHER_CACHE_TTL_SECONDS,
+    _save_daily_location_record(
+        county_name=county_name,
+        source_date=source_date,
+        location_record=location_record,
     )
     _debug_print(
-        "CWA weather cache save:",
+        "CWA weather daily cache seed:",
         {
             "line_group_id": line_group_id,
-            "cache_key": cache_key,
             "county_name": county_name,
+            "source_date": source_date,
             "query_text": query_text,
-            "ttl_seconds": CWA_WEATHER_CACHE_TTL_SECONDS,
+            "ttl_seconds": CWA_DAILY_CACHE_TTL_SECONDS,
         },
     )
     return payload

@@ -8,6 +8,7 @@ from typing import Callable
 
 from expense_flow import _book_id, _db_function, build_expense_report, database_contract_ready
 from vote_flow import format_poll
+from weather_flow import sync_cwa_weather_daily_cache
 
 
 PushCallback = Callable[[str, str], None]
@@ -24,7 +25,18 @@ def run_due_tasks(
 ) -> dict[str, int]:
     """Claim due records, close them once, and push their final reports."""
     current = now or datetime.now(timezone.utc)
-    result = {"books_closed": 0, "polls_closed": 0, "push_failures": 0}
+    result = {
+        "books_closed": 0,
+        "polls_closed": 0,
+        "weather_daily_saved": 0,
+        "push_failures": 0,
+    }
+
+    try:
+        weather_result = sync_cwa_weather_daily_cache(now=current)
+        result["weather_daily_saved"] = int(weather_result.get("saved") or 0)
+    except Exception as exc:
+        _LOGGER.error("Scheduled weather sync failed (%s)", type(exc).__name__)
 
     book_contract = (
         "claim_due_expense_books",
