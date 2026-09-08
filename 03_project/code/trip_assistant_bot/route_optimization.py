@@ -228,11 +228,8 @@ def build_optimized_route_reply(
         return "我有看到你們想排路線，但目前至少要有 2 個能辨識的景點名稱。可以再補上完整店名或景點名嗎？"
 
     route = optimize_spots(resolved)
-    distance = route_distance_km(route)
     lines = ["我幫你們把景點排成較順的順序："]
     lines.extend(f"{index}. {spot.name}" for index, spot in enumerate(route, start=1))
-    lines.append("建議理由：這樣排是依照景點座標估算相鄰距離，盡量減少來回折返。")
-    lines.append(f"景點間直線距離合計約 {distance:.1f} 公里。")
     if missing:
         lines.append(f"尚未辨識：{'、'.join(missing)}；補上更完整名稱後我可以重排。")
     waypoints = "/".join(quote(spot.name, safe="") for spot in route)

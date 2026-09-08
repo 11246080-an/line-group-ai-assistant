@@ -33,7 +33,6 @@ class RouteOptimizationTests(unittest.TestCase):
             user_text="阿里山、奮起湖、檜意森活村怎麼排比較順",
             geocoder=lookup.get,
         )
-        self.assertIn("建議理由", reply)
         self.assertIn("基礎路線最佳化", reply)
         for name in ("A", "B", "C"):
             self.assertIn(name, reply)
@@ -44,7 +43,6 @@ class RouteOptimizationTests(unittest.TestCase):
         reply = build_optimized_route_reply(result, geocoder=lookup.get)
         self.assertIn("1.", reply)
         self.assertIn("Google 地圖路線", reply)
-        self.assertIn("建議理由", reply)
         for name in ("A", "B", "C"):
             self.assertIn(name, reply)
 
