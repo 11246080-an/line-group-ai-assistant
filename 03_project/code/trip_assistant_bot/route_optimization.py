@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import math
 import os
+import re
 from typing import Any, Callable
 from urllib.parse import quote
 
@@ -15,6 +16,19 @@ except ImportError:  # pragma: no cover - production requirements include reques
 GOOGLE_PLACES_TEXT_SEARCH_URL = "https://places.googleapis.com/v1/places:searchText"
 MAX_EXACT_SPOTS = 10
 EARTH_RADIUS_KM = 6371.0088
+ROUTE_SIGNAL_KEYWORDS = (
+    "路線最佳化",
+    "路線優化",
+    "怎麼排",
+    "怎麼走",
+    "怎麼安排",
+    "排順路",
+    "順路",
+    "比較順",
+    "少繞路",
+    "不繞路",
+    "動線",
+)
 
 
 @dataclass(frozen=True)
@@ -25,23 +39,72 @@ class RouteSpot:
     address: str = ""
 
 
-def _valid_location_names(analysis_result: dict[str, Any]) -> list[str]:
+def _append_unique_location(locations: list[str], value: Any) -> None:
+    name = str(value or "").strip(" \t\r\n，,、。.!！?？：:；;/")
+    ignored = {"", "目前位置", "附近", "未指定", "不確定", "景點", "地點", "行程", "路線"}
+    if name in ignored or name in locations:
+        return
+    locations.append(name)
+
+
+def _has_route_signal(text: str) -> bool:
+    normalized = str(text or "").strip()
+    return any(keyword in normalized for keyword in ROUTE_SIGNAL_KEYWORDS)
+
+
+def _location_names_from_text(text: str) -> list[str]:
+    """Best-effort fallback for direct route commands such as A、B、C 怎麼排."""
+    normalized = str(text or "").strip()
+    if not _has_route_signal(normalized):
+        return []
+    for phrase in (
+        "幫我",
+        "請問",
+        "可以",
+        "路線最佳化",
+        "路線優化",
+        "怎麼排比較順",
+        "怎麼排",
+        "怎麼走比較順",
+        "怎麼走",
+        "怎麼安排",
+        "排順路一點",
+        "排順路",
+        "比較順",
+        "少繞路",
+        "不繞路",
+        "動線",
+        "路線",
+        "最佳化",
+        "優化",
+    ):
+        normalized = normalized.replace(phrase, " ")
+    parts = re.split(r"[、,，/／\n]|(?:\s+(?:和|跟|及|與)\s+)", normalized)
+    locations: list[str] = []
+    for part in parts:
+        cleaned = re.sub(r"\s+", "", part)
+        _append_unique_location(locations, cleaned)
+    return locations
+
+
+def _valid_location_names(analysis_result: dict[str, Any], *, user_text: str = "") -> list[str]:
     extracted = analysis_result.get("extracted_info") or {}
     raw_locations = extracted.get("location") or []
     if not isinstance(raw_locations, list):
         raw_locations = [raw_locations]
-    ignored = {"", "目前位置", "附近", "未指定", "不確定"}
     locations: list[str] = []
     for value in raw_locations:
-        name = str(value).strip()
-        if name in ignored or name in locations:
-            continue
-        locations.append(name)
+        _append_unique_location(locations, value)
+    for value in _location_names_from_text(user_text):
+        _append_unique_location(locations, value)
     return locations
 
 
-def should_optimize_route(analysis_result: dict[str, Any]) -> bool:
-    return str(analysis_result.get("scenario_code") or "").strip() == "劇本五" and len(_valid_location_names(analysis_result)) >= 2
+def should_optimize_route(analysis_result: dict[str, Any], *, user_text: str = "") -> bool:
+    scenario_code = str(analysis_result.get("scenario_code") or "").strip()
+    if len(_valid_location_names(analysis_result, user_text=user_text)) < 2:
+        return False
+    return scenario_code == "劇本五" or _has_route_signal(user_text)
 
 
 def haversine_km(first: RouteSpot, second: RouteSpot) -> float:
@@ -147,11 +210,12 @@ def geocode_place(name: str, *, session: Any = None) -> RouteSpot | None:
 def build_optimized_route_reply(
     analysis_result: dict[str, Any],
     *,
+    user_text: str = "",
     geocoder: Callable[[str], RouteSpot | None] = geocode_place,
 ) -> str | None:
-    if not should_optimize_route(analysis_result):
+    if not should_optimize_route(analysis_result, user_text=user_text):
         return None
-    names = _valid_location_names(analysis_result)
+    names = _valid_location_names(analysis_result, user_text=user_text)
     resolved: list[RouteSpot] = []
     missing: list[str] = []
     for name in names:
@@ -167,10 +231,11 @@ def build_optimized_route_reply(
     distance = route_distance_km(route)
     lines = ["我幫你們把景點排成較順的順序："]
     lines.extend(f"{index}. {spot.name}" for index, spot in enumerate(route, start=1))
+    lines.append("建議理由：這樣排是依照景點座標估算相鄰距離，盡量減少來回折返。")
     lines.append(f"景點間直線距離合計約 {distance:.1f} 公里。")
     if missing:
         lines.append(f"尚未辨識：{'、'.join(missing)}；補上更完整名稱後我可以重排。")
     waypoints = "/".join(quote(spot.name, safe="") for spot in route)
     lines.append(f"Google 地圖路線：https://www.google.com/maps/dir/{waypoints}")
-    lines.append("實際時間仍會受道路、交通方式和營業時間影響。")
+    lines.append("提醒：目前是基礎路線最佳化，實際時間仍會受交通方式、路況與營業時間影響。")
     return "\n".join(lines)

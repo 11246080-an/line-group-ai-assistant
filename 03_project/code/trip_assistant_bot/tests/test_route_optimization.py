@@ -21,12 +21,30 @@ class RouteOptimizationTests(unittest.TestCase):
         result["scenario_code"] = "劇本四"
         self.assertFalse(should_optimize_route(result))
 
+    def test_route_signal_can_trigger_without_scenario_five(self):
+        result = {"scenario_code": "劇本四", "extracted_info": {"location": ["台北101", "故宮"]}}
+        self.assertTrue(should_optimize_route(result, user_text="台北101、故宮怎麼排比較順"))
+
+    def test_direct_text_locations_can_trigger_route_optimization(self):
+        lookup = {"阿里山": self.a, "奮起湖": self.b, "檜意森活村": self.c}
+        result = {"scenario_code": "no_reply", "extracted_info": {"location": []}}
+        reply = build_optimized_route_reply(
+            result,
+            user_text="阿里山、奮起湖、檜意森活村怎麼排比較順",
+            geocoder=lookup.get,
+        )
+        self.assertIn("建議理由", reply)
+        self.assertIn("基礎路線最佳化", reply)
+        for name in ("A", "B", "C"):
+            self.assertIn(name, reply)
+
     def test_reply_uses_all_resolved_locations(self):
         lookup = {"台北101": self.a, "故宮": self.b, "士林夜市": self.c}
         result = {"scenario_code": "劇本五", "extracted_info": {"location": list(lookup)}}
         reply = build_optimized_route_reply(result, geocoder=lookup.get)
         self.assertIn("1.", reply)
         self.assertIn("Google 地圖路線", reply)
+        self.assertIn("建議理由", reply)
         for name in ("A", "B", "C"):
             self.assertIn(name, reply)
 

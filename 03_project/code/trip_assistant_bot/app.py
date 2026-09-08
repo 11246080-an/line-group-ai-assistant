@@ -3232,8 +3232,8 @@ def handle_message(event: MessageEvent) -> None:
         _log_failure("Automatic poll proposal flow", exc)
 
     try:
-        if should_optimize_route(result):
-            route_reply = build_optimized_route_reply(result)
+        if should_optimize_route(result, user_text=user_text):
+            route_reply = build_optimized_route_reply(result, user_text=user_text)
             if route_reply:
                 _reply_text_and_mark(event, conversation_key, "route_optimization", route_reply)
                 _debug_print("Route optimization flow handled after AI decision")
