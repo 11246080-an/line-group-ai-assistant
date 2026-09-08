@@ -1170,6 +1170,23 @@ TEXT_LOCATION_LOOKUP_TERMS = (
     "旅遊",
     "可以玩",
 )
+TEXT_LOCATION_REQUEST_TERMS = (
+    "推薦",
+    "查",
+    "查詢",
+    "搜尋",
+    "找",
+    "有什麼",
+    "有哪些",
+    "哪裡",
+    "哪個",
+    "可以去哪",
+    "可以去",
+    "附近有",
+    "幫我看",
+    "幫我找",
+    "介紹",
+)
 
 
 def _infer_text_location_from_user_text(user_text: str) -> str:
@@ -1203,6 +1220,8 @@ def _looks_like_text_location_lookup(user_text: str) -> bool:
     if _has_weather_request_signal(normalized_text, {}):
         return False
     if _looks_like_current_location_request(normalized_text):
+        return False
+    if not any(term in normalized_text for term in TEXT_LOCATION_REQUEST_TERMS):
         return False
     return bool(
         _infer_text_location_from_user_text(normalized_text)
