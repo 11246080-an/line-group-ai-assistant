@@ -53,6 +53,21 @@ ACTIVITY_KEYWORDS = [
     "爬山",
 ]
 
+TRANSPORT_KEYWORDS = [
+    "步行",
+    "走路",
+    "捷運",
+    "公車",
+    "火車",
+    "台鐵",
+    "高鐵",
+    "計程車",
+    "開車",
+    "租車",
+    "騎車",
+    "渡輪",
+]
+
 CONSTRAINT_KEYWORDS = [
     "不要太晚",
     "不要太遠",
@@ -122,6 +137,7 @@ def extract_info(text: str) -> ExtractedInfo:
     info.budget = _find_matches(BUDGET_PATTERNS, text)
     info.constraints = _find_keywords(CONSTRAINT_KEYWORDS, text)
     info.activity_types = _find_keywords(ACTIVITY_KEYWORDS, text)
+    info.transport = _find_keywords(TRANSPORT_KEYWORDS, text)
     info.options = _find_keywords(OPTION_KEYWORDS, text)
     info.risk_info = _find_keywords(RISK_KEYWORDS, text)
 

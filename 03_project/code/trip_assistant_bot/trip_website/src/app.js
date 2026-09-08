@@ -10,8 +10,10 @@
   scrubSensitiveLaunchParams();
 
   const state = {
-    itineraries: normalizeItineraries(Array.isArray(window.ITINERARIES) ? window.ITINERARIES : []),
+    itineraries: [],
     filtered: [],
+    isLoadingItineraries: true,
+    itineraryLoadError: "",
     selectedId: null,
     carouselIndex: 0,
     carouselTimer: null,
@@ -64,9 +66,32 @@
 
   const resetFilters = document.querySelector("#resetFilters");
 
-  function init() {
-    state.filtered = [...state.itineraries];
-    state.selectedId = state.filtered[0]?.id ?? null;
+  async function loadItineraries() {
+    const response = await fetch(buildApiUrl("api/itineraries"), {
+      headers: { Accept: "application/json" },
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok || !payload.ok || !Array.isArray(payload.items)) {
+      throw new Error(payload.error || "無法取得公開行程");
+    }
+    return normalizeItineraries(payload.items);
+  }
+
+  async function init() {
+    elements.itineraryList.innerHTML = '<div class="empty-state itinerary-state">正在載入公開行程…</div>';
+    try {
+      state.itineraries = await loadItineraries();
+      state.filtered = [...state.itineraries];
+      state.selectedId = state.filtered[0]?.id ?? null;
+    } catch (error) {
+      console.error("Published itinerary loading failed.", error);
+      state.itineraryLoadError = "目前無法載入行程，請稍後再試。";
+      state.itineraries = [];
+      state.filtered = [];
+      state.selectedId = null;
+    } finally {
+      state.isLoadingItineraries = false;
+    }
     setupResponsiveBehavior();
     setupMap();
     setupLocationControls();
@@ -680,6 +705,21 @@
     }
   }
   function renderCarousel() {
+    if (state.isLoadingItineraries) {
+      elements.itineraryList.innerHTML = '<div class="empty-state itinerary-state">正在載入公開行程…</div>';
+      updateCarousel();
+      return;
+    }
+    if (state.itineraryLoadError) {
+      elements.itineraryList.innerHTML = `<div class="empty-state itinerary-state itinerary-state--error">${html(state.itineraryLoadError)}</div>`;
+      updateCarousel();
+      return;
+    }
+    if (state.itineraries.length === 0) {
+      elements.itineraryList.innerHTML = '<div class="empty-state itinerary-state">目前還沒有使用者同意分享的行程。</div>';
+      updateCarousel();
+      return;
+    }
     if (state.filtered.length === 0) {
       elements.itineraryList.innerHTML = '<div class="empty-state">找不到符合條件的行程，請調整篩選條件。</div>';
       updateCarousel();
@@ -1223,15 +1263,45 @@
 
   function normalizeItineraries(itineraries) {
     return itineraries.map((itinerary) => {
-      const id = itinerary.id || slugify(itinerary.title);
+      const id = itinerary.public_id || itinerary.id || slugify(itinerary.title);
+      const budgetValue = itinerary.budget;
+      let budgetLabel = typeof budgetValue === "string" ? budgetValue : "預算未提供";
+      if (budgetValue && typeof budgetValue === "object") {
+        const currency = String(budgetValue.currency || "TWD");
+        const perPerson = Number(budgetValue.per_person);
+        const actualTotal = Number(budgetValue.actual_total);
+        if (Number.isFinite(perPerson)) {
+          budgetLabel = `每人約 ${perPerson.toLocaleString()} ${currency}`;
+        } else if (Number.isFinite(actualTotal)) {
+          budgetLabel = `總計約 ${actualTotal.toLocaleString()} ${currency}`;
+        }
+      }
+
+      const transportValue = itinerary.transport;
+      let transportLabel = typeof transportValue === "string" ? transportValue : "交通未提供";
+      if (Array.isArray(transportValue)) {
+        const modes = [...new Set(transportValue.map((leg) => String(leg?.mode || "").trim()).filter(Boolean))];
+        if (modes.length) transportLabel = modes.join("/");
+      }
+
       return {
         ...itinerary,
         id,
+        description: itinerary.description || itinerary.summary || "",
+        budget: budgetLabel,
+        transportLegs: Array.isArray(transportValue) ? transportValue : [],
+        transport: transportLabel,
+        distance: itinerary.distance || "未分類",
+        type: itinerary.type || "使用者分享",
+        bestFor: itinerary.bestFor || "想參考真實群組行程的旅客",
+        comment: itinerary.comment || "此行程經至少一半參與者同意後匿名分享。",
         lineBotKey: `linebot:${id}`,
         spots: (itinerary.spots || []).map((spot, index) => ({
           ...spot,
-          id: spot.id || `${id}-spot-${String(index + 1).padStart(2, "0")}`,
-          sequence: index + 1,
+          id: spot.spot_id || spot.id || `${id}-spot-${String(index + 1).padStart(2, "0")}`,
+          sequence: Number(spot.sequence) || index + 1,
+          lat: Number(spot.latitude ?? spot.lat),
+          lng: Number(spot.longitude ?? spot.lng),
         })),
       };
     });
@@ -1298,5 +1368,7 @@
     });
   }
 
-  init();
+  init().catch((error) => {
+    console.error("Trip website initialization failed.", error);
+  });
 })();

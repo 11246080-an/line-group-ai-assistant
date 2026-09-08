@@ -27,6 +27,7 @@ from flask import (
 )
 import requests as http_requests
 import db as db_module
+from bson import ObjectId
 from pymongo.errors import DuplicateKeyError
 
 load_dotenv()
@@ -128,6 +129,12 @@ from invoice_flow import (
     start_invoice_flow,
 )
 from privacy_redaction import redact_sensitive_identifiers, redact_structure
+from itinerary_flow import (
+    handle_itinerary_postback,
+    handle_itinerary_text,
+    prepare_share_prompt_for_closed_book,
+    stage_generated_itinerary,
+)
 from scheduled_tasks import run_due_tasks
 from trip_schedule_flow import handle_schedule_postback, handle_schedule_text
 from vote_flow import (
@@ -970,7 +977,282 @@ def _build_anonymous_poll_flex(result: FlowResult) -> FlexMessage | None:
     )
 
 
+def _itinerary_budget_label(draft: dict[str, Any]) -> str:
+    raw_budget = draft.get("estimated_budget")
+    if raw_budget is None or isinstance(raw_budget, bool):
+        return "預算待確認"
+    try:
+        amount = int(raw_budget)
+    except (TypeError, ValueError):
+        return "預算待確認"
+    if amount < 0:
+        return "預算待確認"
+    currency = str(draft.get("currency") or "TWD").strip().upper() or "TWD"
+    prefix = "NT$" if currency == "TWD" else f"{currency} "
+    return f"預估 {prefix}{amount:,}"
+
+
+def _itinerary_flex_action(action_spec: ActionSpec) -> dict[str, Any]:
+    label = redact_sensitive_identifiers(action_spec.label.strip())[:20] or "選擇"
+    if action_spec.kind == "uri":
+        return {"type": "uri", "label": label, "uri": action_spec.value}
+    if action_spec.kind == "message":
+        return {"type": "message", "label": label, "text": action_spec.value[:300]}
+    return {
+        "type": "postback",
+        "label": label,
+        "data": action_spec.value[:300],
+        "displayText": label,
+    }
+
+
+def _build_itinerary_draft_flex(result: FlowResult) -> FlexMessage | None:
+    data = result.data if isinstance(result.data, dict) else {}
+    draft = data.get("itinerary_draft")
+    if data.get("itinerary_draft_staged") is not True or not isinstance(draft, dict):
+        return None
+
+    title = redact_sensitive_identifiers(str(draft.get("title") or "行程草稿").strip())[:100]
+    summary = redact_sensitive_identifiers(str(draft.get("summary") or "").strip())[:240]
+    region = redact_sensitive_identifiers(str(draft.get("region") or "地區待確認").strip())[:40]
+    duration = redact_sensitive_identifiers(str(draft.get("duration") or "時間待確認").strip())[:40]
+    raw_spots = draft.get("spots")
+    spots = [spot for spot in raw_spots if isinstance(spot, dict)] if isinstance(raw_spots, list) else []
+    if not spots:
+        return None
+
+    transport_by_sequence: dict[int, dict[str, Any]] = {}
+    raw_transport = draft.get("transport")
+    if isinstance(raw_transport, list):
+        for leg in raw_transport:
+            if not isinstance(leg, dict):
+                continue
+            try:
+                from_sequence = int(str(leg.get("from_sequence") or ""))
+            except (TypeError, ValueError):
+                continue
+            transport_by_sequence[from_sequence] = leg
+
+    body_contents: list[dict[str, Any]] = [
+        {
+            "type": "box",
+            "layout": "horizontal",
+            "spacing": "sm",
+            "contents": [
+                {
+                    "type": "text",
+                    "text": region,
+                    "size": "sm",
+                    "color": "#147D6F",
+                    "weight": "bold",
+                    "flex": 1,
+                    "wrap": True,
+                },
+                {
+                    "type": "text",
+                    "text": duration,
+                    "size": "sm",
+                    "color": "#52656A",
+                    "align": "end",
+                    "flex": 1,
+                    "wrap": True,
+                },
+            ],
+        },
+        {
+            "type": "text",
+            "text": _itinerary_budget_label(draft),
+            "size": "sm",
+            "color": "#52656A",
+            "margin": "sm",
+            "wrap": True,
+        },
+        {"type": "separator", "margin": "lg", "color": "#DCE7E5"},
+        {
+            "type": "text",
+            "text": "行程順序",
+            "size": "sm",
+            "color": "#147D6F",
+            "weight": "bold",
+            "margin": "lg",
+        },
+    ]
+
+    displayed_spots = spots[:8]
+    for index, spot in enumerate(displayed_spots, start=1):
+        try:
+            sequence = max(1, int(spot.get("sequence") or index))
+        except (TypeError, ValueError):
+            sequence = index
+        name = redact_sensitive_identifiers(str(spot.get("name") or f"景點 {index}").strip())[:80]
+        description = redact_sensitive_identifiers(str(spot.get("description") or "").strip())[:180]
+        address = redact_sensitive_identifiers(str(spot.get("address") or "").strip())[:140]
+        detail = description or address
+        spot_contents: list[dict[str, Any]] = [
+            {
+                "type": "text",
+                "text": f"{sequence}. {name}",
+                "size": "md",
+                "color": "#263238",
+                "weight": "bold",
+                "wrap": True,
+            }
+        ]
+        if detail:
+            spot_contents.append(
+                {
+                    "type": "text",
+                    "text": detail,
+                    "size": "sm",
+                    "color": "#66777B",
+                    "wrap": True,
+                    "margin": "xs",
+                }
+            )
+        body_contents.append(
+            {
+                "type": "box",
+                "layout": "vertical",
+                "contents": spot_contents,
+                "margin": "lg" if index == 1 else "md",
+                "paddingStart": "4px",
+            }
+        )
+
+        if index >= len(displayed_spots):
+            continue
+        leg = transport_by_sequence.get(sequence)
+        if not isinstance(leg, dict):
+            continue
+        mode = redact_sensitive_identifiers(str(leg.get("mode") or "").strip())[:40]
+        note = redact_sensitive_identifiers(str(leg.get("note") or "").strip())[:80]
+        try:
+            minutes = int(str(leg.get("estimated_minutes") or ""))
+        except (TypeError, ValueError):
+            minutes = 0
+        transport_parts = [
+            part
+            for part in (mode, f"約 {minutes} 分鐘" if minutes > 0 else "", note)
+            if part
+        ]
+        if transport_parts:
+            body_contents.append(
+                {
+                    "type": "text",
+                    "text": f"↓ {'・'.join(transport_parts)}",
+                    "size": "xs",
+                    "color": "#147D6F",
+                    "wrap": True,
+                    "margin": "sm",
+                    "offsetStart": "10px",
+                }
+            )
+
+    if len(spots) > len(displayed_spots):
+        body_contents.append(
+            {
+                "type": "text",
+                "text": f"另有 {len(spots) - len(displayed_spots)} 個景點，確認後可查看完整內容。",
+                "size": "xs",
+                "color": "#66777B",
+                "wrap": True,
+                "margin": "md",
+            }
+        )
+    body_contents.extend(
+        [
+            {"type": "separator", "margin": "lg", "color": "#DCE7E5"},
+            {
+                "type": "text",
+                "text": "確認後才會保存為群組私人行程。",
+                "size": "xs",
+                "color": "#66777B",
+                "wrap": True,
+                "margin": "md",
+            },
+        ]
+    )
+
+    footer_contents = [
+        {
+            "type": "button",
+            "style": "primary" if index == 0 else "secondary",
+            "color": "#147D6F" if index == 0 else "#E7EFED",
+            "height": "sm",
+            "flex": 1,
+            "action": _itinerary_flex_action(action_spec),
+        }
+        for index, action_spec in enumerate(result.actions[:2])
+    ]
+    header_contents: list[dict[str, Any]] = [
+        {
+            "type": "text",
+            "text": "行程草稿",
+            "size": "xs",
+            "color": "#D5F2EC",
+            "weight": "bold",
+        },
+        {
+            "type": "text",
+            "text": title,
+            "size": "xl",
+            "color": "#FFFFFF",
+            "weight": "bold",
+            "wrap": True,
+            "margin": "sm",
+        },
+    ]
+    if summary:
+        header_contents.append(
+            {
+                "type": "text",
+                "text": summary,
+                "size": "sm",
+                "color": "#E8F6F3",
+                "wrap": True,
+                "margin": "md",
+            }
+        )
+
+    payload: dict[str, Any] = {
+        "type": "bubble",
+        "size": "mega",
+        "header": {
+            "type": "box",
+            "layout": "vertical",
+            "contents": header_contents,
+            "backgroundColor": "#147D6F",
+            "paddingAll": "20px",
+        },
+        "body": {
+            "type": "box",
+            "layout": "vertical",
+            "contents": body_contents,
+            "paddingAll": "20px",
+        },
+    }
+    if footer_contents:
+        payload["footer"] = {
+            "type": "box",
+            "layout": "horizontal",
+            "spacing": "sm",
+            "contents": footer_contents,
+            "paddingAll": "16px",
+        }
+    return FlexMessage(
+        alt_text=f"行程草稿：{title}"[:400],
+        contents=FlexContainer.from_dict(payload),
+    )
+
+
 def _build_feature_messages(result: FlowResult) -> list[Any]:
+    try:
+        itinerary_message = _build_itinerary_draft_flex(result)
+    except Exception as exc:
+        _log_failure("Itinerary draft Flex Message", exc)
+        itinerary_message = None
+    if itinerary_message is not None:
+        return [itinerary_message]
     poll_message = _build_anonymous_poll_flex(result)
     if poll_message is not None:
         return [poll_message]
@@ -1037,6 +1319,20 @@ def _attach_expense_report_pdf(result: FlowResult) -> FlowResult:
     )
 
 
+def _closed_trip_share_result(result: FlowResult) -> FlowResult | None:
+    data = result.data if isinstance(result.data, dict) else {}
+    if data.get("trip_closed") is not True:
+        return None
+    report = data.get("expense_report")
+    if not isinstance(report, dict):
+        return None
+    book = report.get("book")
+    expenses = report.get("expenses")
+    if not isinstance(book, dict) or not isinstance(expenses, list):
+        return None
+    return prepare_share_prompt_for_closed_book(book=book, expenses=expenses)
+
+
 def _reply_feature_result(event: Any, result: FlowResult) -> None:
     if not result.text.strip():
         return
@@ -1054,6 +1350,13 @@ def _reply_feature_result(event: Any, result: FlowResult) -> None:
         if push_target_id:
             for batch in batches[1:]:
                 _push_message_batch(line_bot_api, push_target_id, batch)
+    if push_target_id:
+        try:
+            share_result = _closed_trip_share_result(result)
+            if share_result is not None:
+                _push_feature_result(push_target_id, share_result)
+        except Exception as exc:
+            _log_failure("Manual itinerary share prompt", exc)
 
 
 def _push_feature_result(push_target_id: str, result: FlowResult) -> None:
@@ -1078,6 +1381,16 @@ def _push_expense_report(
         push_target_id,
         build_expense_report_result(book, expenses),
     )
+
+
+def _push_itinerary_share_prompt(
+    push_target_id: str,
+    book: dict[str, Any],
+    expenses: list[dict[str, Any]],
+) -> None:
+    result = prepare_share_prompt_for_closed_book(book=book, expenses=expenses)
+    if result is not None:
+        _push_feature_result(push_target_id, result)
 
 
 def _is_location_recommendation_request(
@@ -2378,6 +2691,154 @@ def sign_trip_import():
     return jsonify({"ok": True, "marker": marker, "code": code})
 
 
+def _public_json_value(value: Any) -> Any:
+    if isinstance(value, ObjectId):
+        return str(value)
+    if isinstance(value, datetime):
+        normalized = value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+        return normalized.isoformat()
+    if isinstance(value, list):
+        return [_public_json_value(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _public_json_value(item) for key, item in value.items()}
+    return value
+
+
+def _public_itinerary_payload(document: dict[str, Any]) -> dict[str, Any]:
+    allowed_fields = (
+        "public_id",
+        "version",
+        "title",
+        "region",
+        "summary",
+        "description",
+        "duration",
+        "distance",
+        "type",
+        "bestFor",
+        "comment",
+        "published_at",
+        "updated_at",
+    )
+    payload = {key: document.get(key) for key in allowed_fields if key in document}
+    budget = document.get("budget")
+    payload["budget"] = (
+        {
+            key: budget.get(key)
+            for key in (
+                "currency",
+                "estimated_total",
+                "actual_total",
+                "participant_count",
+                "per_person",
+                "category_breakdown",
+            )
+            if key in budget
+        }
+        if isinstance(budget, dict)
+        else None
+    )
+    if isinstance(payload.get("budget"), dict):
+        categories = payload["budget"].get("category_breakdown")
+        if isinstance(categories, list):
+            payload["budget"]["category_breakdown"] = [
+                {
+                    key: category.get(key)
+                    for key in ("category", "amount")
+                    if key in category
+                }
+                for category in categories
+                if isinstance(category, dict)
+            ]
+    payload["spots"] = [
+        {
+            key: spot.get(key)
+            for key in (
+                "spot_id",
+                "sequence",
+                "name",
+                "description",
+                "address",
+                "latitude",
+                "longitude",
+            )
+            if key in spot
+        }
+        for spot in document.get("spots") or []
+        if isinstance(spot, dict)
+    ]
+    payload["transport"] = [
+        {
+            key: leg.get(key)
+            for key in (
+                "from_spot_id",
+                "to_spot_id",
+                "mode",
+                "estimated_minutes",
+                "note",
+            )
+            if key in leg
+        }
+        for leg in document.get("transport") or []
+        if isinstance(leg, dict)
+    ]
+    return _public_json_value(payload)
+
+
+@app.route("/api/itineraries", methods=["GET"])
+def list_public_itineraries_api():
+    if not ENABLE_TRIP_MANAGEMENT_FEATURES:
+        return jsonify({"ok": False, "error": "Itinerary feature is disabled."}), 404
+    list_function = getattr(db_module, "list_published_itineraries", None)
+    if not callable(list_function):
+        return jsonify({"ok": False, "error": "Itinerary database is not ready."}), 503
+    try:
+        limit = int(request.args.get("limit", "20"))
+    except ValueError:
+        return jsonify({"ok": False, "error": "Invalid limit."}), 400
+    region = str(request.args.get("region") or "").strip()
+    try:
+        raw_items: Any = list_function(
+            region=region or None,
+            limit=max(1, min(limit, 100)),
+        )
+    except Exception as exc:
+        _log_failure("Public itinerary list", exc)
+        return jsonify({"ok": False, "error": "Unable to load itineraries."}), 503
+    items: list[Any] = raw_items if isinstance(raw_items, list) else []
+    response = jsonify(
+        {
+            "ok": True,
+            "items": [
+                _public_itinerary_payload(item)
+                for item in items
+                if isinstance(item, dict)
+            ],
+        }
+    )
+    response.headers["Cache-Control"] = "public, max-age=60"
+    return response
+
+
+@app.route("/api/itineraries/<public_id>", methods=["GET"])
+def get_public_itinerary_api(public_id: str):
+    if not ENABLE_TRIP_MANAGEMENT_FEATURES:
+        return jsonify({"ok": False, "error": "Itinerary feature is disabled."}), 404
+    get_function = getattr(db_module, "get_published_itinerary", None)
+    if not callable(get_function):
+        return jsonify({"ok": False, "error": "Itinerary database is not ready."}), 503
+    try:
+        item = get_function(public_id=public_id)
+    except Exception as exc:
+        _log_failure("Public itinerary detail", exc)
+        return jsonify({"ok": False, "error": "Unable to load itinerary."}), 503
+    if not isinstance(item, dict):
+        return jsonify({"ok": False, "error": "Itinerary not found."}), 404
+    response = jsonify({"ok": True, "item": _public_itinerary_payload(item)})
+    response.headers["Cache-Control"] = "public, max-age=60"
+    return response
+
+
 @app.route("/trip", methods=["GET"])
 def redirect_trip_website():
     return redirect("/trip/", code=308)
@@ -2563,6 +3024,7 @@ def run_internal_tasks():
     result = run_due_tasks(
         push_text=_push_text,
         push_expense_report=_push_expense_report,
+        push_itinerary_share_prompt=_push_itinerary_share_prompt,
     )
     return jsonify({"ok": True, **result})
 
@@ -2738,6 +3200,7 @@ def _start_opportunistic_schedule_check() -> None:
             run_due_tasks(
                 push_text=_push_text,
                 push_expense_report=_push_expense_report,
+                push_itinerary_share_prompt=_push_itinerary_share_prompt,
             )
         except Exception as exc:
             _log_failure("Opportunistic scheduled tasks", exc)
@@ -2769,6 +3232,9 @@ def _is_explicit_feature_command(text: str) -> bool:
             "加入帳本成員",
             "查看帳本成員",
             "設定行程時間",
+            "確認行程",
+            "取消行程草稿",
+            "放棄行程草稿",
             "建立投票",
             "結束投票",
             "截止投票",
@@ -2836,7 +3302,7 @@ def _handle_feature_text(
         _reply_feature_result(event, result)
         return True
 
-    for handler_function in (handle_vote_text, handle_schedule_text):
+    for handler_function in (handle_itinerary_text, handle_vote_text, handle_schedule_text):
         result = handler_function(
             user_text,
             line_group_id=line_group_id,
@@ -2908,6 +3374,7 @@ def handle_feature_postback(event: PostbackEvent) -> None:
     postback = getattr(event, "postback", None)
     data = str(getattr(postback, "data", "") or "").strip()
     for handler_function in (
+        handle_itinerary_postback,
         handle_expense_postback,
         handle_invoice_postback,
         handle_schedule_postback,
@@ -3236,6 +3703,30 @@ def handle_message(event: MessageEvent) -> None:
         confidence_score = float(result.get("confidence_score", 0))
     except (TypeError, ValueError):
         confidence_score = 0.0
+
+    itinerary_draft = result.get("itinerary_draft")
+    if (
+        should_intervene
+        and confidence_score >= MIN_INTERVENTION_CONFIDENCE
+        and isinstance(itinerary_draft, dict)
+    ):
+        try:
+            draft_result = stage_generated_itinerary(
+                line_group_id=line_group_id,
+                line_user_id=line_user_id,
+                itinerary_draft=itinerary_draft,
+                reply_text=suggested_reply,
+            )
+            if draft_result.handled:
+                _reply_feature_result(event, draft_result)
+                _mark_reply_sent(
+                    conversation_key,
+                    "itinerary_draft",
+                    draft_result.text,
+                )
+                return
+        except Exception as exc:
+            _log_failure("Itinerary draft staging", exc)
 
     try:
         if _try_propose_automatic_poll(

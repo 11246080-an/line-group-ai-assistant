@@ -13,6 +13,7 @@ from weather_flow import sync_cwa_weather_daily_cache
 
 PushCallback = Callable[[str, str], None]
 ExpenseReportPushCallback = Callable[[str, dict, list[dict]], None]
+ItinerarySharePushCallback = Callable[[str, dict, list[dict]], None]
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -20,6 +21,7 @@ def run_due_tasks(
     *,
     push_text: PushCallback,
     push_expense_report: ExpenseReportPushCallback | None = None,
+    push_itinerary_share_prompt: ItinerarySharePushCallback | None = None,
     now: datetime | None = None,
     limit: int = 50,
 ) -> dict[str, int]:
@@ -58,6 +60,15 @@ def run_due_tasks(
                     sent_at=current,
                 )
                 result["books_closed"] += 1
+                if push_itinerary_share_prompt is not None:
+                    try:
+                        push_itinerary_share_prompt(push_target_id, book, expenses)
+                    except Exception as exc:
+                        _LOGGER.error(
+                            "Scheduled itinerary share prompt failed (%s)",
+                            type(exc).__name__,
+                        )
+                        result["push_failures"] += 1
             except Exception as exc:
                 _LOGGER.error("Scheduled expense report failed (%s)", type(exc).__name__)
                 result["push_failures"] += 1

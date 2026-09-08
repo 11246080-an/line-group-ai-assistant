@@ -1039,7 +1039,9 @@ def handle_expense_postback(
             )
             final_book = closed if isinstance(closed, dict) else (book or {})
             expenses = _db_function("list_expenses")(_book_id(final_book), status="confirmed") or []
-            return build_expense_report_result(final_book, list(expenses))
+            report_result = build_expense_report_result(final_book, list(expenses))
+            report_result.data["trip_closed"] = True
+            return report_result
         if len(action) == 2 and action[0] == "participants":
             if not database_contract_ready():
                 return database_unavailable_result()

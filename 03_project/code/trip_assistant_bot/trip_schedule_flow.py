@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, time as datetime_time
+import logging
 import re
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -17,6 +18,9 @@ from expense_flow import (
     database_unavailable_result,
 )
 from privacy_redaction import redact_sensitive_identifiers, redact_structure
+
+
+_LOGGER = logging.getLogger(__name__)
 
 
 _DATE_RE = re.compile(
@@ -237,6 +241,8 @@ def handle_schedule_postback(
         if not isinstance(draft, dict):
             return FlowResult(True, "目前沒有等待確認的行程時間。")
         payload = draft.get("payload") if isinstance(draft.get("payload"), dict) else draft
+        if not isinstance(payload, dict):
+            return FlowResult(True, "找不到可確認的行程時間草稿，請重新設定。")
         updated = _db_function("update_expense_book_schedule")(
             book_id=payload.get("book_id"),
             start_at=payload.get("start_at"),
@@ -244,6 +250,22 @@ def handle_schedule_postback(
             timezone=payload.get("timezone"),
             updated_by=line_user_id,
         )
+        if database_contract_ready(("update_itinerary_schedule",)):
+            try:
+                _db_function("update_itinerary_schedule")(
+                    expense_book_id=payload.get("book_id"),
+                    start_at=payload.get("start_at"),
+                    end_at=payload.get("end_at"),
+                    timezone=payload.get("timezone"),
+                    updated_by=line_user_id,
+                )
+            except Exception as exc:
+                # The expense-book schedule is already committed.  Keep the user-facing
+                # operation successful and let logs surface a temporary sync failure.
+                _LOGGER.error(
+                    "Itinerary schedule sync failed (%s)",
+                    type(exc).__name__,
+                )
         _db_function("delete_feature_draft")(
             line_group_id=line_group_id,
             line_user_id=line_user_id,

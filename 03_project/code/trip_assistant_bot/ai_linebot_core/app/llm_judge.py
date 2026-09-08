@@ -465,176 +465,6 @@ def _apply_clarifying_question_override(
     return normalized
 
 
-def _looks_like_itinerary_generation_request(text: str) -> bool:
-    latest_message = _latest_message_text(text)
-    compact_text = "".join(str(text or "").split())
-    compact_latest = "".join(latest_message.split())
-
-    explicit_request_markers = ("幫我", "幫我們", "請", "可以請", "麻煩", "@")
-    itinerary_markers = ("排行程", "排半日", "排一日", "規劃行程", "安排行程", "行程草案")
-
-    if any(marker in compact_latest for marker in itinerary_markers):
-        return True
-
-    return (
-        any(marker in compact_latest for marker in explicit_request_markers)
-        and "行程" in compact_text
-        and any(marker in compact_latest for marker in ("排", "規劃", "安排"))
-    )
-
-
-def _apply_itinerary_generation_override(
-    text: str,
-    normalized: dict[str, Any],
-) -> dict[str, Any]:
-    if not _looks_like_itinerary_generation_request(text):
-        return normalized
-
-    extracted_info = normalized.get("extracted_info") or {}
-    normalized["scenario_code"] = "劇本四"
-    normalized["scenario_name"] = "自動行程生成"
-    normalized["stage"] = "方案產生階段"
-    normalized["should_intervene"] = True
-    normalized["reply_trigger"] = "explicit_request"
-    normalized["intervention_type"] = "顯性介入"
-    normalized["requires_external_search"] = False
-    normalized["intermediate_reply"] = ""
-    normalized["confidence_score"] = max(
-        float(normalized.get("confidence_score", 0.0)),
-        0.85,
-    )
-
-    suggested_reply = str(normalized.get("suggested_reply") or "").strip()
-    if not suggested_reply or "反問" in suggested_reply:
-        normalized["suggested_reply"] = _default_suggested_reply_for_scenario("劇本四")
-
-    evidence = list(normalized.get("evidence") or [])
-    evidence.append("使用者明確要求 AI 協助產生行程草案，因此校正為自動行程生成情境。")
-    normalized["evidence"] = evidence
-
-    behavior = list(normalized.get("system_behavior") or [])
-    for item in ("生成初步行程", "整理時間順序", "提供行程草案"):
-        if item not in behavior:
-            behavior.append(item)
-    normalized["system_behavior"] = behavior
-    normalized["extracted_info"] = extracted_info
-    return normalized
-
-
-def _looks_like_direct_weather_question(text: str) -> bool:
-    latest_message = _latest_message_text(text)
-    normalized_text = latest_message.strip()
-    if not normalized_text:
-        return False
-
-    weather_terms = ("天氣", "下雨", "降雨", "氣溫", "溫度", "天候", "會不會熱", "會不會冷")
-    question_terms = ("嗎", "呢", "怎麼樣", "如何", "會不會", "有沒有", "?")
-    return any(term in normalized_text for term in weather_terms) and any(
-        term in normalized_text for term in question_terms
-    )
-
-
-def _apply_weather_query_override(
-    text: str,
-    normalized: dict[str, Any],
-) -> dict[str, Any]:
-    if not _looks_like_direct_weather_question(text):
-        return normalized
-
-    normalized["scenario_code"] = "劇本十七"
-    normalized["scenario_name"] = "戶外活動與天氣影響"
-    normalized["stage"] = "特殊情境"
-    normalized["should_intervene"] = True
-    normalized["reply_trigger"] = "functional_question"
-    normalized["intervention_type"] = "顯性介入"
-    normalized["requires_external_search"] = True
-    normalized["intermediate_reply"] = "我先幫你們看一下，等等整理給你們～"
-    normalized["confidence_score"] = max(
-        float(normalized.get("confidence_score", 0.0)),
-        0.85,
-    )
-
-    evidence = list(normalized.get("evidence") or [])
-    evidence.append("使用者直接詢問天氣資訊，屬於可執行的功能性查詢。")
-    normalized["evidence"] = evidence
-
-    behavior = list(normalized.get("system_behavior") or [])
-    for item in ("查詢天氣", "整理天氣資訊", "提供天氣建議"):
-        if item not in behavior:
-            behavior.append(item)
-    normalized["system_behavior"] = behavior
-
-    extracted_info = normalized.get("extracted_info") or {}
-    risk_info = extracted_info.get("risk_info") or []
-    if not isinstance(risk_info, list):
-        risk_info = [risk_info]
-    if "天氣" not in [str(item) for item in risk_info]:
-        risk_info.append("天氣")
-    extracted_info["risk_info"] = risk_info
-    extracted_info["need_type"] = extracted_info.get("need_type") or "補資訊"
-    normalized["extracted_info"] = extracted_info
-    return normalized
-
-
-def _looks_like_explicit_attraction_search_request(text: str) -> bool:
-    latest_message = _latest_message_text(text)
-    compact_latest = "".join(latest_message.split())
-    compact_text = "".join(str(text or "").split())
-
-    request_terms = ("幫我", "幫我們", "請", "可以請", "麻煩", "@")
-    search_terms = ("找", "推薦", "整理", "查")
-    attraction_terms = ("景點", "去哪裡", "哪裡玩", "可以玩", "走走")
-
-    return (
-        any(term in compact_latest for term in request_terms)
-        and any(term in compact_latest for term in search_terms)
-        and any(term in compact_text for term in attraction_terms)
-    )
-
-
-def _apply_attraction_search_override(
-    text: str,
-    normalized: dict[str, Any],
-) -> dict[str, Any]:
-    if not _looks_like_explicit_attraction_search_request(text):
-        return normalized
-
-    normalized["scenario_code"] = "劇本六"
-    normalized["scenario_name"] = "行程資訊補全"
-    normalized["stage"] = "方案產生階段"
-    normalized["should_intervene"] = True
-    normalized["reply_trigger"] = "explicit_request"
-    normalized["intervention_type"] = "顯性介入"
-    normalized["requires_external_search"] = True
-    normalized["intermediate_reply"] = "我先幫你們看一下，等等整理給你們～"
-    normalized["suggested_reply"] = ""
-    normalized["confidence_score"] = max(
-        float(normalized.get("confidence_score", 0.0)),
-        0.85,
-    )
-
-    evidence = list(normalized.get("evidence") or [])
-    evidence.append("使用者明確請 AI 協助查找景點，屬於需要外部資訊補全的查詢。")
-    normalized["evidence"] = evidence
-
-    behavior = list(normalized.get("system_behavior") or [])
-    for item in ("補充景點資訊", "提供推薦選項"):
-        if item not in behavior:
-            behavior.append(item)
-    normalized["system_behavior"] = behavior
-
-    extracted_info = normalized.get("extracted_info") or {}
-    activity_types = extracted_info.get("activity_types") or []
-    if not isinstance(activity_types, list):
-        activity_types = [activity_types]
-    if "景點" not in [str(item) for item in activity_types]:
-        activity_types.append("景點")
-    extracted_info["activity_types"] = activity_types
-    extracted_info["need_type"] = extracted_info.get("need_type") or "補資訊"
-    normalized["extracted_info"] = extracted_info
-    return normalized
-
-
 def _normalize_result(
     data: dict[str, Any],
     fallback_info: ExtractedInfo,
@@ -712,9 +542,6 @@ def _normalize_result(
         ),
         "extracted_info": merged_info,
     }
-    normalized = _apply_weather_query_override(source_text, normalized)
-    normalized = _apply_attraction_search_override(source_text, normalized)
-    normalized = _apply_itinerary_generation_override(source_text, normalized)
     normalized = _apply_clarifying_question_override(source_text, normalized)
     return AnalysisResult.from_dict(normalized)
 
@@ -782,6 +609,7 @@ extracted_info 欄位必須包含以下欄位：
 - budget
 - constraints
 - activity_types
+- transport
 - options
 - decision_state
 - risk_info
@@ -869,9 +697,43 @@ def _build_generation_messages(text: str, judgment: AnalysisResult) -> list[dict
 {output_instruction}
 
 請嚴格輸出 JSON，不要輸出 Markdown，不要加註解。
-輸出欄位只需要：
+輸出欄位必須包含：
 - intermediate_reply
 - suggested_reply
+- itinerary_draft
+
+itinerary_draft 規則：
+- 只有劇本四／自動行程生成，且回覆已形成具體可執行的行程時才輸出物件；其他情境輸出 null。
+- 不可捏造對話或查詢結果中不存在的店名、景點、座標、價格或交通時間。
+- 若只有概念性建議、資訊不足或仍需外部查詢，輸出 null。
+- itinerary_draft 格式：
+  {{
+    "title": "行程名稱",
+    "region": "地區或空字串",
+    "summary": "簡短摘要",
+    "duration": "半日遊／一日遊或空字串",
+    "estimated_budget": 整數或 null,
+    "currency": "TWD",
+    "spots": [
+      {{
+        "sequence": 1,
+        "name": "景點名稱",
+        "description": "安排說明",
+        "address": "已知地址或空字串",
+        "latitude": 已知數字或 null,
+        "longitude": 已知數字或 null
+      }}
+    ],
+    "transport": [
+      {{
+        "from_sequence": 1,
+        "to_sequence": 2,
+        "mode": "步行／捷運／公車等",
+        "estimated_minutes": 已知整數或 null,
+        "note": "補充或空字串"
+      }}
+    ]
+  }}
 
 回覆要求：
 - 必須結合目前群組對話脈絡，不可憑空捏造不存在的資訊。
@@ -935,6 +797,8 @@ def _merge_generated_reply(
         judgment.scenario_code,
         judgment.should_intervene,
     )
+    itinerary_draft = generated_reply.get("itinerary_draft")
+    merged["itinerary_draft"] = itinerary_draft if isinstance(itinerary_draft, dict) else None
     return AnalysisResult.from_dict(merged)
 
 
