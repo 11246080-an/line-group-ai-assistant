@@ -87,16 +87,27 @@ def _location_names_from_text(text: str) -> list[str]:
     return locations
 
 
+def _normalize_route_candidates(raw_values: Any) -> list[str]:
+    if not isinstance(raw_values, list):
+        raw_values = [raw_values]
+    locations: list[str] = []
+    for value in raw_values:
+        _append_unique_location(locations, value)
+    return locations
+
+
 def _valid_location_names(analysis_result: dict[str, Any], *, user_text: str = "") -> list[str]:
     extracted = analysis_result.get("extracted_info") or {}
-    raw_locations = extracted.get("location") or []
-    if not isinstance(raw_locations, list):
-        raw_locations = [raw_locations]
-    locations: list[str] = []
-    for value in raw_locations:
-        _append_unique_location(locations, value)
+    option_locations = _normalize_route_candidates(extracted.get("options") or [])
+    if len(option_locations) >= 2:
+        return option_locations
+
+    locations = _normalize_route_candidates(extracted.get("location") or [])
     for value in _location_names_from_text(user_text):
         _append_unique_location(locations, value)
+
+    if _has_route_signal(user_text) and any(term in user_text for term in ("從嘉義出發", "嘉義出發")):
+        locations = [name for name in locations if name not in {"嘉義", "嘉義市", "嘉義縣"}]
     return locations
 
 

@@ -37,6 +37,30 @@ class RouteOptimizationTests(unittest.TestCase):
         for name in ("A", "B", "C"):
             self.assertIn(name, reply)
 
+    def test_route_prefers_options_over_generic_locations(self):
+        lookup = {
+            "阿里山": RouteSpot("阿里山", 23.51, 120.80),
+            "奮起湖": RouteSpot("奮起湖", 23.50, 120.69),
+            "檜意森活村": RouteSpot("檜意森活村", 23.48, 120.45),
+            "嘉義": RouteSpot("嘉義市", 23.48, 120.45),
+        }
+        result = {
+            "scenario_code": "劇本五",
+            "extracted_info": {
+                "location": ["嘉義", "阿里山", "奮起湖", "檜意森活村"],
+                "options": ["阿里山", "奮起湖", "檜意森活村"],
+            },
+        }
+        reply = build_optimized_route_reply(
+            result,
+            user_text="那我們從嘉義出發，這幾個景點要怎麼走會比較順？",
+            geocoder=lookup.get,
+        )
+        self.assertIn("阿里山", reply)
+        self.assertIn("奮起湖", reply)
+        self.assertIn("檜意森活村", reply)
+        self.assertNotIn("嘉義市", reply)
+
     def test_reply_uses_all_resolved_locations(self):
         lookup = {"台北101": self.a, "故宮": self.b, "士林夜市": self.c}
         result = {"scenario_code": "劇本五", "extracted_info": {"location": list(lookup)}}
