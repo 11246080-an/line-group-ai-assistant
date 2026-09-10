@@ -2407,6 +2407,26 @@ def _judge_poll_proposal_with_ai(
     if not _is_llm_analysis_result(result):
         return None
 
+    extracted = result.get("extracted_info")
+    current_decision_state = ""
+    if isinstance(extracted, dict):
+        current_decision_state = str(extracted.get("decision_state") or "").strip()
+    result_text = "\n".join(
+        [
+            str(result.get("scenario_name") or ""),
+            str(result.get("reply_trigger") or ""),
+            str(result.get("suggested_reply") or ""),
+            current_decision_state,
+            "\n".join(str(item) for item in result.get("evidence") or []),
+            "\n".join(str(item) for item in result.get("system_behavior") or []),
+        ]
+    )
+    if not any(
+        signal in result_text
+        for signal in ("卡住", "選不出", "很難決定", "難決定", "意見不一致", "建議投票", "投票")
+    ):
+        return None
+
     result_payload = {
         "scenario_code": result.get("scenario_code"),
         "scenario_name": result.get("scenario_name"),
@@ -2421,8 +2441,9 @@ def _judge_poll_proposal_with_ai(
         system_prompt=(
             "你是 LINE 群組助理的投票需求判斷器。"
             "請根據最近群組對話判斷是否已經形成需要投票的決策卡住情境。"
-            "只有同一個議題中出現 2 到 6 個具體可投票選項，且群組明顯正在選擇、比較、"
-            "意見分歧或有人表示選不出來時，should_propose_poll 才能是 true。"
+            "只有同一個議題中出現 2 到 6 個具體可投票選項，且最近一句或主 AI 判斷已明確顯示"
+            "選不出來、卡住、很難決定、意見不一致、或正在要求投票時，should_propose_poll 才能是 true。"
+            "成員只是陸續提出偏好或新增選項時，不可以提早提案。"
             "一般聊天、單一偏好、資訊查詢、景點推薦、路線安排、天氣、記帳、發票都應是 false。"
             "options 只能列出最近對話中實際出現過的短選項，不可補新選項。"
             "question 請用自然中文整理成投票題目。"
@@ -3451,10 +3472,7 @@ def handle_feature_postback(event: PostbackEvent) -> None:
             line_user_id=line_user_id,
         )
         if result.handled:
-            if (
-                isinstance(result.data.get("anonymous_poll"), dict)
-                or result.data.get("vote_proposal_declined") is True
-            ):
+            if isinstance(result.data.get("anonymous_poll"), dict):
                 _clear_discussion_after_poll(_get_conversation_key(event))
             _reply_feature_result(event, result)
             return
