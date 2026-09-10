@@ -1271,6 +1271,15 @@ def get_vote_results(*, poll_id: Any) -> list[dict]:
     return list(get_db().votes.aggregate(pipeline))
 
 
+def close_active_vote_session(*, line_group_id: str, now: datetime) -> dict | None:
+    """手動提前關閉群組目前進行中的投票，並回傳被關閉的投票。"""
+    return get_db().vote_sessions.find_one_and_update(
+        {"line_group_id": line_group_id, "status": "active"},
+        {"$set": {"status": "closed", "closed_at": now, "closed_reason": "manual"}},
+        return_document=ReturnDocument.AFTER,
+    )
+
+
 def claim_due_vote_sessions(*, now: datetime, limit: int = 50) -> list[dict]:
     """
     原子地把到期（deadline_at <= now）且仍 active 的投票關閉，設定

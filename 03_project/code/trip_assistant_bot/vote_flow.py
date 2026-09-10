@@ -23,6 +23,7 @@ from privacy_redaction import redact_sensitive_identifiers
 
 
 _POLL_PREFIXES = ("建立投票", "新增投票", "發起投票")
+_POLL_CLOSE_COMMANDS = ("結束投票", "截止投票", "關閉投票")
 _DEADLINE_RE = re.compile(r"(?:限時|截止)\s*(\d{1,3})\s*(分鐘|小時|天)")
 _NORMAL_MINUTES = max(1, int(os.getenv("AUTO_POLL_NORMAL_MINUTES", "10")))
 _URGENT_MINUTES = max(1, int(os.getenv("AUTO_POLL_URGENT_MINUTES", "3")))
@@ -467,6 +468,35 @@ def _confirm_vote_proposal(
 
 
 def handle_vote_text(text: str, *, line_group_id: str, line_user_id: str) -> FlowResult:
+    normalized = text.strip()
+    if normalized in _POLL_CLOSE_COMMANDS:
+        required = (
+            "close_active_vote_session",
+            "get_vote_results",
+            "mark_vote_result_announced",
+        )
+        if not database_contract_ready(required):
+            return database_unavailable_result()
+        try:
+            poll = _db_function("close_active_vote_session")(
+                line_group_id=line_group_id,
+                now=_mongo_utc_now(),
+            )
+            if not isinstance(poll, dict):
+                return FlowResult(True, "目前沒有進行中的投票。")
+            poll_id = _poll_id(poll)
+            results = list(_db_function("get_vote_results")(poll_id=poll_id) or [])
+            _db_function("mark_vote_result_announced")(
+                poll_id=poll_id,
+                announced_at=_mongo_utc_now(),
+            )
+            return FlowResult(True, "投票已提前結束。\n\n" + format_poll(poll, results))
+        except DatabaseFeatureUnavailable:
+            return database_unavailable_result()
+        except Exception as exc:
+            _LOGGER.exception("Vote manual close failed (%s)", type(exc).__name__)
+            return FlowResult(True, "結束投票時發生錯誤，請稍後再試。")
+
     parsed = parse_poll_command(text)
     if parsed is None:
         return FlowResult(False)
