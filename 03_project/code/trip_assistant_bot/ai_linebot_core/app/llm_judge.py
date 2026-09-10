@@ -601,6 +601,8 @@ reply_trigger 必須是以下其中一種：
 - 若使用者是在問「有沒有適合 4 個人一起吃的店」、「學校附近有沒有預算 400 內的餐廳」這類已具備多個限制條件的問題，should_intervene 應為 true，requires_external_search 應為 true。
 - 若使用者是直接詢問某個明確地點附近的餐廳、咖啡廳、美食或景點，例如「北車附近有什麼可以吃」「西門町附近有沒有咖啡廳」，即使尚未提供時間、預算或人數，也應視為 functional_question，因為這已經是可執行的查詢需求。
 - 若對話已包含明確地點，且問題本身是在詢問「附近有什麼」「有沒有推薦」「有沒有某種類型的店」這類內容，requires_external_search 應為 true，不應判為一般聊天。
+- 若同一個決策議題中，已出現 2 到 6 個明確候選選項，且不同成員各自支持不同選項，後續又出現選不出來、卡住、很難決定、意見不一致、要不要投票等狀態，應判定為劇本九「投票決策」，reply_trigger 應為 stuck_discussion 或 functional_question，should_intervene 應為 true，requires_external_search 應為 false。
+- 投票決策時，extracted_info.options 必須延續整段最近對話中已出現的候選選項，不可因為最後一句沒有重複選項就清空。
 
 extracted_info 欄位必須包含以下欄位：
 - time

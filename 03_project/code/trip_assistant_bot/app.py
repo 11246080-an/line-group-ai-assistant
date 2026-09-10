@@ -189,6 +189,10 @@ OPENAI_LOCATION_JUDGE_MODEL = os.getenv(
     "OPENAI_LOCATION_JUDGE_MODEL",
     OPENAI_TOPIC_JUDGE_MODEL,
 )
+OPENAI_POLL_JUDGE_MODEL = os.getenv(
+    "OPENAI_POLL_JUDGE_MODEL",
+    OPENAI_TOPIC_JUDGE_MODEL,
+)
 TOPIC_SWITCH_SIMILARITY_THRESHOLD = float(
     os.getenv("TOPIC_SWITCH_SIMILARITY_THRESHOLD", "0.72")
 )
@@ -2378,6 +2382,77 @@ def _is_semantic_poll_decision(
     return _has_multi_member_option_support(recent_messages, options)
 
 
+def _clean_ai_poll_options(raw_options: Any, recent_messages: list[str]) -> list[str]:
+    if not isinstance(raw_options, list):
+        return []
+    recent_text = _recent_message_body_text(recent_messages)
+    compact_recent_text = "".join(recent_text.split())
+    options: list[str] = []
+    for value in raw_options:
+        label = redact_sensitive_identifiers(str(value).strip())[:80]
+        compact_label = "".join(label.split())
+        if not compact_label:
+            continue
+        if compact_label not in compact_recent_text:
+            continue
+        if label not in options:
+            options.append(label)
+    return options[:6]
+
+
+def _judge_poll_proposal_with_ai(
+    result: dict[str, Any],
+    recent_messages: list[str],
+) -> dict[str, Any] | None:
+    if not _is_llm_analysis_result(result):
+        return None
+
+    result_payload = {
+        "scenario_code": result.get("scenario_code"),
+        "scenario_name": result.get("scenario_name"),
+        "reply_trigger": result.get("reply_trigger"),
+        "should_intervene": result.get("should_intervene"),
+        "confidence_score": result.get("confidence_score"),
+        "extracted_info": result.get("extracted_info"),
+    }
+    judged = _call_small_json_model(
+        model=OPENAI_POLL_JUDGE_MODEL,
+        purpose="Poll proposal judge",
+        system_prompt=(
+            "你是 LINE 群組助理的投票需求判斷器。"
+            "請根據最近群組對話判斷是否已經形成需要投票的決策卡住情境。"
+            "只有同一個議題中出現 2 到 6 個具體可投票選項，且群組明顯正在選擇、比較、"
+            "意見分歧或有人表示選不出來時，should_propose_poll 才能是 true。"
+            "一般聊天、單一偏好、資訊查詢、景點推薦、路線安排、天氣、記帳、發票都應是 false。"
+            "options 只能列出最近對話中實際出現過的短選項，不可補新選項。"
+            "question 請用自然中文整理成投票題目。"
+            "只輸出 JSON，格式必須是 "
+            "{\"should_propose_poll\": true/false, \"question\": \"...\", \"options\": [\"...\"]}。"
+        ),
+        user_prompt=json.dumps(
+            {
+                "recent_messages": recent_messages[-8:],
+                "main_ai_result": result_payload,
+            },
+            ensure_ascii=False,
+        ),
+    )
+    if not isinstance(judged, dict):
+        return None
+    if not bool(judged.get("should_propose_poll")):
+        return None
+
+    options = _clean_ai_poll_options(judged.get("options"), recent_messages)
+    if not _has_multi_member_option_support(recent_messages, options):
+        return None
+
+    question = redact_sensitive_identifiers(str(judged.get("question") or "").strip())[:200]
+    return {
+        "question": question or _build_pending_vote_question(result, ""),
+        "options": options,
+    }
+
+
 def _has_urgent_poll_signal(messages: list[str]) -> bool:
     text = "\n".join(messages[-5:])
     return any(
@@ -2425,28 +2500,40 @@ def _try_propose_automatic_poll(
 ) -> bool:
     if not ENABLE_TRIP_MANAGEMENT_FEATURES or not line_group_id:
         return False
+    if not _is_llm_analysis_result(result):
+        # LLM 失敗時的舊備援分類含關鍵字計分，不用它自動建立投票。
+        return False
     scenario_code = str(result.get("scenario_code") or "").strip()
     scenario_name = str(result.get("scenario_name") or "").strip()
     candidate_options = _filter_poll_options_to_recent_messages(
         _clean_auto_poll_options(result),
         recent_messages,
     )
+    ai_poll_judgment: dict[str, Any] | None = None
     is_vote_scenario = scenario_code == "劇本九" or scenario_name == "投票決策"
     if not is_vote_scenario and not _is_semantic_poll_decision(
         result,
         recent_messages,
         candidate_options,
     ):
-        return False
-    if not _is_llm_analysis_result(result):
-        # LLM 失敗時的舊備援分類含關鍵字計分，不用它自動建立投票。
-        return False
+        ai_poll_judgment = _judge_poll_proposal_with_ai(result, recent_messages)
+        if ai_poll_judgment is None:
+            return False
+        candidate_options = list(ai_poll_judgment["options"])
+    elif len(candidate_options) < 2:
+        ai_poll_judgment = _judge_poll_proposal_with_ai(result, recent_messages)
+        if ai_poll_judgment is not None:
+            candidate_options = list(ai_poll_judgment["options"])
     participants = _recent_discussion_participants(conversation_key)
     if len(candidate_options) < 2 or len(participants) < 2:
         return False
-    question = _build_pending_vote_question(
-        result,
-        str(result.get("suggested_reply") or ""),
+    question = (
+        str(ai_poll_judgment.get("question") or "").strip()
+        if ai_poll_judgment
+        else _build_pending_vote_question(
+            result,
+            str(result.get("suggested_reply") or ""),
+        )
     )
     fingerprint_source = json.dumps(
         {"question": question, "options": candidate_options},
