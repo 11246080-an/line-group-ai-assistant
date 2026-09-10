@@ -377,8 +377,6 @@ def create_vote_proposal(
                 if user_id
             }
         )
-        if len(eligible_keys) < 2:
-            return FlowResult(False)
 
         proposal_id = secrets.token_urlsafe(12)
         payload = {
@@ -455,7 +453,7 @@ def _confirm_vote_proposal(
             created_by_key=creator_key,
             anonymity_salt=anonymity_salt,
             eligible_keys=[str(value) for value in proposal.get("eligible_voter_keys") or []],
-            close_when_all_eligible=True,
+            close_when_all_eligible=len(proposal.get("eligible_voter_keys") or []) >= 2,
             auto_created=True,
             discussion_fingerprint=str(proposal.get("discussion_fingerprint") or ""),
         )

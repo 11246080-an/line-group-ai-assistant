@@ -2443,7 +2443,7 @@ def _judge_poll_proposal_with_ai(
         return None
 
     options = _clean_ai_poll_options(judged.get("options"), recent_messages)
-    if not _has_multi_member_option_support(recent_messages, options):
+    if not 2 <= len(options) <= 6:
         return None
 
     question = redact_sensitive_identifiers(str(judged.get("question") or "").strip())[:200]
@@ -2510,7 +2510,22 @@ def _try_propose_automatic_poll(
         recent_messages,
     )
     ai_poll_judgment: dict[str, Any] | None = None
-    is_vote_scenario = scenario_code == "劇本九" or scenario_name == "投票決策"
+    suggested_reply = str(result.get("suggested_reply") or "")
+    result_text = "\n".join(
+        [
+            scenario_name,
+            suggested_reply,
+            "\n".join(str(item) for item in result.get("system_behavior") or []),
+        ]
+    )
+    is_vote_scenario = (
+        scenario_code == "劇本九"
+        or scenario_name == "投票決策"
+        or (
+            scenario_code == "劇本七"
+            and "投票" in result_text
+        )
+    )
     if not is_vote_scenario and not _is_semantic_poll_decision(
         result,
         recent_messages,
@@ -2525,7 +2540,7 @@ def _try_propose_automatic_poll(
         if ai_poll_judgment is not None:
             candidate_options = list(ai_poll_judgment["options"])
     participants = _recent_discussion_participants(conversation_key)
-    if len(candidate_options) < 2 or len(participants) < 2:
+    if len(candidate_options) < 2:
         return False
     question = (
         str(ai_poll_judgment.get("question") or "").strip()
