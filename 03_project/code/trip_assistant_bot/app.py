@@ -1473,35 +1473,6 @@ def _looks_like_current_location_request(user_text: str) -> bool:
     )
 
 
-TEXT_LOCATION_LOOKUP_TERMS = (
-    "景點",
-    "活動",
-    "展覽",
-    "節慶",
-    "市集",
-    "觀光",
-    "旅遊",
-    "可以玩",
-)
-TEXT_LOCATION_REQUEST_TERMS = (
-    "推薦",
-    "查",
-    "查詢",
-    "搜尋",
-    "找",
-    "有什麼",
-    "有哪些",
-    "哪裡",
-    "哪個",
-    "可以去哪",
-    "可以去",
-    "附近有",
-    "幫我看",
-    "幫我找",
-    "介紹",
-)
-
-
 def _infer_text_location_from_user_text(user_text: str) -> str:
     normalized_text = str(user_text or "").strip()
     if not normalized_text:
@@ -1526,22 +1497,6 @@ def _infer_text_activity_types_from_user_text(user_text: str) -> list[str]:
     return inferred_types
 
 
-def _looks_like_text_location_lookup(user_text: str) -> bool:
-    normalized_text = str(user_text or "").strip()
-    if not normalized_text:
-        return False
-    if _has_weather_request_signal(normalized_text, {}):
-        return False
-    if _looks_like_current_location_request(normalized_text):
-        return False
-    if not any(term in normalized_text for term in TEXT_LOCATION_REQUEST_TERMS):
-        return False
-    return bool(
-        _infer_text_location_from_user_text(normalized_text)
-        and any(term in normalized_text for term in TEXT_LOCATION_LOOKUP_TERMS)
-    )
-
-
 def _extract_text_location_query_payload(
     user_text: str,
     analysis_result: dict[str, Any],
@@ -1549,12 +1504,20 @@ def _extract_text_location_query_payload(
     if _has_weather_request_signal(user_text, analysis_result):
         return None
 
-    has_ai_text_location_signal = bool(
-        analysis_result.get("requires_external_search")
-        and analysis_result.get("should_intervene")
-    )
-    has_direct_text_location_signal = _looks_like_text_location_lookup(user_text)
-    if not has_ai_text_location_signal and not has_direct_text_location_signal:
+    if not bool(analysis_result.get("requires_external_search")):
+        return None
+    if not bool(analysis_result.get("should_intervene")):
+        return None
+
+    try:
+        confidence_score = float(analysis_result.get("confidence_score", 0))
+    except (TypeError, ValueError):
+        confidence_score = 0.0
+    if confidence_score < MIN_INTERVENTION_CONFIDENCE:
+        return None
+
+    reply_trigger = str(analysis_result.get("reply_trigger") or "").strip()
+    if reply_trigger not in {"functional_question", "explicit_request"}:
         return None
 
     extracted_info = analysis_result.get("extracted_info") or {}

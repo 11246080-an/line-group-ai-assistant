@@ -16,6 +16,7 @@ except ImportError:  # pragma: no cover - production requirements include reques
 GOOGLE_PLACES_TEXT_SEARCH_URL = "https://places.googleapis.com/v1/places:searchText"
 MAX_EXACT_SPOTS = 10
 EARTH_RADIUS_KM = 6371.0088
+MIN_ROUTE_INTERVENTION_CONFIDENCE = 0.75
 ROUTE_SIGNAL_KEYWORDS = (
     "路線最佳化",
     "路線優化",
@@ -113,9 +114,20 @@ def _valid_location_names(analysis_result: dict[str, Any], *, user_text: str = "
 
 def should_optimize_route(analysis_result: dict[str, Any], *, user_text: str = "") -> bool:
     scenario_code = str(analysis_result.get("scenario_code") or "").strip()
+    reply_trigger = str(analysis_result.get("reply_trigger") or "").strip()
+    if not bool(analysis_result.get("should_intervene")):
+        return False
+    try:
+        confidence_score = float(analysis_result.get("confidence_score", 0))
+    except (TypeError, ValueError):
+        confidence_score = 0.0
+    if confidence_score < MIN_ROUTE_INTERVENTION_CONFIDENCE:
+        return False
+    if reply_trigger not in {"functional_question", "explicit_request"}:
+        return False
     if len(_valid_location_names(analysis_result, user_text=user_text)) < 2:
         return False
-    return scenario_code == "劇本五" or _has_route_signal(user_text)
+    return scenario_code == "劇本五"
 
 
 def haversine_km(first: RouteSpot, second: RouteSpot) -> float:

@@ -16,18 +16,36 @@ class RouteOptimizationTests(unittest.TestCase):
         self.assertIn([spot.name for spot in optimized], (["A", "B", "C"], ["C", "B", "A"]))
 
     def test_only_scenario_five_with_two_locations_runs(self):
-        result = {"scenario_code": "劇本五", "extracted_info": {"location": ["台北101", "故宮"]}}
+        result = {
+            "scenario_code": "劇本五",
+            "should_intervene": True,
+            "reply_trigger": "explicit_request",
+            "confidence_score": 0.9,
+            "extracted_info": {"location": ["台北101", "故宮"]},
+        }
         self.assertTrue(should_optimize_route(result))
         result["scenario_code"] = "劇本四"
         self.assertFalse(should_optimize_route(result))
 
-    def test_route_signal_can_trigger_without_scenario_five(self):
-        result = {"scenario_code": "劇本四", "extracted_info": {"location": ["台北101", "故宮"]}}
-        self.assertTrue(should_optimize_route(result, user_text="台北101、故宮怎麼排比較順"))
+    def test_route_signal_does_not_trigger_without_ai_route_scenario(self):
+        result = {
+            "scenario_code": "劇本四",
+            "should_intervene": True,
+            "reply_trigger": "explicit_request",
+            "confidence_score": 0.9,
+            "extracted_info": {"location": ["台北101", "故宮"]},
+        }
+        self.assertFalse(should_optimize_route(result, user_text="台北101、故宮怎麼排比較順"))
 
     def test_direct_text_locations_can_trigger_route_optimization(self):
         lookup = {"阿里山": self.a, "奮起湖": self.b, "檜意森活村": self.c}
-        result = {"scenario_code": "no_reply", "extracted_info": {"location": []}}
+        result = {
+            "scenario_code": "劇本五",
+            "should_intervene": True,
+            "reply_trigger": "explicit_request",
+            "confidence_score": 0.9,
+            "extracted_info": {"location": []},
+        }
         reply = build_optimized_route_reply(
             result,
             user_text="阿里山、奮起湖、檜意森活村怎麼排比較順",
@@ -46,6 +64,9 @@ class RouteOptimizationTests(unittest.TestCase):
         }
         result = {
             "scenario_code": "劇本五",
+            "should_intervene": True,
+            "reply_trigger": "explicit_request",
+            "confidence_score": 0.9,
             "extracted_info": {
                 "location": ["嘉義", "阿里山", "奮起湖", "檜意森活村"],
                 "options": ["阿里山", "奮起湖", "檜意森活村"],
@@ -63,7 +84,13 @@ class RouteOptimizationTests(unittest.TestCase):
 
     def test_reply_uses_all_resolved_locations(self):
         lookup = {"台北101": self.a, "故宮": self.b, "士林夜市": self.c}
-        result = {"scenario_code": "劇本五", "extracted_info": {"location": list(lookup)}}
+        result = {
+            "scenario_code": "劇本五",
+            "should_intervene": True,
+            "reply_trigger": "explicit_request",
+            "confidence_score": 0.9,
+            "extracted_info": {"location": list(lookup)},
+        }
         reply = build_optimized_route_reply(result, geocoder=lookup.get)
         self.assertIn("1.", reply)
         self.assertIn("Google 地圖路線", reply)
