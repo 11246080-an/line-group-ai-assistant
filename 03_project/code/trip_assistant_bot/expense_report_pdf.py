@@ -1,16 +1,17 @@
 """Temporary, privacy-safe PDF exports for expense reports.
 
-The module keeps only a minimized redacted snapshot in process memory.  It does
-not write PDFs, invoice images, or report metadata to MongoDB or local storage.
-Download tokens are random bearer tokens and expire automatically.
+The module always keeps a minimized redacted snapshot in process memory and can
+also use the optional DB download-session contract when it becomes available.
+Download tokens are random bearer tokens; only their hashes are persisted.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from html import escape
 import hashlib
+import importlib
 import io
 import os
 import re
@@ -25,7 +26,7 @@ from privacy_redaction import redact_sensitive_identifiers
 
 EXPENSE_REPORT_PDF_TTL_SECONDS = max(
     300,
-    int(os.getenv("EXPENSE_REPORT_PDF_TTL_SECONDS", "3600")),
+    int(os.getenv("EXPENSE_REPORT_PDF_TTL_SECONDS", "86400")),
 )
 EXPENSE_REPORT_PDF_MAX_SESSIONS = max(
     10,
@@ -38,6 +39,7 @@ class ExpenseReportSnapshot:
     book: dict[str, Any]
     expenses: tuple[dict[str, Any], ...]
     created_at: datetime
+    expires_at: datetime
     expires_at_monotonic: float
 
 
@@ -95,6 +97,21 @@ def _session_key(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
+def _optional_report_db_function(name: str):
+    module_name = (
+        "in_memory_feature_db"
+        if os.getenv("USE_IN_MEMORY_FEATURE_DB", "false").strip().casefold()
+        in {"1", "true", "yes", "on"}
+        else "db"
+    )
+    try:
+        module = importlib.import_module(module_name)
+    except Exception:
+        return None
+    function = getattr(module, name, None)
+    return function if callable(function) else None
+
+
 def _prune_sessions_locked(now_monotonic: float) -> None:
     for key, snapshot in list(_sessions.items()):
         if snapshot.expires_at_monotonic <= now_monotonic:
@@ -116,15 +133,35 @@ def create_expense_report_session(book: dict[str, Any], expenses: list[dict[str,
         for expense in expenses
         if isinstance(expense, dict) and expense.get("status", "confirmed") == "confirmed"
     ]
+    created_at = datetime.now(timezone.utc)
+    expires_at = created_at + timedelta(seconds=EXPENSE_REPORT_PDF_TTL_SECONDS)
     snapshot = ExpenseReportSnapshot(
         book=_project_book(book if isinstance(book, dict) else {}),
         expenses=tuple(confirmed),
-        created_at=datetime.now(timezone.utc),
+        created_at=created_at,
+        expires_at=expires_at,
         expires_at_monotonic=now_monotonic + EXPENSE_REPORT_PDF_TTL_SECONDS,
     )
+    token_hash = _session_key(token)
     with _sessions_lock:
         _prune_sessions_locked(now_monotonic)
-        _sessions[_session_key(token)] = snapshot
+        _sessions[token_hash] = snapshot
+    save_download = _optional_report_db_function("save_expense_report_download")
+    if save_download is not None:
+        try:
+            save_download(
+                token_hash=token_hash,
+                snapshot={
+                    "book": snapshot.book,
+                    "expenses": list(snapshot.expenses),
+                    "created_at": snapshot.created_at,
+                    "expires_at": snapshot.expires_at,
+                },
+                expires_at=snapshot.expires_at,
+            )
+        except Exception:
+            # In-memory download remains usable while the optional DB store is down.
+            pass
     return token
 
 
@@ -134,9 +171,48 @@ def get_expense_report_session(token: str) -> ExpenseReportSnapshot | None:
     if not re.fullmatch(r"[A-Za-z0-9_-]{32,128}", normalized):
         return None
     now_monotonic = time.monotonic()
+    token_hash = _session_key(normalized)
     with _sessions_lock:
         _prune_sessions_locked(now_monotonic)
-        return _sessions.get(_session_key(normalized))
+        snapshot = _sessions.get(token_hash)
+    if snapshot is not None:
+        return snapshot
+
+    get_download = _optional_report_db_function("get_expense_report_download")
+    if get_download is None:
+        return None
+    now = datetime.now(timezone.utc)
+    try:
+        document = get_download(token_hash=token_hash, now=now)
+    except Exception:
+        return None
+    if not isinstance(document, dict):
+        return None
+    stored = document.get("snapshot") if isinstance(document.get("snapshot"), dict) else document
+    expires_at = stored.get("expires_at")
+    if not isinstance(expires_at, datetime):
+        return None
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    remaining_seconds = (expires_at - now).total_seconds()
+    if remaining_seconds <= 0:
+        return None
+    created_at = stored.get("created_at")
+    if not isinstance(created_at, datetime):
+        created_at = now
+    elif created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=timezone.utc)
+    restored = ExpenseReportSnapshot(
+        book=dict(stored.get("book") or {}),
+        expenses=tuple(item for item in stored.get("expenses") or [] if isinstance(item, dict)),
+        created_at=created_at,
+        expires_at=expires_at,
+        expires_at_monotonic=now_monotonic + remaining_seconds,
+    )
+    with _sessions_lock:
+        _prune_sessions_locked(now_monotonic)
+        _sessions[token_hash] = restored
+    return restored
 
 
 def _report_timezone(snapshot: ExpenseReportSnapshot) -> ZoneInfo:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from difflib import SequenceMatcher
 import hashlib
 import json
 import logging
@@ -861,6 +862,227 @@ def _google_place_to_result(place: dict[str, Any], latitude: float, longitude: f
         "maps_url": str(place.get("googleMapsUri") or "").strip(),
         "latitude": place_latitude,
         "longitude": place_longitude,
+    }
+
+
+def _place_name_key(value: Any) -> str:
+    return re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", str(value or "").casefold().replace("臺", "台"))
+
+
+def _place_match_score(target_name: str, candidate: dict[str, Any], region: str) -> float:
+    target_key = _place_name_key(target_name)
+    candidate_key = _place_name_key(candidate.get("name"))
+    if not target_key or not candidate_key:
+        return 0.0
+    if target_key == candidate_key:
+        score = 1.0
+    elif min(len(target_key), len(candidate_key)) >= 3 and (
+        target_key in candidate_key or candidate_key in target_key
+    ):
+        score = 0.9
+    else:
+        score = SequenceMatcher(None, target_key, candidate_key).ratio()
+
+    region_key = _place_name_key(region)
+    location_blob = _place_name_key(
+        " ".join(
+            str(candidate.get(key) or "")
+            for key in ("city", "town", "address", "subtitle")
+        )
+    )
+    if region_key and region_key in location_blob:
+        score = min(1.0, score + 0.05)
+    return score
+
+
+def _has_valid_coordinates(item: dict[str, Any]) -> bool:
+    latitude = _coerce_float(item.get("latitude") if item.get("latitude") is not None else item.get("lat"))
+    longitude = _coerce_float(item.get("longitude") if item.get("longitude") is not None else item.get("lng"))
+    return (
+        latitude is not None
+        and longitude is not None
+        and -90 <= latitude <= 90
+        and -180 <= longitude <= 180
+        and (latitude != 0 or longitude != 0)
+    )
+
+
+def _best_coordinate_candidate(
+    target_name: str,
+    candidates: list[dict[str, Any]],
+    *,
+    region: str,
+    minimum_score: float,
+) -> dict[str, Any] | None:
+    ranked = sorted(
+        (
+            (_place_match_score(target_name, candidate, region), candidate)
+            for candidate in candidates
+            if isinstance(candidate, dict) and _has_valid_coordinates(candidate)
+        ),
+        key=lambda pair: pair[0],
+        reverse=True,
+    )
+    if not ranked or ranked[0][0] < minimum_score:
+        return None
+    return ranked[0][1]
+
+
+def _tourism_coordinate_candidate(name: str, region: str) -> dict[str, Any] | None:
+    cities = _normalize_tourism_cities(region, region)
+    city_options: list[str | None] = cities or [None]
+    candidates: list[dict[str, Any]] = []
+    for city in city_options:
+        try:
+            matched = get_tourism_attractions(city=city, keyword=name, limit=20)
+            if not matched and city:
+                matched = get_tourism_attractions(city=city, limit=300)
+        except Exception as exc:
+            _log_external_failure("Itinerary tourism coordinate lookup", exc)
+            continue
+        candidates.extend(item for item in matched if isinstance(item, dict))
+    return _best_coordinate_candidate(
+        name,
+        candidates,
+        region=region,
+        minimum_score=0.78,
+    )
+
+
+def _google_coordinate_candidates(
+    *,
+    name: str,
+    address: str,
+    region: str,
+    line_group_id: str,
+) -> list[dict[str, Any]]:
+    api_key = os.getenv("GOOGLE_PLACES_API_KEY", "").strip()
+    if not api_key:
+        return []
+    text_query = " ".join(part for part in (name, address, region, "台灣") if str(part).strip())
+    cache_key = hashlib.sha256(text_query.casefold().encode("utf-8")).hexdigest()
+    try:
+        cached = get_api_query_cache("itinerary_spot_geocode", line_group_id, cache_key)
+    except Exception:
+        cached = None
+    if isinstance(cached, list):
+        return [item for item in cached if isinstance(item, dict)]
+
+    headers = {
+        "Content-Type": "application/json",
+        "X-Goog-Api-Key": api_key,
+        "X-Goog-FieldMask": ",".join(
+            (
+                "places.displayName",
+                "places.formattedAddress",
+                "places.location",
+            )
+        ),
+    }
+    try:
+        response = requests.post(
+            GOOGLE_PLACES_TEXT_SEARCH_URL,
+            headers=headers,
+            json={
+                "textQuery": text_query,
+                "pageSize": 5,
+                "languageCode": "zh-TW",
+                "regionCode": "TW",
+            },
+            timeout=LOCATION_RECOMMENDATION_API_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+        raw_places = response.json().get("places") or []
+    except Exception as exc:
+        _log_external_failure("Itinerary Google Places coordinate lookup", exc)
+        return []
+
+    candidates = []
+    for place in raw_places:
+        if not isinstance(place, dict):
+            continue
+        location = place.get("location") or {}
+        display_name = place.get("displayName") or {}
+        candidates.append(
+            {
+                "name": str(display_name.get("text") or "").strip(),
+                "address": str(place.get("formattedAddress") or "").strip(),
+                "latitude": _coerce_float(location.get("latitude")),
+                "longitude": _coerce_float(location.get("longitude")),
+                "provider": "google_places",
+            }
+        )
+    try:
+        save_api_query_cache(
+            "itinerary_spot_geocode",
+            line_group_id,
+            cache_key,
+            candidates,
+            query_params={"name": name, "address": address, "region": region},
+            ttl_seconds=GOOGLE_PLACES_CACHE_TTL_SECONDS,
+        )
+    except Exception:
+        pass
+    return candidates
+
+
+def resolve_itinerary_spot_coordinates(
+    spots: list[dict[str, Any]],
+    *,
+    region: str = "",
+    line_group_id: str = "",
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Resolve draft spot coordinates without asking the LLM to invent them."""
+    resolved_spots: list[dict[str, Any]] = []
+    unresolved_names: list[str] = []
+    tourism_matches = 0
+    google_matches = 0
+    for raw_spot in spots:
+        spot = dict(raw_spot) if isinstance(raw_spot, dict) else {}
+        name = str(spot.get("name") or "").strip()
+        if _has_valid_coordinates(spot):
+            resolved_spots.append(spot)
+            continue
+
+        candidate = _tourism_coordinate_candidate(name, region) if name else None
+        source = "tourism_open_data"
+        if candidate is None and name:
+            google_candidates = _google_coordinate_candidates(
+                name=name,
+                address=str(spot.get("address") or "").strip(),
+                region=region,
+                line_group_id=line_group_id,
+            )
+            candidate = _best_coordinate_candidate(
+                name,
+                google_candidates,
+                region=region,
+                minimum_score=0.72,
+            )
+            source = "google_places"
+
+        if candidate is None:
+            unresolved_names.append(name or "未命名景點")
+            resolved_spots.append(spot)
+            continue
+
+        spot["latitude"] = _coerce_float(candidate.get("latitude"))
+        spot["longitude"] = _coerce_float(candidate.get("longitude"))
+        if not str(spot.get("address") or "").strip():
+            spot["address"] = str(candidate.get("address") or "").strip()
+        spot["coordinate_source"] = source
+        if source == "tourism_open_data":
+            tourism_matches += 1
+        else:
+            google_matches += 1
+        resolved_spots.append(spot)
+
+    return resolved_spots, {
+        "total": len(resolved_spots),
+        "resolved": len(resolved_spots) - len(unresolved_names),
+        "tourism_matches": tourism_matches,
+        "google_matches": google_matches,
+        "unresolved_names": unresolved_names,
     }
 
 
@@ -2059,6 +2281,15 @@ def _normalize_result_item(item: Any, origin_latitude: float, origin_longitude: 
 
 def _log_external_failure(operation: str, exc: Exception) -> None:
     """Log enough for operations without leaking requests, locations, or responses."""
+    status_code = getattr(getattr(exc, "response", None), "status_code", None)
+    if status_code is not None:
+        LOGGER.warning(
+            "%s failed (%s, HTTP %s)",
+            operation,
+            type(exc).__name__,
+            status_code,
+        )
+        return
     LOGGER.warning("%s failed (%s)", operation, type(exc).__name__)
 
 

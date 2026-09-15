@@ -142,6 +142,8 @@ class ItineraryDraft:
     duration: str = ""
     estimated_budget: int | None = None
     currency: str = "TWD"
+    itinerary_type: str = ""
+    best_for: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -153,6 +155,8 @@ class ItineraryDraft:
             "duration": self.duration,
             "estimated_budget": self.estimated_budget,
             "currency": self.currency,
+            "type": self.itinerary_type,
+            "best_for": self.best_for,
         }
 
     @classmethod
@@ -192,6 +196,13 @@ class ItineraryDraft:
             duration=str(data.get("duration") or "").strip(),
             estimated_budget=_optional_int(data.get("estimated_budget")),
             currency=str(data.get("currency") or "TWD").strip().upper() or "TWD",
+            itinerary_type=(
+                str(data.get("type") or "").strip()
+                if str(data.get("type") or "").strip()
+                in {"山城", "都市", "河岸", "自然", "美食", "文化", "海線"}
+                else ""
+            ),
+            best_for=str(data.get("best_for") or data.get("bestFor") or "").strip()[:160],
         )
 
 

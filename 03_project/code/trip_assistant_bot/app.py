@@ -113,6 +113,7 @@ from expense_flow import (
     handle_expense_text,
 )
 from expense_report_pdf import (
+    EXPENSE_REPORT_PDF_TTL_SECONDS,
     build_expense_report_pdf,
     create_expense_report_session,
     expense_report_filename,
@@ -187,10 +188,6 @@ OPENAI_EMBEDDING_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-s
 OPENAI_TOPIC_JUDGE_MODEL = os.getenv("OPENAI_TOPIC_JUDGE_MODEL", "gpt-4.1-mini")
 OPENAI_LOCATION_JUDGE_MODEL = os.getenv(
     "OPENAI_LOCATION_JUDGE_MODEL",
-    OPENAI_TOPIC_JUDGE_MODEL,
-)
-OPENAI_POLL_JUDGE_MODEL = os.getenv(
-    "OPENAI_POLL_JUDGE_MODEL",
     OPENAI_TOPIC_JUDGE_MODEL,
 )
 TOPIC_SWITCH_SIMILARITY_THRESHOLD = float(
@@ -609,11 +606,14 @@ def add_security_headers(response):
             "object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
         )
     elif request.path.startswith("/trip"):
+        # OpenStreetMap's browser tile policy requires an identifying Referer.
+        # Keep the stricter no-referrer default for the rest of the application.
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
         response.headers["Content-Security-Policy"] = (
             "default-src 'self'; "
             "script-src 'self'; "
             "style-src 'self' 'unsafe-inline'; "
-            "img-src 'self' data: blob: https://*.tile.openstreetmap.org; "
+            "img-src 'self' data: blob: https://tile.openstreetmap.org; "
             "connect-src 'self'; font-src 'self'; "
             "object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
         )
@@ -1082,6 +1082,22 @@ def _build_itinerary_draft_flex(result: FlowResult) -> FlexMessage | None:
         },
     ]
 
+    itinerary_type = redact_sensitive_identifiers(str(draft.get("type") or "").strip())[:20]
+    best_for = redact_sensitive_identifiers(str(draft.get("best_for") or "").strip())[:160]
+    draft_metadata = "・".join(part for part in (itinerary_type, best_for) if part)
+    if draft_metadata:
+        body_contents.insert(
+            2,
+            {
+                "type": "text",
+                "text": draft_metadata,
+                "size": "sm",
+                "color": "#52656A",
+                "margin": "sm",
+                "wrap": True,
+            },
+        )
+
     displayed_spots = spots[:8]
     for index, spot in enumerate(displayed_spots, start=1):
         try:
@@ -1249,6 +1265,111 @@ def _build_itinerary_draft_flex(result: FlowResult) -> FlexMessage | None:
     )
 
 
+def _build_expense_report_flex(result: FlowResult) -> FlexMessage | None:
+    data = result.data if isinstance(result.data, dict) else {}
+    report = data.get("expense_report")
+    if not isinstance(report, dict):
+        return None
+    download_url = str(report.get("download_url") or "").strip()
+    book = report.get("book")
+    expenses = report.get("expenses")
+    if not download_url or not isinstance(book, dict) or not isinstance(expenses, list):
+        return None
+
+    title = redact_sensitive_identifiers(str(book.get("name") or "行程").strip())[:100]
+    confirmed = [
+        expense
+        for expense in expenses
+        if isinstance(expense, dict) and expense.get("status", "confirmed") == "confirmed"
+    ]
+    total = sum(int(expense.get("amount") or 0) for expense in confirmed)
+    member_count = len(book.get("members") or [])
+    per_person = round(total / member_count) if member_count else None
+    category_totals: dict[str, int] = {}
+    for expense in confirmed:
+        category = redact_sensitive_identifiers(str(expense.get("category") or "其他").strip())[:30]
+        category_totals[category] = category_totals.get(category, 0) + int(expense.get("amount") or 0)
+
+    body_contents: list[dict[str, Any]] = [
+        {"type": "text", "text": "行程總花費", "size": "xs", "color": "#66777B", "weight": "bold"},
+        {"type": "text", "text": f"NT${total:,}", "size": "xxl", "color": "#17324D", "weight": "bold", "margin": "sm"},
+        {
+            "type": "box",
+            "layout": "horizontal",
+            "spacing": "sm",
+            "margin": "lg",
+            "contents": [
+                {
+                    "type": "box", "layout": "vertical", "flex": 1,
+                    "backgroundColor": "#F1F7F5", "cornerRadius": "10px", "paddingAll": "12px",
+                    "contents": [
+                        {"type": "text", "text": "記帳筆數", "size": "xs", "color": "#66777B"},
+                        {"type": "text", "text": f"{len(confirmed)} 筆", "size": "md", "weight": "bold", "color": "#17324D", "margin": "xs"},
+                    ],
+                },
+                {
+                    "type": "box", "layout": "vertical", "flex": 1,
+                    "backgroundColor": "#F1F7F5", "cornerRadius": "10px", "paddingAll": "12px",
+                    "contents": [
+                        {"type": "text", "text": "平均每人", "size": "xs", "color": "#66777B"},
+                        {"type": "text", "text": f"NT${per_person:,}" if per_person is not None else "未設定成員", "size": "md", "weight": "bold", "color": "#17324D", "margin": "xs", "wrap": True},
+                    ],
+                },
+            ],
+        },
+    ]
+    if category_totals:
+        body_contents.extend(
+            [
+                {"type": "separator", "margin": "lg", "color": "#DCE7E5"},
+                {"type": "text", "text": "分類統計", "size": "sm", "weight": "bold", "color": "#147D6F", "margin": "lg"},
+                {
+                    "type": "text",
+                    "text": "　".join(
+                        f"{category} NT${amount:,}"
+                        for category, amount in sorted(category_totals.items(), key=lambda item: item[1], reverse=True)
+                    )[:500],
+                    "size": "sm", "color": "#52656A", "wrap": True, "margin": "sm",
+                },
+            ]
+        )
+    body_contents.extend(
+        [
+            {"type": "separator", "margin": "lg", "color": "#DCE7E5"},
+            {
+                "type": "text",
+                "text": "PDF 可在報表產生後 24 小時內重複下載；逾期後點擊會看到連結已過期的提示。",
+                "size": "xs", "color": "#66777B", "wrap": True, "margin": "lg",
+            },
+        ]
+    )
+    payload = {
+        "type": "bubble",
+        "size": "mega",
+        "header": {
+            "type": "box", "layout": "vertical", "backgroundColor": "#147D6F", "paddingAll": "20px",
+            "contents": [
+                {"type": "text", "text": "行程花費報表", "size": "xs", "color": "#D5F2EC", "weight": "bold"},
+                {"type": "text", "text": title, "size": "xl", "color": "#FFFFFF", "weight": "bold", "wrap": True, "margin": "sm"},
+            ],
+        },
+        "body": {"type": "box", "layout": "vertical", "contents": body_contents, "paddingAll": "20px"},
+        "footer": {
+            "type": "box", "layout": "vertical", "paddingAll": "16px",
+            "contents": [
+                {
+                    "type": "button", "style": "primary", "color": "#147D6F", "height": "sm",
+                    "action": {"type": "uri", "label": "下載 PDF", "uri": download_url},
+                }
+            ],
+        },
+    }
+    return FlexMessage(
+        alt_text=f"{title} 行程花費報表，可於 24 小時內下載 PDF"[:400],
+        contents=FlexContainer.from_dict(payload),
+    )
+
+
 def _build_feature_messages(result: FlowResult) -> list[Any]:
     try:
         itinerary_message = _build_itinerary_draft_flex(result)
@@ -1257,6 +1378,13 @@ def _build_feature_messages(result: FlowResult) -> list[Any]:
         itinerary_message = None
     if itinerary_message is not None:
         return [itinerary_message]
+    try:
+        expense_report_message = _build_expense_report_flex(result)
+    except Exception as exc:
+        _log_failure("Expense report Flex Message", exc)
+        expense_report_message = None
+    if expense_report_message is not None:
+        return [expense_report_message]
     poll_message = _build_anonymous_poll_flex(result)
     if poll_message is not None:
         return [poll_message]
@@ -1310,16 +1438,16 @@ def _attach_expense_report_pdf(result: FlowResult) -> FlowResult:
     if not base_url:
         return result
     token = create_expense_report_session(book, expenses)
-    action = ActionSpec(
-        "下載 PDF",
-        "uri",
-        f"{base_url}/reports/expense/{token}.pdf",
-    )
+    updated_data = dict(result.data)
+    updated_report = dict(report)
+    updated_report["download_url"] = f"{base_url}/reports/expense/{token}.pdf"
+    updated_report["download_ttl_seconds"] = EXPENSE_REPORT_PDF_TTL_SECONDS
+    updated_data["expense_report"] = updated_report
     return FlowResult(
         handled=result.handled,
         text=result.text,
-        actions=[*result.actions, action],
-        data=result.data,
+        actions=list(result.actions),
+        data=updated_data,
     )
 
 
@@ -1477,6 +1605,35 @@ def _looks_like_current_location_request(user_text: str) -> bool:
     )
 
 
+TEXT_LOCATION_LOOKUP_TERMS = (
+    "景點",
+    "活動",
+    "展覽",
+    "節慶",
+    "市集",
+    "觀光",
+    "旅遊",
+    "可以玩",
+)
+TEXT_LOCATION_REQUEST_TERMS = (
+    "推薦",
+    "查",
+    "查詢",
+    "搜尋",
+    "找",
+    "有什麼",
+    "有哪些",
+    "哪裡",
+    "哪個",
+    "可以去哪",
+    "可以去",
+    "附近有",
+    "幫我看",
+    "幫我找",
+    "介紹",
+)
+
+
 def _infer_text_location_from_user_text(user_text: str) -> str:
     normalized_text = str(user_text or "").strip()
     if not normalized_text:
@@ -1501,6 +1658,22 @@ def _infer_text_activity_types_from_user_text(user_text: str) -> list[str]:
     return inferred_types
 
 
+def _looks_like_text_location_lookup(user_text: str) -> bool:
+    normalized_text = str(user_text or "").strip()
+    if not normalized_text:
+        return False
+    if _has_weather_request_signal(normalized_text, {}):
+        return False
+    if _looks_like_current_location_request(normalized_text):
+        return False
+    if not any(term in normalized_text for term in TEXT_LOCATION_REQUEST_TERMS):
+        return False
+    return bool(
+        _infer_text_location_from_user_text(normalized_text)
+        and any(term in normalized_text for term in TEXT_LOCATION_LOOKUP_TERMS)
+    )
+
+
 def _extract_text_location_query_payload(
     user_text: str,
     analysis_result: dict[str, Any],
@@ -1508,20 +1681,12 @@ def _extract_text_location_query_payload(
     if _has_weather_request_signal(user_text, analysis_result):
         return None
 
-    if not bool(analysis_result.get("requires_external_search")):
-        return None
-    if not bool(analysis_result.get("should_intervene")):
-        return None
-
-    try:
-        confidence_score = float(analysis_result.get("confidence_score", 0))
-    except (TypeError, ValueError):
-        confidence_score = 0.0
-    if confidence_score < MIN_INTERVENTION_CONFIDENCE:
-        return None
-
-    reply_trigger = str(analysis_result.get("reply_trigger") or "").strip()
-    if reply_trigger not in {"functional_question", "explicit_request"}:
+    has_ai_text_location_signal = bool(
+        analysis_result.get("requires_external_search")
+        and analysis_result.get("should_intervene")
+    )
+    has_direct_text_location_signal = _looks_like_text_location_lookup(user_text)
+    if not has_ai_text_location_signal and not has_direct_text_location_signal:
         return None
 
     extracted_info = analysis_result.get("extracted_info") or {}
@@ -2382,98 +2547,6 @@ def _is_semantic_poll_decision(
     return _has_multi_member_option_support(recent_messages, options)
 
 
-def _clean_ai_poll_options(raw_options: Any, recent_messages: list[str]) -> list[str]:
-    if not isinstance(raw_options, list):
-        return []
-    recent_text = _recent_message_body_text(recent_messages)
-    compact_recent_text = "".join(recent_text.split())
-    options: list[str] = []
-    for value in raw_options:
-        label = redact_sensitive_identifiers(str(value).strip())[:80]
-        compact_label = "".join(label.split())
-        if not compact_label:
-            continue
-        if compact_label not in compact_recent_text:
-            continue
-        if label not in options:
-            options.append(label)
-    return options[:6]
-
-
-def _judge_poll_proposal_with_ai(
-    result: dict[str, Any],
-    recent_messages: list[str],
-) -> dict[str, Any] | None:
-    if not _is_llm_analysis_result(result):
-        return None
-
-    extracted = result.get("extracted_info")
-    current_decision_state = ""
-    if isinstance(extracted, dict):
-        current_decision_state = str(extracted.get("decision_state") or "").strip()
-    result_text = "\n".join(
-        [
-            str(result.get("scenario_name") or ""),
-            str(result.get("reply_trigger") or ""),
-            str(result.get("suggested_reply") or ""),
-            current_decision_state,
-            "\n".join(str(item) for item in result.get("evidence") or []),
-            "\n".join(str(item) for item in result.get("system_behavior") or []),
-        ]
-    )
-    if not any(
-        signal in result_text
-        for signal in ("卡住", "選不出", "很難決定", "難決定", "意見不一致", "建議投票", "投票")
-    ):
-        return None
-
-    result_payload = {
-        "scenario_code": result.get("scenario_code"),
-        "scenario_name": result.get("scenario_name"),
-        "reply_trigger": result.get("reply_trigger"),
-        "should_intervene": result.get("should_intervene"),
-        "confidence_score": result.get("confidence_score"),
-        "extracted_info": result.get("extracted_info"),
-    }
-    judged = _call_small_json_model(
-        model=OPENAI_POLL_JUDGE_MODEL,
-        purpose="Poll proposal judge",
-        system_prompt=(
-            "你是 LINE 群組助理的投票需求判斷器。"
-            "請根據最近群組對話判斷是否已經形成需要投票的決策卡住情境。"
-            "只有同一個議題中出現 2 到 6 個具體可投票選項，且最近一句或主 AI 判斷已明確顯示"
-            "選不出來、卡住、很難決定、意見不一致、或正在要求投票時，should_propose_poll 才能是 true。"
-            "成員只是陸續提出偏好或新增選項時，不可以提早提案。"
-            "一般聊天、單一偏好、資訊查詢、景點推薦、路線安排、天氣、記帳、發票都應是 false。"
-            "options 只能列出最近對話中實際出現過的短選項，不可補新選項。"
-            "question 請用自然中文整理成投票題目。"
-            "只輸出 JSON，格式必須是 "
-            "{\"should_propose_poll\": true/false, \"question\": \"...\", \"options\": [\"...\"]}。"
-        ),
-        user_prompt=json.dumps(
-            {
-                "recent_messages": recent_messages[-8:],
-                "main_ai_result": result_payload,
-            },
-            ensure_ascii=False,
-        ),
-    )
-    if not isinstance(judged, dict):
-        return None
-    if not bool(judged.get("should_propose_poll")):
-        return None
-
-    options = _clean_ai_poll_options(judged.get("options"), recent_messages)
-    if not 2 <= len(options) <= 6:
-        return None
-
-    question = redact_sensitive_identifiers(str(judged.get("question") or "").strip())[:200]
-    return {
-        "question": question or _build_pending_vote_question(result, ""),
-        "options": options,
-    }
-
-
 def _has_urgent_poll_signal(messages: list[str]) -> bool:
     text = "\n".join(messages[-5:])
     return any(
@@ -2521,55 +2594,28 @@ def _try_propose_automatic_poll(
 ) -> bool:
     if not ENABLE_TRIP_MANAGEMENT_FEATURES or not line_group_id:
         return False
-    if not _is_llm_analysis_result(result):
-        # LLM 失敗時的舊備援分類含關鍵字計分，不用它自動建立投票。
-        return False
     scenario_code = str(result.get("scenario_code") or "").strip()
     scenario_name = str(result.get("scenario_name") or "").strip()
     candidate_options = _filter_poll_options_to_recent_messages(
         _clean_auto_poll_options(result),
         recent_messages,
     )
-    ai_poll_judgment: dict[str, Any] | None = None
-    suggested_reply = str(result.get("suggested_reply") or "")
-    result_text = "\n".join(
-        [
-            scenario_name,
-            suggested_reply,
-            "\n".join(str(item) for item in result.get("system_behavior") or []),
-        ]
-    )
-    is_vote_scenario = (
-        scenario_code == "劇本九"
-        or scenario_name == "投票決策"
-        or (
-            scenario_code == "劇本七"
-            and "投票" in result_text
-        )
-    )
+    is_vote_scenario = scenario_code == "劇本九" or scenario_name == "投票決策"
     if not is_vote_scenario and not _is_semantic_poll_decision(
         result,
         recent_messages,
         candidate_options,
     ):
-        ai_poll_judgment = _judge_poll_proposal_with_ai(result, recent_messages)
-        if ai_poll_judgment is None:
-            return False
-        candidate_options = list(ai_poll_judgment["options"])
-    elif len(candidate_options) < 2:
-        ai_poll_judgment = _judge_poll_proposal_with_ai(result, recent_messages)
-        if ai_poll_judgment is not None:
-            candidate_options = list(ai_poll_judgment["options"])
-    participants = _recent_discussion_participants(conversation_key)
-    if len(candidate_options) < 2:
         return False
-    question = (
-        str(ai_poll_judgment.get("question") or "").strip()
-        if ai_poll_judgment
-        else _build_pending_vote_question(
-            result,
-            str(result.get("suggested_reply") or ""),
-        )
+    if not _is_llm_analysis_result(result):
+        # LLM 失敗時的舊備援分類含關鍵字計分，不用它自動建立投票。
+        return False
+    participants = _recent_discussion_participants(conversation_key)
+    if len(candidate_options) < 2 or len(participants) < 2:
+        return False
+    question = _build_pending_vote_question(
+        result,
+        str(result.get("suggested_reply") or ""),
     )
     fingerprint_source = json.dumps(
         {"question": question, "options": candidate_options},
@@ -2799,7 +2845,6 @@ def _public_itinerary_payload(document: dict[str, Any]) -> dict[str, Any]:
         "summary",
         "description",
         "duration",
-        "distance",
         "type",
         "bestFor",
         "comment",
@@ -2807,6 +2852,8 @@ def _public_itinerary_payload(document: dict[str, Any]) -> dict[str, Any]:
         "updated_at",
     )
     payload = {key: document.get(key) for key in allowed_fields if key in document}
+    if not payload.get("bestFor") and document.get("best_for"):
+        payload["bestFor"] = document.get("best_for")
     budget = document.get("budget")
     payload["budget"] = (
         {
@@ -2902,7 +2949,8 @@ def list_public_itineraries_api():
             ],
         }
     )
-    response.headers["Cache-Control"] = "public, max-age=60"
+    response.headers["Cache-Control"] = "no-store, max-age=0"
+    response.headers["Pragma"] = "no-cache"
     return response
 
 
@@ -2921,7 +2969,8 @@ def get_public_itinerary_api(public_id: str):
     if not isinstance(item, dict):
         return jsonify({"ok": False, "error": "Itinerary not found."}), 404
     response = jsonify({"ok": True, "item": _public_itinerary_payload(item)})
-    response.headers["Cache-Control"] = "public, max-age=60"
+    response.headers["Cache-Control"] = "no-store, max-age=0"
+    response.headers["Pragma"] = "no-cache"
     return response
 
 
@@ -3081,7 +3130,19 @@ def download_expense_report_pdf(token: str):
         abort(429)
     snapshot = get_expense_report_session(token)
     if snapshot is None:
-        return "這份 PDF 下載連結已失效，請回 LINE 重新產生花費明細。", 410
+        expired_html = """<!doctype html>
+<html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>下載連結已過期</title><style>
+body{margin:0;min-height:100vh;display:grid;place-items:center;background:#eef5f3;color:#17324d;font-family:system-ui,-apple-system,"Noto Sans TC",sans-serif}
+main{width:min(88vw,420px);box-sizing:border-box;background:#fff;border:1px solid #dce7e5;border-radius:20px;padding:32px;box-shadow:0 18px 50px rgba(23,50,77,.12);text-align:center}
+.icon{width:58px;height:58px;margin:0 auto 18px;border-radius:50%;display:grid;place-items:center;background:#fff1e8;color:#d86532;font-size:28px;font-weight:700}
+h1{font-size:24px;margin:0 0 12px}p{margin:0;color:#52656a;line-height:1.7}</style></head>
+<body><main><div class="icon">!</div><h1>下載連結已過期</h1><p>PDF 報表可下載 24 小時。請回到 LINE 群組重新產生花費報表。</p></main></body></html>"""
+        response = app.make_response((expired_html, 410))
+        response.headers["Content-Type"] = "text/html; charset=utf-8"
+        response.headers["Cache-Control"] = "private, no-store, max-age=0"
+        response.headers["X-Robots-Tag"] = "noindex, nofollow, noarchive"
+        return response
     try:
         pdf_bytes = build_expense_report_pdf(snapshot)
     except Exception as exc:
@@ -3472,7 +3533,10 @@ def handle_feature_postback(event: PostbackEvent) -> None:
             line_user_id=line_user_id,
         )
         if result.handled:
-            if isinstance(result.data.get("anonymous_poll"), dict):
+            if (
+                isinstance(result.data.get("anonymous_poll"), dict)
+                or result.data.get("vote_proposal_declined") is True
+            ):
                 _clear_discussion_after_poll(_get_conversation_key(event))
             _reply_feature_result(event, result)
             return

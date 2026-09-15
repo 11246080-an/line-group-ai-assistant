@@ -5,6 +5,8 @@
   const MOBILE_QUERY = "(max-width: 760px)";
   const LINE_SHARE_URL = "https://line.me/R/share?text=";
   const LION_AD_URL = "https://travel.liontravel.com/category/zh-tw/taiwan/penghu";
+  const ITINERARY_TYPE_OPTIONS = ["山城", "都市", "河岸", "自然", "美食", "文化", "海線"];
+  const ITINERARY_TYPES = new Set(ITINERARY_TYPE_OPTIONS);
   const launchParams = parseLaunchParams();
   const sharedSessionToken = normalizeSessionToken(launchParams.get("session_token"));
   scrubSensitiveLaunchParams();
@@ -44,6 +46,7 @@
     mobileSheetMeta: document.querySelector("#mobileSheetMeta"),
     mobileSheetDescription: document.querySelector("#mobileSheetDescription"),
     mobileSheetTags: document.querySelector("#mobileSheetTags"),
+    mobileSheetNote: document.querySelector("#mobileSheetNote"),
     mobileSheetComment: document.querySelector("#mobileSheetComment"),
     mobileLineImportButton: document.querySelector("#mobileLineImportButton"),
     filtersPanel: document.querySelector("#filtersPanel"),
@@ -59,7 +62,6 @@
   const filters = {
     region: document.querySelector("#regionFilter"),
     budget: document.querySelector("#budgetFilter"),
-    distance: document.querySelector("#distanceFilter"),
     type: document.querySelector("#typeFilter"),
     transport: document.querySelector("#transportFilter"),
   };
@@ -68,7 +70,11 @@
 
   async function loadItineraries() {
     const response = await fetch(buildApiUrl("api/itineraries"), {
-      headers: { Accept: "application/json" },
+      cache: "no-store",
+      headers: {
+        Accept: "application/json",
+        "ngrok-skip-browser-warning": "true",
+      },
     });
     const payload = await response.json().catch(() => ({}));
     if (!response.ok || !payload.ok || !Array.isArray(payload.items)) {
@@ -194,7 +200,7 @@
       zoomControl: true,
     });
 
-    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
       maxZoom: 19,
       attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
     }).addTo(state.map);
@@ -256,6 +262,7 @@
           headers: {
             Accept: "application/json",
             "Content-Type": "application/json",
+            "ngrok-skip-browser-warning": "true",
           },
           body: JSON.stringify({ session_token: state.sharedSessionToken }),
           cache: "no-store",
@@ -499,8 +506,7 @@
   function setupFilters() {
     populateSelect(filters.region, uniqueOptions("region"));
     populateSelect(filters.budget, uniqueOptions("budget"));
-    populateSelect(filters.distance, uniqueOptions("distance"));
-    populateSelect(filters.type, uniqueOptions("type"));
+    populateSelect(filters.type, ITINERARY_TYPE_OPTIONS);
     populateSelect(filters.transport, uniqueOptions("transport"));
 
     Object.values(filters).forEach((select) => {
@@ -627,7 +633,6 @@
       return (
         matchesFilter(item, "region", filters.region.value) &&
         matchesFilter(item, "budget", filters.budget.value) &&
-        matchesFilter(item, "distance", filters.distance.value) &&
         matchesFilter(item, "type", filters.type.value) &&
         matchesFilter(item, "transport", filters.transport.value)
       );
@@ -683,11 +688,13 @@
     }
     if (elements.mobileSheetTags) {
       elements.mobileSheetTags.innerHTML = selected
-        ? [selected.transport, selected.budget, selected.distance, selected.type].map((tag) => `<span>${html(tag)}</span>`).join("")
+        ? [selected.transport, selected.budget, selected.type].map((tag) => `<span>${html(tag)}</span>`).join("")
         : "";
     }
     if (elements.mobileSheetComment) {
-      elements.mobileSheetComment.textContent = selected ? selected.comment : "選一條行程後會顯示推薦理由。";
+      const comment = selected ? String(selected.comment || "").trim() : "";
+      elements.mobileSheetComment.textContent = comment;
+      if (elements.mobileSheetNote) elements.mobileSheetNote.hidden = !comment;
     }
     if (elements.mobileLineImportButton) {
       if (selected) {
@@ -769,18 +776,19 @@
         <div class="card-meta-grid">
           ${createMetaBox("地區", item.region)}
           ${createMetaBox("預算", item.budget)}
-          ${createMetaBox("距離", item.distance)}
           ${createMetaBox("類型", item.type)}
           ${createMetaBox("交通", item.transport)}
         </div>
 
-        <p class="card-line"><strong>適合：</strong>${html(item.bestFor)}</p>
+        ${item.bestFor ? `<p class="card-line"><strong>適合：</strong>${html(item.bestFor)}</p>` : ""}
         <p class="card-line"><strong>行程時間：</strong>${html(item.duration)}</p>
 
-        <div class="comment-box">
-          <span>推薦理由</span>
-          <p>${html(item.comment)}</p>
-        </div>
+        ${item.comment ? `
+          <div class="comment-box">
+            <span>推薦理由</span>
+            <p>${html(item.comment)}</p>
+          </div>
+        ` : ""}
 
         <div class="line-bot-panel" aria-label="LINE Bot 匯入行程">
           <div>
@@ -1047,7 +1055,6 @@
       title: itinerary.title,
       region: itinerary.region,
       budget: itinerary.budget,
-      distance: itinerary.distance,
       type: itinerary.type,
       transport: itinerary.transport,
       duration: itinerary.duration,
@@ -1093,6 +1100,7 @@
       headers: {
         Accept: "application/json",
         "Content-Type": "application/json",
+        "ngrok-skip-browser-warning": "true",
       },
       body: JSON.stringify({
         kind: isSpot ? "spot" : "itinerary",
@@ -1268,12 +1276,15 @@
       let budgetLabel = typeof budgetValue === "string" ? budgetValue : "預算未提供";
       if (budgetValue && typeof budgetValue === "object") {
         const currency = String(budgetValue.currency || "TWD");
-        const perPerson = Number(budgetValue.per_person);
-        const actualTotal = Number(budgetValue.actual_total);
-        if (Number.isFinite(perPerson)) {
+        const perPerson = optionalNumber(budgetValue.per_person);
+        const actualTotal = optionalNumber(budgetValue.actual_total);
+        const estimatedTotal = optionalNumber(budgetValue.estimated_total);
+        if (perPerson !== null) {
           budgetLabel = `每人約 ${perPerson.toLocaleString()} ${currency}`;
-        } else if (Number.isFinite(actualTotal)) {
+        } else if (actualTotal !== null) {
           budgetLabel = `總計約 ${actualTotal.toLocaleString()} ${currency}`;
+        } else if (estimatedTotal !== null) {
+          budgetLabel = `預估總計 ${estimatedTotal.toLocaleString()} ${currency}`;
         }
       }
 
@@ -1291,10 +1302,9 @@
         budget: budgetLabel,
         transportLegs: Array.isArray(transportValue) ? transportValue : [],
         transport: transportLabel,
-        distance: itinerary.distance || "未分類",
-        type: itinerary.type || "使用者分享",
-        bestFor: itinerary.bestFor || "想參考真實群組行程的旅客",
-        comment: itinerary.comment || "此行程經至少一半參與者同意後匿名分享。",
+        type: normalizeItineraryType(itinerary),
+        bestFor: String(itinerary.bestFor || itinerary.best_for || "").trim(),
+        comment: String(itinerary.comment || "").trim(),
         lineBotKey: `linebot:${id}`,
         spots: (itinerary.spots || []).map((spot, index) => ({
           ...spot,
@@ -1305,6 +1315,31 @@
         })),
       };
     });
+  }
+
+  function optionalNumber(value) {
+    if (value === null || value === undefined || value === "" || typeof value === "boolean") return null;
+    const number = Number(value);
+    return Number.isFinite(number) ? number : null;
+  }
+
+  function normalizeItineraryType(itinerary) {
+    const provided = String(itinerary.type || "").trim();
+    if (ITINERARY_TYPES.has(provided)) return provided;
+
+    const searchable = [
+      itinerary.title,
+      itinerary.summary,
+      itinerary.description,
+      ...(Array.isArray(itinerary.spots) ? itinerary.spots.map((spot) => `${spot?.name || ""} ${spot?.description || ""}`) : []),
+    ].join(" ");
+    if (/(海岸|海邊|海景|沙灘|漁港|海港|濱海)/.test(searchable)) return "海線";
+    if (/(河岸|河濱|溪流|湖畔|水岸)/.test(searchable)) return "河岸";
+    if (/(美食|小吃|夜市|餐廳|咖啡|市場)/.test(searchable)) return "美食";
+    if (/(文化|古蹟|老街|博物館|美術館|寺廟|歷史)/.test(searchable)) return "文化";
+    if (/(山城|山區|登山|步道|森林)/.test(searchable)) return "山城";
+    if (/(自然|公園|瀑布|農場|濕地|生態)/.test(searchable)) return "自然";
+    return "都市";
   }
 
   function uniqueOptions(key) {

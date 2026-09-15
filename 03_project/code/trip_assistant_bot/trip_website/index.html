@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-    <meta name="referrer" content="no-referrer" />
+    <meta name="referrer" content="strict-origin-when-cross-origin" />
     <title>台灣一日遊行程推薦</title>
     <link rel="stylesheet" href="vendor/leaflet/leaflet.css?v=1.9.4" />
     <link rel="stylesheet" href="src/styles.css?v=20260810-self-hosted-map" />
@@ -31,9 +31,9 @@
           <h2 id="mobileSheetTitle">台灣一日遊行程推薦</h2>
           <p id="mobileSheetDescription">選擇喜歡的路線，查看景點順序與行程資訊。</p>
           <div id="mobileSheetTags" class="mobile-sheet-tags" aria-label="行程資訊"></div>
-          <div class="mobile-sheet-note">
+          <div id="mobileSheetNote" class="mobile-sheet-note" hidden>
             <span>推薦理由</span>
-            <p id="mobileSheetComment">選一條行程後會顯示推薦理由。</p>
+            <p id="mobileSheetComment"></p>
           </div>
           <div class="mobile-sheet-actions">
             <button
@@ -64,12 +64,6 @@
                 預算
                 <select id="budgetFilter">
                   <option value="all">全部預算</option>
-                </select>
-              </label>
-              <label>
-                距離
-                <select id="distanceFilter">
-                  <option value="all">全部距離</option>
                 </select>
               </label>
               <label>
@@ -113,6 +107,6 @@
     </main>
 
     <script src="vendor/leaflet/leaflet.js?v=1.9.4"></script>
-    <script src="src/app.js?v=20260901-published-itineraries"></script>
+    <script src="src/app.js?v=20260915-ngrok-api"></script>
   </body>
 </html>

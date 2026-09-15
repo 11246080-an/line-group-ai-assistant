@@ -601,8 +601,6 @@ reply_trigger 必須是以下其中一種：
 - 若使用者是在問「有沒有適合 4 個人一起吃的店」、「學校附近有沒有預算 400 內的餐廳」這類已具備多個限制條件的問題，should_intervene 應為 true，requires_external_search 應為 true。
 - 若使用者是直接詢問某個明確地點附近的餐廳、咖啡廳、美食或景點，例如「北車附近有什麼可以吃」「西門町附近有沒有咖啡廳」，即使尚未提供時間、預算或人數，也應視為 functional_question，因為這已經是可執行的查詢需求。
 - 若對話已包含明確地點，且問題本身是在詢問「附近有什麼」「有沒有推薦」「有沒有某種類型的店」這類內容，requires_external_search 應為 true，不應判為一般聊天。
-- 若同一個決策議題中，已出現 2 到 6 個明確候選選項，且不同成員各自支持不同選項，後續又出現選不出來、卡住、很難決定、意見不一致、要不要投票等狀態，應判定為劇本九「投票決策」，reply_trigger 應為 stuck_discussion 或 functional_question，should_intervene 應為 true，requires_external_search 應為 false。
-- 投票決策時，extracted_info.options 必須延續整段最近對話中已出現的候選選項，不可因為最後一句沒有重複選項就清空。
 
 extracted_info 欄位必須包含以下欄位：
 - time
@@ -716,12 +714,14 @@ itinerary_draft 規則：
     "duration": "半日遊／一日遊或空字串",
     "estimated_budget": 整數或 null,
     "currency": "TWD",
+    "type": "山城／都市／河岸／自然／美食／文化／海線其中一種",
+    "best_for": "適合的旅客族群與簡短原因",
     "spots": [
       {{
         "sequence": 1,
         "name": "景點名稱",
         "description": "安排說明",
-        "address": "已知地址或空字串",
+        "address": "可確認的完整地址；不確定時才用空字串",
         "latitude": 已知數字或 null,
         "longitude": 已知數字或 null
       }}
@@ -736,6 +736,10 @@ itinerary_draft 規則：
       }}
     ]
   }}
+
+- type 必須從山城、都市、河岸、自然、美食、文化、海線中選擇最符合整體行程的一種。
+- best_for 要根據行程強度、景點內容與交通方式判斷，文字保持具體精簡。
+- spot name 請使用可供觀光資料或 Google Places 查詢的正式景點名稱；已知地址時一併填入，但不可猜測地址。
 
 回覆要求：
 - 必須結合目前群組對話脈絡，不可憑空捏造不存在的資訊。
@@ -783,6 +787,80 @@ def _call_openai_json(
 
     content = response.choices[0].message.content or ""
     return _extract_json(content)
+
+
+def select_best_itinerary_reason(
+    itinerary: dict[str, Any],
+    candidates: list[dict[str, Any] | str],
+) -> str:
+    """Use the configured model to select one useful, itinerary-grounded reason.
+
+    The model may only select an existing candidate. Returning an empty string means
+    every candidate looked irrelevant, unsafe, too vague, or like spam.
+    """
+    normalized: list[str] = []
+    for candidate in candidates:
+        value = candidate.get("reason") if isinstance(candidate, dict) else candidate
+        reason = str(value or "").strip()[:240]
+        if reason and reason not in normalized:
+            normalized.append(reason)
+    if not normalized:
+        return ""
+
+    _load_env_file()
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise LLMJudgeError("未設定 OPENAI_API_KEY")
+    model = os.getenv("OPENAI_REASON_SELECTOR_MODEL", os.getenv("OPENAI_MODEL", "gpt-4.1-mini"))
+    try:
+        from openai import OpenAI
+    except ImportError as exc:
+        raise LLMJudgeError("未安裝 openai 套件") from exc
+
+    itinerary_context = {
+        "title": str(itinerary.get("title") or "")[:120],
+        "region": str(itinerary.get("region") or "")[:80],
+        "summary": str(itinerary.get("summary") or "")[:400],
+        "duration": str(itinerary.get("duration") or "")[:80],
+        "spots": [
+            str(item.get("name") or "")[:100]
+            for item in itinerary.get("spots") or []
+            if isinstance(item, dict) and str(item.get("name") or "").strip()
+        ][:20],
+    }
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "你是公開旅遊行程的推薦理由審核員。從候選理由中選出最適合公開的一筆。"
+                "優先考慮：與行程內容一致、具體、能幫助其他旅客判斷；排除亂碼、廣告、"
+                "人身攻擊、個人資料、沒有根據的說法與過度空泛內容。只能選既有候選，不能改寫。"
+                "若全部不適合，selected_index 輸出 null。只輸出 JSON："
+                '{"selected_index": 0 或 null, "reason": "簡短判斷依據"}'
+            ),
+        },
+        {
+            "role": "user",
+            "content": json.dumps(
+                {"itinerary": itinerary_context, "candidates": normalized},
+                ensure_ascii=False,
+            ),
+        },
+    ]
+    result = _call_openai_json(
+        OpenAI(api_key=api_key),
+        model,
+        messages,
+        purpose="推薦理由篩選",
+    )
+    selected_index = result.get("selected_index")
+    if isinstance(selected_index, bool):
+        return ""
+    try:
+        index = int(selected_index)
+    except (TypeError, ValueError):
+        return ""
+    return normalized[index] if 0 <= index < len(normalized) else ""
 
 
 def _merge_generated_reply(

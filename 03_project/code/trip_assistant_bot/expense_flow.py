@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import importlib
+import inspect
 import logging
 import os
 import re
@@ -1033,10 +1034,21 @@ def handle_expense_postback(
             book, error = _active_book_or_result(line_group_id)
             if error:
                 return error
-            closed = _db_function("close_expense_book")(
-                book_id=_book_id(book or {}),
-                closed_by=line_user_id,
-            )
+            close_expense_book = _db_function("close_expense_book")
+            close_kwargs: dict[str, Any] = {
+                "book_id": _book_id(book or {}),
+                "closed_by": line_user_id,
+            }
+            try:
+                close_parameters = inspect.signature(close_expense_book).parameters
+            except (TypeError, ValueError):
+                close_parameters = {}
+            if "line_group_id" in close_parameters or any(
+                parameter.kind == inspect.Parameter.VAR_KEYWORD
+                for parameter in close_parameters.values()
+            ):
+                close_kwargs["line_group_id"] = line_group_id
+            closed = close_expense_book(**close_kwargs)
             final_book = closed if isinstance(closed, dict) else (book or {})
             expenses = _db_function("list_expenses")(_book_id(final_book), status="confirmed") or []
             report_result = build_expense_report_result(final_book, list(expenses))
@@ -1117,12 +1129,13 @@ def ensure_book_from_itinerary(
     line_user_id: str,
     itinerary: dict[str, Any],
     creator_display_name: str = "",
-) -> None:
+) -> dict[str, Any] | None:
     if not line_group_id or not database_contract_ready(("get_active_expense_book", "create_expense_book")):
-        return
-    if _db_function("get_active_expense_book")(line_group_id):
-        return
-    _db_function("create_expense_book")(
+        return None
+    active_book = _db_function("get_active_expense_book")(line_group_id)
+    if isinstance(active_book, dict):
+        return active_book
+    created = _db_function("create_expense_book")(
         line_group_id=line_group_id,
         name=_clean_name(itinerary.get("title") or "行程"),
         created_by=line_user_id,
@@ -1139,3 +1152,4 @@ def ensure_book_from_itinerary(
         end_at=None,
         timezone="Asia/Taipei",
     )
+    return created if isinstance(created, dict) else None

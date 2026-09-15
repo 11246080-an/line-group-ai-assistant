@@ -331,6 +331,10 @@ button {
   border-radius: 10px;
 }
 
+.mobile-sheet-note[hidden] {
+  display: none !important;
+}
+
 .comment-box span,
 .line-bot-panel span {
   display: block;
