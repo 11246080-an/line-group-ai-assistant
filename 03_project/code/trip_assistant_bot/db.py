@@ -9,6 +9,7 @@ from __future__ import annotations
 import math
 import os
 import re
+import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -137,6 +138,35 @@ def ensure_indexes() -> None:
     db.tourism_events.create_index([("start_time", ASCENDING)])
     db.tourism_events.create_index([("end_time", ASCENDING)])
     db.tourism_events.create_index([("event_status", ASCENDING)])
+
+    # 觀光署開放資料：景點票價 / 營運時間（獨立 collection，用 attraction_id 對應）
+    db.tourism_attraction_fees.create_index([("attraction_id", ASCENDING)], unique=True)
+    db.tourism_attraction_fees.create_index([("attraction_name", ASCENDING)])
+    db.tourism_attraction_fees.create_index([("source_update_time", ASCENDING)])
+    db.tourism_attraction_service_times.create_index([("attraction_id", ASCENDING)], unique=True)
+    db.tourism_attraction_service_times.create_index([("attraction_name", ASCENDING)])
+    db.tourism_attraction_service_times.create_index([("source_update_time", ASCENDING)])
+
+    # 行程分享與公開網站
+    # itinerary_id 唯一索引必須用 sparse：collection 裡有 26 筆舊版行程文件
+    # （只有 itinerary_text / stops，沒有 itinerary_id），純 unique 索引會因為
+    # 多筆缺欄位被視為多個 null 而建立失敗。sparse 只索引有 itinerary_id 的文件。
+    db.itineraries.create_index([("itinerary_id", ASCENDING)], unique=True, sparse=True)
+    db.itineraries.create_index([("expense_book_id", ASCENDING)], sparse=True)
+    db.itineraries.create_index([("line_group_id", ASCENDING), ("status", ASCENDING)])
+    db.itineraries.create_index([("share_status", ASCENDING), ("share_deadline_at", ASCENDING)])
+
+    db.itinerary_share_consents.create_index(
+        [("itinerary_id", ASCENDING), ("voter_key", ASCENDING)], unique=True
+    )
+    db.itinerary_share_consents.create_index(
+        [("itinerary_id", ASCENDING), ("responded_at", ASCENDING)]
+    )
+
+    db.published_itineraries.create_index([("public_id", ASCENDING)], unique=True)
+    db.published_itineraries.create_index([("source_itinerary_id", ASCENDING)], unique=True)
+    db.published_itineraries.create_index([("published_at", DESCENDING)])
+    db.published_itineraries.create_index([("region", ASCENDING), ("published_at", DESCENDING)])
 
     db.user_preferences.create_index(
         [("line_user_id", ASCENDING), ("line_group_id", ASCENDING)],
@@ -1271,15 +1301,6 @@ def get_vote_results(*, poll_id: Any) -> list[dict]:
     return list(get_db().votes.aggregate(pipeline))
 
 
-def close_active_vote_session(*, line_group_id: str, now: datetime) -> dict | None:
-    """手動提前關閉群組目前進行中的投票，並回傳被關閉的投票。"""
-    return get_db().vote_sessions.find_one_and_update(
-        {"line_group_id": line_group_id, "status": "active"},
-        {"$set": {"status": "closed", "closed_at": now, "closed_reason": "manual"}},
-        return_document=ReturnDocument.AFTER,
-    )
-
-
 def claim_due_vote_sessions(*, now: datetime, limit: int = 50) -> list[dict]:
     """
     原子地把到期（deadline_at <= now）且仍 active 的投票關閉，設定
@@ -1457,3 +1478,547 @@ def get_tourism_attraction_by_id(attraction_id: str) -> dict | None:
 
 def get_tourism_event_by_id(event_id: str) -> dict | None:
     return get_db().tourism_events.find_one({"event_id": event_id})
+
+
+# ── 觀光署補充資料：票價 / 營運時間 ───────────────────────────────
+# 獨立 collection，不動 tourism_attractions 結構。要顯示票價或營業時間時，
+# 用 attraction_id 去對應。資料量小（票價 38 筆、營運時間 77 筆），逐筆對應查詢。
+
+def save_tourism_attraction_fees(items: list[dict]) -> dict:
+    """
+    依 attraction_id upsert 匯入景點票價資料（tourism_attraction_fees）。
+    items 每個 dict 應含 attraction_id / attraction_name / fees / source_update_time
+    / imported_at / raw_data，欄位整理是 import_tourism_data.py 的工作。
+    """
+    return _bulk_upsert_by_key("tourism_attraction_fees", items, "attraction_id")
+
+
+def save_tourism_attraction_service_times(items: list[dict]) -> dict:
+    """
+    依 attraction_id upsert 匯入景點營運時間資料（tourism_attraction_service_times）。
+    items 每個 dict 應含 attraction_id / attraction_name / service_time /
+    source_update_time / imported_at / raw_data。
+    """
+    return _bulk_upsert_by_key("tourism_attraction_service_times", items, "attraction_id")
+
+
+def get_tourism_attraction_fees(attraction_id: str) -> dict | None:
+    """取某景點的票價資料；沒有就回傳 None（呼叫端顯示「門票：未提供」或先不顯示）。"""
+    return get_db().tourism_attraction_fees.find_one({"attraction_id": attraction_id})
+
+
+def get_tourism_attraction_service_times(attraction_id: str) -> dict | None:
+    """取某景點的營運時間資料；沒有就回傳 None。"""
+    return get_db().tourism_attraction_service_times.find_one({"attraction_id": attraction_id})
+
+
+# ══════════════════════════════════════════════════════════════════
+# 行程分享與公開網站（資料庫交接文件：行程分享與公開網站）
+#
+# 流程：LINE 群組討論 → AI 草稿（feature_drafts）→ 使用者確認 →
+#   create_itinerary() 建立私人行程 → 行程結束記帳完成 →
+#   create_itinerary_share_request() 發詢問 → record_itinerary_share_consent()
+#   收匿名同意票 → 達「至少一半符合資格者同意」門檻 →
+#   publish_itinerary_snapshot() 建立去識別公開快照 → 網站只讀 published_itineraries。
+#
+# 隱私：published_itineraries 只放白名單欄位（標題/地區/摘要/景點順序/交通/
+#   彙總預算），絕不含 line_group_id / created_by / participant_user_ids /
+#   voter_key / consent_salt / 聊天原文 / 付款人 / 分攤明細。
+#   voter_key / consent_salt / eligible_consent_keys 由應用層用 HMAC 產生，
+#   這裡只當不透明字串存放，不做雜湊、不碰 ITINERARY_SHARE_SECRET。
+# ══════════════════════════════════════════════════════════════════
+
+# 公開快照要複製的欄位（白名單）。不在這份清單裡的東西一律不進 published_itineraries。
+_PUBLIC_SNAPSHOT_TEXT_FIELDS = ("title", "region", "summary", "duration")
+# published_itineraries 專有、私人 itineraries 沒有的欄位，預設空字串
+_PUBLIC_SNAPSHOT_EXTRA_FIELDS = ("description", "distance", "type", "bestFor", "comment")
+
+
+def _share_required_approvals(eligible_count: int) -> int:
+    """至少一半符合資格參與者同意：required = (eligible_count + 1) // 2。"""
+    return (max(0, eligible_count) + 1) // 2
+
+
+def _tally_share_consents(itinerary: dict, consents: list[dict]) -> dict:
+    """
+    照交接文件第 6 節算票數與狀態。
+    approved：approvals >= required
+    declined：approvals + 還沒回覆的人數 < required（已經不可能達標）
+    pending：其他
+    只計算 eligible_consent_keys 內、且 decision=="approve" 的票。
+    """
+    eligible = list(itinerary.get("eligible_consent_keys") or [])
+    eligible_set = set(eligible)
+    eligible_count = len(eligible_set)
+    required = _share_required_approvals(eligible_count)
+
+    approvals = 0
+    declines = 0
+    responded_keys = set()
+    for c in consents:
+        key = c.get("voter_key")
+        if key not in eligible_set or key in responded_keys:
+            continue
+        responded_keys.add(key)
+        if c.get("decision") == "approve":
+            approvals += 1
+        elif c.get("decision") == "decline":
+            declines += 1
+
+    pending = eligible_count - len(responded_keys)
+    if approvals >= required:
+        status = "approved"
+    elif approvals + pending < required:
+        status = "declined"
+    else:
+        status = "pending"
+
+    return {
+        "eligible_count": eligible_count,
+        "required": required,
+        "approvals": approvals,
+        "declines": declines,
+        "pending": pending,
+        "status": status,
+    }
+
+
+def create_itinerary(
+    *,
+    itinerary_id: str,
+    line_group_id: str,
+    title: str,
+    spots: list[dict],
+    transport: list[dict],
+    created_by: str,
+    participant_user_ids: list[str],
+    expense_book_id: Any = None,
+    region: str = "",
+    summary: str = "",
+    duration: str = "",
+    budget: dict | None = None,
+) -> dict:
+    """
+    使用者按下「確認行程」後建立正式私人行程。
+
+    - spots 至少一筆；每個 spot 產生穩定唯一的 spot_id（f"{itinerary_id}_s{sequence}"）。
+    - transport 進來時用 from_sequence / to_sequence，這裡依 spots.sequence 轉成
+      from_spot_id / to_spot_id（若已直接給 from_spot_id/to_spot_id 也接受）。
+    - participant_user_ids 去重、保留順序、並確保包含 created_by。
+    - 初始 status="confirmed"、share_status="not_requested"。
+    - 相同 itinerary_id 不可建立兩筆（sparse unique index + DuplicateKeyError → DbConflictError）。
+    """
+    if not itinerary_id or not line_group_id or not str(title).strip() or not created_by:
+        raise ValueError("itinerary_id / line_group_id / title / created_by 為必填")
+    if not spots:
+        raise ValueError("spots 至少要有一筆")
+
+    now = _utc_now()
+
+    normalized_spots: list[dict] = []
+    seq_to_spot_id: dict[Any, str] = {}
+    for index, spot in enumerate(spots, start=1):
+        sequence = spot.get("sequence", index)
+        spot_id = f"{itinerary_id}_s{sequence}"
+        seq_to_spot_id[sequence] = spot_id
+        normalized_spots.append({
+            "spot_id": spot_id,
+            "sequence": sequence,
+            "name": spot.get("name", ""),
+            "description": spot.get("description", ""),
+            "address": spot.get("address", ""),
+            "latitude": spot.get("latitude"),
+            "longitude": spot.get("longitude"),
+        })
+
+    normalized_transport: list[dict] = []
+    for leg in transport or []:
+        from_spot_id = leg.get("from_spot_id") or seq_to_spot_id.get(leg.get("from_sequence"))
+        to_spot_id = leg.get("to_spot_id") or seq_to_spot_id.get(leg.get("to_sequence"))
+        normalized_transport.append({
+            "from_spot_id": from_spot_id,
+            "to_spot_id": to_spot_id,
+            "mode": leg.get("mode", ""),
+            "estimated_minutes": leg.get("estimated_minutes"),
+            "note": leg.get("note", ""),
+        })
+
+    participants: list[str] = []
+    for uid in [created_by, *(participant_user_ids or [])]:
+        if uid and uid not in participants:
+            participants.append(uid)
+
+    budget_doc = {
+        "currency": "TWD",
+        "estimated_total": None,
+        "actual_total": None,
+        "participant_count": None,
+        "per_person": None,
+        "category_breakdown": [],
+    }
+    if budget:
+        budget_doc.update({k: v for k, v in budget.items() if k in budget_doc})
+
+    doc = {
+        "itinerary_id": itinerary_id,
+        "line_group_id": line_group_id,
+        "expense_book_id": _as_object_id(expense_book_id) if expense_book_id else None,
+        "title": str(title).strip(),
+        "region": region,
+        "summary": summary,
+        "duration": duration,
+        "spots": normalized_spots,
+        "transport": normalized_transport,
+        "budget": budget_doc,
+        "start_at": None,
+        "end_at": None,
+        "timezone": "Asia/Taipei",
+        "status": "confirmed",
+        "completed_at": None,
+        "created_by": created_by,
+        "participant_user_ids": participants,
+        "eligible_consent_keys": [],
+        "consent_salt": None,
+        "share_status": "not_requested",
+        "share_prompt_sent_at": None,
+        "share_deadline_at": None,
+        "share_resolved_at": None,
+        "created_at": now,
+        "updated_at": now,
+    }
+    try:
+        result = get_db().itineraries.insert_one(doc)
+    except DuplicateKeyError as exc:
+        raise DbConflictError(f"行程 {itinerary_id} 已經建立過") from exc
+    doc["_id"] = result.inserted_id
+    return doc
+
+
+def get_itinerary(*, itinerary_id: str, line_group_id: str) -> dict | None:
+    """依行程 + 群組同時比對，避免跨群組操作。"""
+    return get_db().itineraries.find_one(
+        {"itinerary_id": itinerary_id, "line_group_id": line_group_id}
+    )
+
+
+def get_itinerary_by_expense_book(*, expense_book_id: Any) -> dict | None:
+    if not expense_book_id:
+        return None
+    return get_db().itineraries.find_one({"expense_book_id": _as_object_id(expense_book_id)})
+
+
+def update_itinerary_schedule(
+    *, expense_book_id: Any, start_at, end_at, timezone: str, updated_by: str,
+) -> dict | None:
+    """
+    把記帳本的起訖時間同步到對應行程（optional sync）。找不到對應行程時回傳
+    None，不視為錯誤——呼叫端不會因為這裡失敗而回滾記帳本的時間更新。
+    """
+    if not expense_book_id:
+        return None
+    return get_db().itineraries.find_one_and_update(
+        {"expense_book_id": _as_object_id(expense_book_id)},
+        {"$set": {
+            "start_at": start_at,
+            "end_at": end_at,
+            "timezone": timezone,
+            "updated_at": _utc_now(),
+        }},
+        return_document=ReturnDocument.AFTER,
+    )
+
+
+def mark_itinerary_completed(
+    *, expense_book_id: Any, completed_at, budget_summary: dict,
+) -> dict:
+    """
+    行程結束、記帳完成時標記行程為 completed，並合併實際彙總預算。
+    重複呼叫 idempotent：completed_at 只在第一次寫入（保持穩定），
+    budget 每次都會用最新的 budget_summary 合併刷新。
+    """
+    db = get_db()
+    book_oid = _as_object_id(expense_book_id)
+    now = _utc_now()
+
+    budget_set = {f"budget.{k}": v for k, v in (budget_summary or {}).items()}
+
+    first = db.itineraries.find_one_and_update(
+        {"expense_book_id": book_oid, "completed_at": None},
+        {"$set": {"status": "completed", "completed_at": completed_at, "updated_at": now, **budget_set}},
+        return_document=ReturnDocument.AFTER,
+    )
+    if first is not None:
+        return first
+
+    # 已經 completed（重複呼叫）或根本沒有連結的行程
+    refreshed = db.itineraries.find_one_and_update(
+        {"expense_book_id": book_oid},
+        {"$set": {"status": "completed", "updated_at": now, **budget_set}},
+        return_document=ReturnDocument.AFTER,
+    )
+    if refreshed is None:
+        raise ValueError(f"找不到綁定記帳本 {expense_book_id} 的行程")
+    return refreshed
+
+
+def create_itinerary_share_request(
+    *,
+    itinerary_id: str,
+    line_group_id: str,
+    eligible_consent_keys: list[str],
+    consent_salt: str,
+    requested_at,
+    deadline_at,
+) -> dict:
+    """
+    行程結束後建立「是否同意匿名分享」的詢問。只有 completed 行程可以建立。
+    第一次建立設 share_status="pending" 並存 eligible keys / salt / 期限。
+    同一行程重複呼叫回傳 created_now=False，不重送詢問。
+
+    回傳 {"created_now": bool, "itinerary": dict}。
+    """
+    deduped_keys: list[str] = []
+    for key in eligible_consent_keys or []:
+        if key and key not in deduped_keys:
+            deduped_keys.append(key)
+
+    now = _utc_now()
+    updated = get_db().itineraries.find_one_and_update(
+        {
+            "itinerary_id": itinerary_id,
+            "line_group_id": line_group_id,
+            "status": "completed",
+            "share_status": "not_requested",
+        },
+        {"$set": {
+            "share_status": "pending",
+            "eligible_consent_keys": deduped_keys,
+            "consent_salt": consent_salt,
+            "share_prompt_sent_at": requested_at,
+            "share_deadline_at": deadline_at,
+            "updated_at": now,
+        }},
+        return_document=ReturnDocument.AFTER,
+    )
+    if updated is not None:
+        return {"created_now": True, "itinerary": updated}
+
+    existing = get_db().itineraries.find_one(
+        {"itinerary_id": itinerary_id, "line_group_id": line_group_id}
+    )
+    if existing is None:
+        raise ValueError(f"行程 {itinerary_id} 不存在（群組 {line_group_id}）")
+    if existing.get("status") != "completed":
+        raise DbConflictError("只有已結束（completed）的行程可以建立分享要求")
+    # status==completed 但 share_status 已不是 not_requested → 已經問過了
+    return {"created_now": False, "itinerary": existing}
+
+
+def record_itinerary_share_consent(
+    *,
+    itinerary_id: str,
+    line_group_id: str,
+    voter_key: str,
+    decision: str,
+    responded_at,
+) -> dict:
+    """
+    寫入一位符合資格成員對某行程的最新分享決定（approve / decline）。
+    以 (itinerary_id, voter_key) upsert，同一人改票只更新原 document，不加票數。
+
+    限制：itinerary 必須屬於該群組；share_status 必須是 pending 且未超過期限；
+    voter_key 必須在 eligible_consent_keys 內。
+
+    回傳 {"consent": dict, "itinerary": dict, "tally": {...}}，tally 是第 6 節的票數統計。
+    """
+    if decision not in ("approve", "decline"):
+        raise ValueError("decision 只能是 approve 或 decline")
+
+    db = get_db()
+    itinerary = db.itineraries.find_one(
+        {"itinerary_id": itinerary_id, "line_group_id": line_group_id}
+    )
+    if itinerary is None:
+        raise ValueError(f"行程 {itinerary_id} 不存在（群組 {line_group_id}）")
+    if itinerary.get("share_status") != "pending":
+        raise DbConflictError("分享詢問目前不在收票狀態（可能已發布、已拒絕或已過期）")
+
+    deadline = _ensure_aware_utc(itinerary.get("share_deadline_at"))
+    if deadline is not None and _ensure_aware_utc(responded_at) > deadline:
+        raise DbConflictError("已超過分享同意期限")
+
+    if voter_key not in set(itinerary.get("eligible_consent_keys") or []):
+        raise PermissionError("這個 voter_key 不在符合資格的參與者名單內")
+
+    now = _utc_now()
+    consent = db.itinerary_share_consents.find_one_and_update(
+        {"itinerary_id": itinerary_id, "voter_key": voter_key},
+        {
+            "$set": {"decision": decision, "responded_at": responded_at, "updated_at": now},
+            "$setOnInsert": {
+                "itinerary_id": itinerary_id,
+                "voter_key": voter_key,
+                "created_at": now,
+            },
+        },
+        upsert=True,
+        return_document=ReturnDocument.AFTER,
+    )
+
+    consents = list(db.itinerary_share_consents.find({"itinerary_id": itinerary_id}))
+    return {
+        "consent": consent,
+        "itinerary": itinerary,
+        "tally": _tally_share_consents(itinerary, consents),
+    }
+
+
+def get_itinerary_share_consents(*, itinerary_id: str) -> list[dict]:
+    """回傳某行程的所有同意票（voter_key / decision / responded_at），依回覆時間排序。"""
+    docs = get_db().itinerary_share_consents.find(
+        {"itinerary_id": itinerary_id}
+    ).sort("responded_at", ASCENDING)
+    return [
+        {
+            "voter_key": d.get("voter_key"),
+            "decision": d.get("decision"),
+            "responded_at": d.get("responded_at"),
+        }
+        for d in docs
+    ]
+
+
+def _build_public_snapshot(itinerary: dict, published_at) -> dict:
+    now = _utc_now()
+    snapshot = {
+        "public_id": "itn_" + secrets.token_urlsafe(12),
+        "source_itinerary_id": itinerary["itinerary_id"],
+        "version": 1,
+        "spots": itinerary.get("spots", []),
+        "transport": itinerary.get("transport", []),
+        "budget": itinerary.get("budget", {}),
+        "published_at": published_at,
+        "updated_at": now,
+    }
+    for field in _PUBLIC_SNAPSHOT_TEXT_FIELDS:
+        snapshot[field] = itinerary.get(field, "")
+    for field in _PUBLIC_SNAPSHOT_EXTRA_FIELDS:
+        snapshot[field] = itinerary.get(field, "")
+    return snapshot
+
+
+def publish_itinerary_snapshot(*, itinerary_id: str, published_at) -> dict:
+    """
+    建立去識別公開快照。DB 端會重新查票、重新驗證「至少一半同意」門檻，
+    不只相信應用層。建立快照 + 更新私人行程 share_status 具原子性（transaction）。
+    同一來源行程最多一筆公開快照；重複呼叫回傳既有結果（created_now=False）。
+
+    回傳 {"created_now": bool, "snapshot": dict, "itinerary": dict}。
+    """
+    db = get_db()
+
+    existing = db.published_itineraries.find_one({"source_itinerary_id": itinerary_id})
+    if existing is not None:
+        itinerary = db.itineraries.find_one({"itinerary_id": itinerary_id})
+        return {"created_now": False, "snapshot": existing, "itinerary": itinerary}
+
+    outcome: dict[str, Any] = {}
+
+    def _run(session) -> None:
+        itinerary = db.itineraries.find_one({"itinerary_id": itinerary_id}, session=session)
+        if itinerary is None:
+            raise ValueError(f"行程 {itinerary_id} 不存在")
+
+        already = db.published_itineraries.find_one(
+            {"source_itinerary_id": itinerary_id}, session=session
+        )
+        if already is not None:
+            outcome.update(created_now=False, snapshot=already, itinerary=itinerary)
+            return
+
+        consents = list(
+            db.itinerary_share_consents.find({"itinerary_id": itinerary_id}, session=session)
+        )
+        tally = _tally_share_consents(itinerary, consents)
+        if tally["approvals"] < tally["required"]:
+            raise DbConflictError(
+                f"尚未達到分享同意門檻（{tally['approvals']}/{tally['required']}）"
+            )
+
+        snapshot = _build_public_snapshot(itinerary, published_at)
+        db.published_itineraries.insert_one(snapshot, session=session)
+
+        updated = db.itineraries.find_one_and_update(
+            {"itinerary_id": itinerary_id},
+            {"$set": {
+                "share_status": "published",
+                "share_resolved_at": published_at,
+                "updated_at": _utc_now(),
+            }},
+            return_document=ReturnDocument.AFTER,
+            session=session,
+        )
+        outcome.update(created_now=True, snapshot=snapshot, itinerary=updated)
+
+    try:
+        with db.client.start_session() as session:
+            session.with_transaction(_run)
+    except DuplicateKeyError:
+        # 併發：另一個請求搶先建立了快照，回傳既有結果
+        existing = db.published_itineraries.find_one({"source_itinerary_id": itinerary_id})
+        itinerary = db.itineraries.find_one({"itinerary_id": itinerary_id})
+        return {"created_now": False, "snapshot": existing, "itinerary": itinerary}
+
+    return outcome
+
+
+def reject_itinerary_sharing(
+    *, itinerary_id: str, line_group_id: str, resolved_at,
+) -> dict:
+    """把分享詢問標記為拒絕（share_status="declined"）。只有 pending 可以改。"""
+    now = _utc_now()
+    updated = get_db().itineraries.find_one_and_update(
+        {"itinerary_id": itinerary_id, "line_group_id": line_group_id, "share_status": "pending"},
+        {"$set": {"share_status": "declined", "share_resolved_at": resolved_at, "updated_at": now}},
+        return_document=ReturnDocument.AFTER,
+    )
+    if updated is not None:
+        return updated
+
+    existing = get_db().itineraries.find_one(
+        {"itinerary_id": itinerary_id, "line_group_id": line_group_id}
+    )
+    if existing is None:
+        raise ValueError(f"行程 {itinerary_id} 不存在（群組 {line_group_id}）")
+    if existing.get("share_status") == "published":
+        raise DbConflictError("行程已經發布，無法改為拒絕")
+    # 已經是 declined / expired → idempotent 回傳現況
+    return existing
+
+
+def list_published_itineraries(
+    *, region: str | None = None, limit: int = 20,
+) -> list[dict]:
+    """
+    公開網站列表。只查 published_itineraries，依 published_at 由新到舊排序。
+    limit 在 DB 層再次夾在 1~100。
+    """
+    try:
+        safe_limit = int(limit)
+    except (TypeError, ValueError):
+        safe_limit = 20
+    safe_limit = max(1, min(100, safe_limit))
+
+    query: dict[str, Any] = {}
+    if region:
+        query["region"] = region
+    return list(
+        get_db().published_itineraries.find(query)
+        .sort("published_at", DESCENDING)
+        .limit(safe_limit)
+    )
+
+
+def get_published_itinerary(*, public_id: str) -> dict | None:
+    """公開網站詳情。只用公開的 public_id 查，不接受私人 itinerary_id。"""
+    return get_db().published_itineraries.find_one({"public_id": public_id})
