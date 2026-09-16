@@ -1688,11 +1688,43 @@ def _looks_like_text_location_lookup(user_text: str) -> bool:
     )
 
 
+def _is_itinerary_budget_or_planning_request(
+    user_text: str,
+    analysis_result: dict[str, Any],
+) -> bool:
+    normalized_text = str(user_text or "").strip()
+    scenario_code = str(analysis_result.get("scenario_code") or "").strip()
+    scenario_name = str(analysis_result.get("scenario_name") or "").strip()
+    extracted_info = analysis_result.get("extracted_info") or {}
+    activity_types = extracted_info.get("activity_types") or []
+    if not isinstance(activity_types, list):
+        activity_types = [activity_types]
+    system_behavior = analysis_result.get("system_behavior") or []
+    if not isinstance(system_behavior, list):
+        system_behavior = [system_behavior]
+
+    planning_signal = any(
+        term in normalized_text
+        for term in ("排一版", "排個", "行程草案", "行程安排", "一日遊", "半日遊")
+    ) or any("行程" in str(item) or "一日遊" in str(item) for item in activity_types)
+    budget_signal = any(term in normalized_text for term in ("門票", "票價", "預算", "估算"))
+    behavior_signal = any(
+        "行程" in str(item) or "預算" in str(item) or "門票" in str(item)
+        for item in system_behavior
+    )
+    scenario_signal = scenario_code in {"劇本四", "劇本六", "劇本十一"} or any(
+        term in scenario_name for term in ("行程", "預算", "資訊補全")
+    )
+    return bool(scenario_signal and planning_signal and (budget_signal or behavior_signal))
+
+
 def _extract_text_location_query_payload(
     user_text: str,
     analysis_result: dict[str, Any],
 ) -> dict[str, Any] | None:
     if _has_weather_request_signal(user_text, analysis_result):
+        return None
+    if _is_itinerary_budget_or_planning_request(user_text, analysis_result):
         return None
 
     has_ai_text_location_signal = bool(
