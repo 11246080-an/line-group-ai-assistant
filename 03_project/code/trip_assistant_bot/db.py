@@ -14,7 +14,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from bson import ObjectId
-from pymongo import ASCENDING, DESCENDING, MongoClient, ReturnDocument, UpdateOne
+from pymongo import ASCENDING, DESCENDING, MongoClient, ReplaceOne, ReturnDocument, UpdateOne
 from pymongo.database import Database
 from pymongo.errors import DuplicateKeyError
 
@@ -139,9 +139,13 @@ def ensure_indexes() -> None:
     db.tourism_events.create_index([("end_time", ASCENDING)])
     db.tourism_events.create_index([("event_status", ASCENDING)])
 
-    # 觀光署開放資料：景點票價 / 營運時間（獨立 collection，用 attraction_id 對應）
+    # 觀光署開放資料：景點票價（獨立 collection，用 attraction_id 對應）
+    # 欄位從舊版 attraction_name 改名成 name，舊索引留著沒用，順手砍掉。
+    if "attraction_name_1" in db.tourism_attraction_fees.index_information():
+        db.tourism_attraction_fees.drop_index("attraction_name_1")
     db.tourism_attraction_fees.create_index([("attraction_id", ASCENDING)], unique=True)
-    db.tourism_attraction_fees.create_index([("attraction_name", ASCENDING)])
+    db.tourism_attraction_fees.create_index([("name", ASCENDING)])
+    db.tourism_attraction_fees.create_index([("is_free", ASCENDING)])
     db.tourism_attraction_fees.create_index([("source_update_time", ASCENDING)])
     db.tourism_attraction_service_times.create_index([("attraction_id", ASCENDING)], unique=True)
     db.tourism_attraction_service_times.create_index([("attraction_name", ASCENDING)])
@@ -1369,9 +1373,16 @@ def release_feature_event(*, event_id: str) -> None:
 
 def _bulk_upsert_by_key(collection_name: str, items: list[dict], key_field: str, batch_size: int = 500) -> dict:
     """
-    共用的 upsert 匯入邏輯：依 key_field 分批 bulk_write upsert。
+    共用的 upsert 匯入邏輯：依 key_field 分批 bulk_write **整筆替換**（ReplaceOne + upsert）。
     回傳 {"inserted": N, "updated": N, "skipped": N, "total": N}；
     skipped 是缺少 key_field 而被跳過的筆數。
+
+    用整筆替換而不是 $set 合併，是因為這幾個 collection 都是「定期整批重新匯入
+    外部資料」的性質，沒有其他程式會對同一筆文件做局部更新。如果來源欄位格式
+    改版（例如 tourism_attraction_fees 從 attraction_name/imported_at/raw_data
+    改成 name/fetched_at/raw_payload），$set 只會疊加新欄位、留下舊格式的欄位
+    在文件裡揮之不去；整筆替換才能保證重新匯入後文件形狀跟目前的 transform
+    function 輸出完全一致，不會有新舊欄位混雜的情況。
     """
     if not items:
         return {"inserted": 0, "updated": 0, "skipped": 0, "total": 0}
@@ -1389,15 +1400,14 @@ def _bulk_upsert_by_key(collection_name: str, items: list[dict], key_field: str,
             if not key_value:
                 skipped += 1
                 continue
-            operations.append(
-                UpdateOne({key_field: key_value}, {"$set": item}, upsert=True)
-            )
+            operations.append(ReplaceOne({key_field: key_value}, item, upsert=True))
         if not operations:
             continue
         result = collection.bulk_write(operations, ordered=False)
         inserted += result.upserted_count
-        # fetched_at 每次匯入都會更新成新時間，所以已存在的資料一定會被判定為
-        # 「有變更」，modified_count 在這裡等同「這次有處理到的既有資料筆數」。
+        # fetched_at / imported_at 每次匯入都會更新成新時間，所以已存在的資料
+        # 一定會被判定為「有變更」，modified_count 在這裡等同「這次有處理到
+        # 的既有資料筆數」。
         updated += result.modified_count
 
     return {"inserted": inserted, "updated": updated, "skipped": skipped, "total": inserted + updated}
@@ -1486,25 +1496,41 @@ def get_tourism_event_by_id(event_id: str) -> dict | None:
 
 def save_tourism_attraction_fees(items: list[dict]) -> dict:
     """
-    依 attraction_id upsert 匯入景點票價資料（tourism_attraction_fees）。
-    items 每個 dict 應含 attraction_id / attraction_name / fees / source_update_time
-    / imported_at / raw_data，欄位整理是 import_tourism_data.py 的工作。
+    依 attraction_id upsert（整筆替換）匯入景點票價資料（tourism_attraction_fees）。
+    items 每個 dict 應含 attraction_id / name / fees / min_price / max_price /
+    default_price / is_free / source_update_time / dataset_update_time /
+    dataset_update_interval / language / provider_id / fetched_at / raw_payload，
+    欄位整理是 import_tourism_data.py 的工作。
+    回傳 {"inserted": 新增筆數, "updated": 更新筆數, "skipped": 缺 attraction_id 被跳過的筆數, "total": ...}。
     """
     return _bulk_upsert_by_key("tourism_attraction_fees", items, "attraction_id")
 
 
 def save_tourism_attraction_service_times(items: list[dict]) -> dict:
     """
-    依 attraction_id upsert 匯入景點營運時間資料（tourism_attraction_service_times）。
+    依 attraction_id upsert（整筆替換）匯入景點營運時間資料（tourism_attraction_service_times）。
     items 每個 dict 應含 attraction_id / attraction_name / service_time /
     source_update_time / imported_at / raw_data。
     """
     return _bulk_upsert_by_key("tourism_attraction_service_times", items, "attraction_id")
 
 
-def get_tourism_attraction_fees(attraction_id: str) -> dict | None:
+def get_tourism_attraction_fee_by_id(attraction_id: str) -> dict | None:
     """取某景點的票價資料；沒有就回傳 None（呼叫端顯示「門票：未提供」或先不顯示）。"""
     return get_db().tourism_attraction_fees.find_one({"attraction_id": attraction_id})
+
+
+def get_tourism_attraction_fees_by_ids(attraction_ids: list[str]) -> list[dict]:
+    """
+    批次查詢多個景點的票價資料，給行程預算分析用（一次行程通常有好幾個景點，
+    不用一個一個呼叫 get_tourism_attraction_fee_by_id）。
+    回傳的筆數可能小於 attraction_ids 的數量——查不到票價的景點不會出現在
+    結果裡，呼叫端要自己用 attraction_id 對應回去，沒對到的視為「票價未提供」。
+    """
+    clean_ids = [str(value).strip() for value in attraction_ids if str(value).strip()]
+    if not clean_ids:
+        return []
+    return list(get_db().tourism_attraction_fees.find({"attraction_id": {"$in": clean_ids}}))
 
 
 def get_tourism_attraction_service_times(attraction_id: str) -> dict | None:

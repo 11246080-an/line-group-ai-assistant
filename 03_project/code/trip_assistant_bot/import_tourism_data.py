@@ -164,15 +164,66 @@ def transform_event(raw: dict, dataset_meta: dict, fetched_at: datetime) -> dict
     }
 
 
-def transform_attraction_fee(raw: dict, imported_at: datetime) -> dict:
-    """AttractionFeeList.json 一筆 -> tourism_attraction_fees 目標欄位。"""
+def _number_or_none(value: Any) -> float | None:
+    """把票價轉成 float；None／布林／無法轉換一律回 None（代表沒有這個數字，不是 0）。"""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _default_ticket_price(fees: list[dict]) -> float | None:
+    """
+    預估門票用的預設價格：優先抓「全票」，沒有全票就用票種裡最高的價格。
+    沒有任何有效價格（Fees 是空的，或每筆 Price 都不是數字）就回 None，
+    代表「票價未提供」，不可以自己猜一個數字。
+    """
+    prices = [fee["price"] for fee in fees if isinstance(fee.get("price"), (int, float))]
+    if not prices:
+        return None
+    for fee in fees:
+        name = str(fee.get("name") or "")
+        price = fee.get("price")
+        if "全票" in name and isinstance(price, (int, float)):
+            return price
+    return max(prices)
+
+
+def transform_attraction_fee(raw: dict, dataset_meta: dict, fetched_at: datetime) -> dict:
+    """
+    AttractionFeeList.json 一筆 -> tourism_attraction_fees 目標欄位。
+    Price=0 代表免費票種（不是缺資料）；Price=None 或沒有 Fees 才算票價未提供。
+    """
+    fees = []
+    for item in raw.get("Fees") or []:
+        if not isinstance(item, dict):
+            continue
+        fees.append({
+            "name": item.get("Name"),
+            "price": _number_or_none(item.get("Price")),
+            "description": item.get("Description"),
+            "url": item.get("URL"),
+        })
+
+    prices = [fee["price"] for fee in fees if isinstance(fee.get("price"), (int, float))]
+
     return {
         "attraction_id": raw.get("AttractionID"),
-        "attraction_name": raw.get("AttractionName"),
-        "fees": raw.get("Fees"),
+        "name": raw.get("AttractionName"),
+        "fees": fees,
+        "min_price": min(prices) if prices else None,
+        "max_price": max(prices) if prices else None,
+        "default_price": _default_ticket_price(fees),
+        "is_free": bool(prices and max(prices) == 0),
         "source_update_time": raw.get("UpdateTime"),
-        "imported_at": imported_at,
-        "raw_data": raw,
+        "dataset_update_time": dataset_meta.get("UpdateTime"),
+        "dataset_update_interval": dataset_meta.get("UpdateInterval"),
+        "language": dataset_meta.get("Language"),
+        "provider_id": dataset_meta.get("ProviderID"),
+        "fetched_at": fetched_at,
+        "raw_payload": raw,
     }
 
 
@@ -221,8 +272,8 @@ def import_attraction_fees(path: Path) -> dict:
     print(f"讀取景點票價資料：{path}")
     data = _load_json(path)
     raw_items = data.get("AttractionFees") or []
-    imported_at = datetime.now(timezone.utc)
-    items = [transform_attraction_fee(item, imported_at) for item in raw_items]
+    fetched_at = datetime.now(timezone.utc)
+    items = [transform_attraction_fee(item, data, fetched_at) for item in raw_items]
     print(f"  解析出 {len(items)} 筆票價，開始 upsert 匯入...")
     result = db.save_tourism_attraction_fees(items)
     print(f"  完成：{result}")
