@@ -982,6 +982,20 @@ def _build_anonymous_poll_flex(result: FlowResult) -> FlexMessage | None:
 
 
 def _itinerary_budget_label(draft: dict[str, Any]) -> str:
+    ticket_budget = draft.get("ticket_budget")
+    if isinstance(ticket_budget, dict):
+        raw_ticket_total = ticket_budget.get("estimated_total")
+        if raw_ticket_total is not None and not isinstance(raw_ticket_total, bool):
+            try:
+                amount = int(raw_ticket_total)
+            except (TypeError, ValueError):
+                amount = -1
+            if amount >= 0:
+                priced_count = int(ticket_budget.get("priced_count") or 0)
+                total_spots = int(ticket_budget.get("total_spots") or 0)
+                missing_count = max(0, total_spots - priced_count)
+                note = f"；{missing_count} 個票價未提供" if missing_count else ""
+                return f"門票預估 NT${amount:,}（已估 {priced_count} 個景點{note}）"
     raw_budget = draft.get("estimated_budget")
     if raw_budget is None or isinstance(raw_budget, bool):
         return "預算待確認"

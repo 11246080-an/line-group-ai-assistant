@@ -532,6 +532,8 @@ def _tourism_item_to_result(item: dict[str, Any], *, item_type: str) -> dict[str
     subtitle = address or " ".join(part for part in (city, town) if part).strip()
 
     return {
+        "attraction_id": str(item.get("attraction_id") or "").strip(),
+        "event_id": str(item.get("event_id") or "").strip(),
         "name": str(item.get("name") or "未命名景點").strip(),
         "subtitle": subtitle,
         "description": _format_tourism_description(item, item_type=item_type),
@@ -1070,6 +1072,9 @@ def resolve_itinerary_spot_coordinates(
         spot["longitude"] = _coerce_float(candidate.get("longitude"))
         if not str(spot.get("address") or "").strip():
             spot["address"] = str(candidate.get("address") or "").strip()
+        attraction_id = str(candidate.get("attraction_id") or "").strip()
+        if attraction_id:
+            spot["attraction_id"] = attraction_id
         spot["coordinate_source"] = source
         if source == "tourism_open_data":
             tourism_matches += 1

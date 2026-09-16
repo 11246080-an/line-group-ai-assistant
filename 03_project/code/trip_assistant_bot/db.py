@@ -1655,6 +1655,9 @@ def create_itinerary(
             "address": spot.get("address", ""),
             "latitude": spot.get("latitude"),
             "longitude": spot.get("longitude"),
+            "attraction_id": spot.get("attraction_id"),
+            "ticket_price": spot.get("ticket_price"),
+            "ticket_price_source": spot.get("ticket_price_source"),
         })
 
     normalized_transport: list[dict] = []

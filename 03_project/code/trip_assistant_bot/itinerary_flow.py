@@ -143,6 +143,166 @@ def _normalize_draft(value: Any) -> dict[str, Any] | None:
     return redact_structure(payload)
 
 
+def _coerce_ticket_price(value: Any) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        amount = round(float(value))
+    except (TypeError, ValueError):
+        return None
+    return amount if amount >= 0 else None
+
+
+def _spot_attraction_id(spot: dict[str, Any]) -> str:
+    for key in ("attraction_id", "tourism_attraction_id"):
+        value = str(spot.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _match_attraction_id_by_name(*, name: str, region: str) -> str:
+    if not name or not database_contract_ready(("get_tourism_attractions",)):
+        return ""
+    get_attractions = _db_function("get_tourism_attractions")
+    candidates: list[dict[str, Any]] = []
+    city = region.strip() if region.strip().endswith(("市", "縣")) else ""
+    for kwargs in (
+        {"city": city, "keyword": name, "limit": 10} if city else None,
+        {"keyword": name, "limit": 10},
+    ):
+        if not kwargs:
+            continue
+        try:
+            candidates.extend(
+                item for item in get_attractions(**kwargs) or [] if isinstance(item, dict)
+            )
+        except Exception:
+            continue
+        if candidates:
+            break
+
+    normalized_name = re.sub(r"\s+", "", name).casefold()
+    for candidate in candidates:
+        candidate_name = re.sub(r"\s+", "", str(candidate.get("name") or "")).casefold()
+        if candidate_name == normalized_name:
+            return str(candidate.get("attraction_id") or "").strip()
+    for candidate in candidates:
+        candidate_name = re.sub(r"\s+", "", str(candidate.get("name") or "")).casefold()
+        if normalized_name and (
+            normalized_name in candidate_name or candidate_name in normalized_name
+        ):
+            return str(candidate.get("attraction_id") or "").strip()
+    return str((candidates[0] or {}).get("attraction_id") or "").strip() if candidates else ""
+
+
+def _estimate_ticket_budget(
+    spots: list[dict[str, Any]],
+    *,
+    region: str,
+) -> dict[str, Any]:
+    total_spots = len([spot for spot in spots if isinstance(spot, dict)])
+    if not total_spots or not database_contract_ready(("get_tourism_attraction_fees_by_ids",)):
+        return {
+            "currency": "TWD",
+            "estimated_total": None,
+            "priced_count": 0,
+            "total_spots": total_spots,
+            "items": [],
+            "missing_names": [],
+        }
+
+    spot_pairs: list[tuple[dict[str, Any], str]] = []
+    for spot in spots:
+        if not isinstance(spot, dict):
+            continue
+        attraction_id = _spot_attraction_id(spot)
+        if not attraction_id:
+            attraction_id = _match_attraction_id_by_name(
+                name=str(spot.get("name") or "").strip(),
+                region=region,
+            )
+            if attraction_id:
+                spot["attraction_id"] = attraction_id
+        spot_pairs.append((spot, attraction_id))
+
+    attraction_ids = [attraction_id for _spot, attraction_id in spot_pairs if attraction_id]
+    try:
+        fee_documents = _db_function("get_tourism_attraction_fees_by_ids")(attraction_ids)
+    except Exception:
+        fee_documents = []
+    fee_by_id = {
+        str(item.get("attraction_id") or ""): item
+        for item in fee_documents or []
+        if isinstance(item, dict)
+    }
+
+    items: list[dict[str, Any]] = []
+    missing_names: list[str] = []
+    total = 0
+    for spot, attraction_id in spot_pairs:
+        name = str(spot.get("name") or "未命名景點").strip()
+        fee = fee_by_id.get(attraction_id)
+        price = _coerce_ticket_price((fee or {}).get("default_price")) if fee else None
+        if price is None:
+            missing_names.append(name)
+            continue
+        fee_name = ""
+        for fee_item in (fee.get("fees") if isinstance(fee, dict) else []) or []:
+            if not isinstance(fee_item, dict):
+                continue
+            if _coerce_ticket_price(fee_item.get("price")) == price:
+                fee_name = str(fee_item.get("name") or "").strip()
+                break
+        spot["ticket_price"] = price
+        spot["ticket_price_source"] = "tourism_attraction_fees"
+        items.append(
+            {
+                "name": name,
+                "attraction_id": attraction_id,
+                "price": price,
+                "fee_name": fee_name,
+            }
+        )
+        total += price
+
+    return {
+        "currency": "TWD",
+        "estimated_total": total if items else None,
+        "priced_count": len(items),
+        "total_spots": total_spots,
+        "items": items,
+        "missing_names": missing_names,
+    }
+
+
+def _apply_ticket_budget_to_itinerary(itinerary: dict[str, Any]) -> dict[str, Any]:
+    spots = [spot for spot in itinerary.get("spots") or [] if isinstance(spot, dict)]
+    ticket_budget = _estimate_ticket_budget(
+        spots,
+        region=str(itinerary.get("region") or ""),
+    )
+    updated = {**itinerary, "spots": spots, "ticket_budget": ticket_budget}
+    if ticket_budget.get("estimated_total") is not None:
+        updated["estimated_budget"] = ticket_budget["estimated_total"]
+        updated["currency"] = ticket_budget.get("currency") or "TWD"
+    return updated
+
+
+def _ticket_budget_summary_text(ticket_budget: dict[str, Any]) -> str:
+    amount = _coerce_ticket_price(ticket_budget.get("estimated_total"))
+    if amount is None:
+        return ""
+    priced_count = int(ticket_budget.get("priced_count") or 0)
+    total_spots = int(ticket_budget.get("total_spots") or 0)
+    missing_count = max(0, total_spots - priced_count)
+    text = f"門票預估：NT${amount:,}（已估 {priced_count} 個景點"
+    if missing_count:
+        text += f"，{missing_count} 個景點票價未提供"
+    text += "）。"
+    return text
+
+
 def stage_generated_itinerary(
     *,
     line_group_id: str,
@@ -158,6 +318,7 @@ def stage_generated_itinerary(
         return FlowResult(False)
     if not database_contract_ready(("save_feature_draft",)):
         return database_unavailable_result()
+    normalized = _apply_ticket_budget_to_itinerary(normalized)
 
     draft_id = secrets.token_urlsafe(9)
     _db_function("save_feature_draft")(
@@ -167,8 +328,11 @@ def stage_generated_itinerary(
         payload={"itinerary": normalized, "created_by": line_user_id, "draft_id": draft_id},
     )
     text = str(reply_text or "").strip()
+    ticket_summary = _ticket_budget_summary_text(normalized.get("ticket_budget") or {})
     if text:
         text += "\n\n"
+    if ticket_summary:
+        text += ticket_summary + "\n\n"
     text += "這是行程草稿。確認後才會保存為群組的私人行程。"
     return FlowResult(
         True,
@@ -253,6 +417,7 @@ def _confirm_draft(*, line_group_id: str, line_user_id: str, draft_id: str = "")
         line_group_id=line_group_id,
     )
     itinerary = {**itinerary, "spots": resolved_spots}
+    itinerary = _apply_ticket_budget_to_itinerary(itinerary)
 
     active_book = _db_function("get_active_expense_book")(line_group_id)
     had_active_book = isinstance(active_book, dict)
@@ -297,6 +462,17 @@ def _confirm_draft(*, line_group_id: str, line_user_id: str, draft_id: str = "")
         budget={
             "currency": str(itinerary.get("currency") or "TWD"),
             "estimated_total": itinerary.get("estimated_budget"),
+            "category_breakdown": (
+                [
+                    {
+                        "category": "門票",
+                        "amount": itinerary["ticket_budget"]["estimated_total"],
+                    }
+                ]
+                if isinstance(itinerary.get("ticket_budget"), dict)
+                and itinerary["ticket_budget"].get("estimated_total") is not None
+                else []
+            ),
         },
     )
     optional_fields = {
@@ -315,9 +491,11 @@ def _confirm_draft(*, line_group_id: str, line_user_id: str, draft_id: str = "")
     )
     title = str((created or {}).get("title") or itinerary.get("title") or "行程")
     ledger_text = "已連接目前帳本" if had_active_book else "已同時建立行程帳本"
+    ticket_summary = _ticket_budget_summary_text(itinerary.get("ticket_budget") or {})
+    suffix = f"\n{ticket_summary}" if ticket_summary else ""
     return FlowResult(
         True,
-        f"已將「{redact_sensitive_identifiers(title)}」保存為群組私人行程，{ledger_text}。",
+        f"已將「{redact_sensitive_identifiers(title)}」保存為群組私人行程，{ledger_text}。{suffix}",
     )
 
 
