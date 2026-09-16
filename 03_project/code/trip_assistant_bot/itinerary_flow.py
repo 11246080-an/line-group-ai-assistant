@@ -276,6 +276,126 @@ def _estimate_ticket_budget(
     }
 
 
+_SERVICE_DAY_LABELS = {
+    "Monday": "一",
+    "Tuesday": "二",
+    "Wednesday": "三",
+    "Thursday": "四",
+    "Friday": "五",
+    "Saturday": "六",
+    "Sunday": "日",
+}
+
+
+def _format_service_days(days: Any) -> str:
+    if not isinstance(days, list) or not days:
+        return ""
+    labels = [_SERVICE_DAY_LABELS.get(str(day), str(day)) for day in days if str(day)]
+    if not labels:
+        return ""
+    weekdays = ["一", "二", "三", "四", "五"]
+    weekend = ["六", "日"]
+    if labels == weekdays:
+        return "週一至週五"
+    if labels == weekend:
+        return "週六至週日"
+    if labels == weekdays + weekend:
+        return "每日"
+    return "週" + "、".join(labels)
+
+
+def _format_service_clock(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    match = re.match(r"^(\d{1,2}):(\d{2})", text)
+    if not match:
+        return text
+    return f"{int(match.group(1)):02d}:{match.group(2)}"
+
+
+def _format_service_time_entry(entry: dict[str, Any]) -> str:
+    day_text = _format_service_days(entry.get("ServiceDays"))
+    start = _format_service_clock(entry.get("StartTime"))
+    end = _format_service_clock(entry.get("EndTime"))
+    time_text = f"{start}-{end}" if start and end else start or end
+    name = str(entry.get("Name") or "").strip()
+    description = str(entry.get("Description") or "").strip()
+    parts = [part for part in (day_text, time_text, name or description) if part]
+    return " ".join(parts)
+
+
+def _service_time_summary_from_doc(document: dict[str, Any]) -> str:
+    entries = document.get("service_time")
+    if not isinstance(entries, list):
+        entries = []
+    lines = [
+        _format_service_time_entry(entry)
+        for entry in entries
+        if isinstance(entry, dict)
+    ]
+    lines = [line for line in lines if line]
+    if not lines:
+        return ""
+    return "；".join(lines[:2])
+
+
+def _lookup_service_time_notice(
+    spots: list[dict[str, Any]],
+    *,
+    region: str,
+) -> dict[str, Any]:
+    total_spots = len([spot for spot in spots if isinstance(spot, dict)])
+    required = ("get_tourism_attraction_service_times_by_ids",)
+    if not total_spots or not database_contract_ready(required):
+        return {"items": [], "missing_names": [], "covered_count": 0, "total_spots": total_spots}
+
+    spot_pairs: list[tuple[dict[str, Any], str]] = []
+    for spot in spots:
+        if not isinstance(spot, dict):
+            continue
+        attraction_id = _spot_attraction_id(spot)
+        if not attraction_id:
+            attraction_id = _match_attraction_id_by_name(
+                name=str(spot.get("name") or "").strip(),
+                region=region,
+            )
+            if attraction_id:
+                spot["attraction_id"] = attraction_id
+        spot_pairs.append((spot, attraction_id))
+
+    attraction_ids = [attraction_id for _spot, attraction_id in spot_pairs if attraction_id]
+    try:
+        documents = _db_function("get_tourism_attraction_service_times_by_ids")(attraction_ids)
+    except Exception:
+        documents = []
+    service_by_id = {
+        str(item.get("attraction_id") or ""): item
+        for item in documents or []
+        if isinstance(item, dict)
+    }
+
+    items: list[dict[str, Any]] = []
+    missing_names: list[str] = []
+    for spot, attraction_id in spot_pairs:
+        name = str(spot.get("name") or "未命名景點").strip()
+        document = service_by_id.get(attraction_id)
+        summary = _service_time_summary_from_doc(document) if document else ""
+        if not summary:
+            missing_names.append(name)
+            continue
+        spot["service_time_summary"] = summary
+        spot["service_time_source"] = "tourism_attraction_service_times"
+        items.append({"name": name, "attraction_id": attraction_id, "summary": summary})
+
+    return {
+        "items": items,
+        "missing_names": missing_names,
+        "covered_count": len(items),
+        "total_spots": total_spots,
+    }
+
+
 def _apply_ticket_budget_to_itinerary(itinerary: dict[str, Any]) -> dict[str, Any]:
     spots = [spot for spot in itinerary.get("spots") or [] if isinstance(spot, dict)]
     ticket_budget = _estimate_ticket_budget(
@@ -287,6 +407,15 @@ def _apply_ticket_budget_to_itinerary(itinerary: dict[str, Any]) -> dict[str, An
         updated["estimated_budget"] = ticket_budget["estimated_total"]
         updated["currency"] = ticket_budget.get("currency") or "TWD"
     return updated
+
+
+def _apply_service_time_notice_to_itinerary(itinerary: dict[str, Any]) -> dict[str, Any]:
+    spots = [spot for spot in itinerary.get("spots") or [] if isinstance(spot, dict)]
+    notice = _lookup_service_time_notice(
+        spots,
+        region=str(itinerary.get("region") or ""),
+    )
+    return {**itinerary, "spots": spots, "service_time_notice": notice}
 
 
 def _ticket_budget_summary_text(ticket_budget: dict[str, Any]) -> str:
@@ -301,6 +430,26 @@ def _ticket_budget_summary_text(ticket_budget: dict[str, Any]) -> str:
         text += f"，{missing_count} 個景點票價未提供"
     text += "）。"
     return text
+
+
+def _service_time_summary_text(service_time_notice: dict[str, Any]) -> str:
+    items = [
+        item for item in service_time_notice.get("items") or []
+        if isinstance(item, dict) and str(item.get("summary") or "").strip()
+    ]
+    if not items:
+        return ""
+    covered_count = int(service_time_notice.get("covered_count") or len(items))
+    total_spots = int(service_time_notice.get("total_spots") or covered_count)
+    missing_count = max(0, total_spots - covered_count)
+    lines = [f"營業時間提醒：已查到 {covered_count} 個景點"]
+    if missing_count:
+        lines[0] += f"，{missing_count} 個景點未提供營業時間"
+    lines[0] += "。"
+    for item in items[:3]:
+        lines.append(f"- {item.get('name')}：{item.get('summary')}")
+    lines.append("實際營業仍可能受天候、活動或現場公告影響。")
+    return "\n".join(lines)
 
 
 def stage_generated_itinerary(
@@ -319,6 +468,7 @@ def stage_generated_itinerary(
     if not database_contract_ready(("save_feature_draft",)):
         return database_unavailable_result()
     normalized = _apply_ticket_budget_to_itinerary(normalized)
+    normalized = _apply_service_time_notice_to_itinerary(normalized)
 
     draft_id = secrets.token_urlsafe(9)
     _db_function("save_feature_draft")(
@@ -329,10 +479,13 @@ def stage_generated_itinerary(
     )
     text = str(reply_text or "").strip()
     ticket_summary = _ticket_budget_summary_text(normalized.get("ticket_budget") or {})
+    service_time_summary = _service_time_summary_text(normalized.get("service_time_notice") or {})
     if text:
         text += "\n\n"
     if ticket_summary:
         text += ticket_summary + "\n\n"
+    if service_time_summary:
+        text += service_time_summary + "\n\n"
     text += "這是行程草稿。確認後才會保存為群組的私人行程。"
     return FlowResult(
         True,
@@ -418,6 +571,7 @@ def _confirm_draft(*, line_group_id: str, line_user_id: str, draft_id: str = "")
     )
     itinerary = {**itinerary, "spots": resolved_spots}
     itinerary = _apply_ticket_budget_to_itinerary(itinerary)
+    itinerary = _apply_service_time_notice_to_itinerary(itinerary)
 
     active_book = _db_function("get_active_expense_book")(line_group_id)
     had_active_book = isinstance(active_book, dict)
@@ -492,7 +646,9 @@ def _confirm_draft(*, line_group_id: str, line_user_id: str, draft_id: str = "")
     title = str((created or {}).get("title") or itinerary.get("title") or "行程")
     ledger_text = "已連接目前帳本" if had_active_book else "已同時建立行程帳本"
     ticket_summary = _ticket_budget_summary_text(itinerary.get("ticket_budget") or {})
-    suffix = f"\n{ticket_summary}" if ticket_summary else ""
+    service_time_summary = _service_time_summary_text(itinerary.get("service_time_notice") or {})
+    suffix_parts = [part for part in (ticket_summary, service_time_summary) if part]
+    suffix = "\n" + "\n".join(suffix_parts) if suffix_parts else ""
     return FlowResult(
         True,
         f"已將「{redact_sensitive_identifiers(title)}」保存為群組私人行程，{ledger_text}。{suffix}",

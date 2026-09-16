@@ -1121,6 +1121,9 @@ def _build_itinerary_draft_flex(result: FlowResult) -> FlexMessage | None:
         name = redact_sensitive_identifiers(str(spot.get("name") or f"景點 {index}").strip())[:80]
         description = redact_sensitive_identifiers(str(spot.get("description") or "").strip())[:180]
         address = redact_sensitive_identifiers(str(spot.get("address") or "").strip())[:140]
+        service_time = redact_sensitive_identifiers(
+            str(spot.get("service_time_summary") or "").strip()
+        )[:180]
         detail = description or address
         spot_contents: list[dict[str, Any]] = [
             {
@@ -1139,6 +1142,17 @@ def _build_itinerary_draft_flex(result: FlowResult) -> FlexMessage | None:
                     "text": detail,
                     "size": "sm",
                     "color": "#66777B",
+                    "wrap": True,
+                    "margin": "xs",
+                }
+            )
+        if service_time:
+            spot_contents.append(
+                {
+                    "type": "text",
+                    "text": f"營業：{service_time}",
+                    "size": "xs",
+                    "color": "#147D6F",
                     "wrap": True,
                     "margin": "xs",
                 }

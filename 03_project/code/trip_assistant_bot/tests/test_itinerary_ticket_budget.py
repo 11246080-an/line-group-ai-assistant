@@ -77,6 +77,44 @@ class ItineraryTicketBudgetTests(unittest.TestCase):
         self.assertEqual(updated["estimated_budget"], 200)
         self.assertEqual(updated["ticket_budget"]["items"][0]["fee_name"], "全票")
 
+    def test_service_time_notice_formats_known_service_hours(self):
+        def fake_ready(names):
+            return True
+
+        def fake_db_function(name):
+            if name == "get_tourism_attraction_service_times_by_ids":
+                return lambda ids: [
+                    {
+                        "attraction_id": "spot-1",
+                        "service_time": [
+                            {
+                                "Name": "開放時間",
+                                "ServiceDays": ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"],
+                                "StartTime": "08:00:00",
+                                "EndTime": "17:00:00",
+                            }
+                        ],
+                    }
+                ]
+            raise AssertionError(f"unexpected db function: {name}")
+
+        itinerary = {
+            "region": "南投縣",
+            "spots": [
+                {"name": "有營業時間", "attraction_id": "spot-1"},
+                {"name": "沒有營業時間", "attraction_id": "missing"},
+            ],
+        }
+        with patch.object(itinerary_flow, "database_contract_ready", fake_ready), patch.object(
+            itinerary_flow, "_db_function", fake_db_function
+        ):
+            updated = itinerary_flow._apply_service_time_notice_to_itinerary(itinerary)
+
+        self.assertEqual(updated["service_time_notice"]["covered_count"], 1)
+        self.assertEqual(updated["service_time_notice"]["missing_names"], ["沒有營業時間"])
+        self.assertIn("週一至週五 08:00-17:00", updated["spots"][0]["service_time_summary"])
+        self.assertIn("營業時間提醒", itinerary_flow._service_time_summary_text(updated["service_time_notice"]))
+
 
 if __name__ == "__main__":
     unittest.main()

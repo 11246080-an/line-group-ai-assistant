@@ -1538,6 +1538,17 @@ def get_tourism_attraction_service_times(attraction_id: str) -> dict | None:
     return get_db().tourism_attraction_service_times.find_one({"attraction_id": attraction_id})
 
 
+def get_tourism_attraction_service_times_by_ids(attraction_ids: list[str]) -> list[dict]:
+    """
+    批次查詢多個景點的營運時間資料，給行程規劃與路線提醒用。
+    查不到營業時間的景點不會出現在結果裡，呼叫端需自行標示「未提供」。
+    """
+    clean_ids = [str(value).strip() for value in attraction_ids if str(value).strip()]
+    if not clean_ids:
+        return []
+    return list(get_db().tourism_attraction_service_times.find({"attraction_id": {"$in": clean_ids}}))
+
+
 # ══════════════════════════════════════════════════════════════════
 # 行程分享與公開網站（資料庫交接文件：行程分享與公開網站）
 #
@@ -1658,6 +1669,8 @@ def create_itinerary(
             "attraction_id": spot.get("attraction_id"),
             "ticket_price": spot.get("ticket_price"),
             "ticket_price_source": spot.get("ticket_price_source"),
+            "service_time_summary": spot.get("service_time_summary"),
+            "service_time_source": spot.get("service_time_source"),
         })
 
     normalized_transport: list[dict] = []
