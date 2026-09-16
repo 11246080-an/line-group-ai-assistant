@@ -115,6 +115,34 @@ class ItineraryTicketBudgetTests(unittest.TestCase):
         self.assertIn("週一至週五 08:00-17:00", updated["spots"][0]["service_time_summary"])
         self.assertIn("營業時間提醒", itinerary_flow._service_time_summary_text(updated["service_time_notice"]))
 
+    def test_route_duration_estimates_replace_ai_transport_minutes(self):
+        fake_estimate = SimpleNamespace(
+            duration_minutes=18,
+            distance_meters=6800,
+            travel_mode="DRIVE",
+            routing_preference="TRAFFIC_AWARE",
+            source="google_routes",
+        )
+        itinerary = {
+            "spots": [
+                {"sequence": 1, "name": "A", "latitude": 23.1, "longitude": 120.1},
+                {"sequence": 2, "name": "B", "latitude": 23.2, "longitude": 120.2},
+            ],
+            "transport": [
+                {"from_sequence": 1, "to_sequence": 2, "mode": "步行", "estimated_minutes": 5}
+            ],
+        }
+        with patch.object(itinerary_flow, "routes_api_configured", lambda: True), patch.object(
+            itinerary_flow, "estimate_route_duration", lambda **kwargs: fake_estimate
+        ):
+            updated = itinerary_flow._apply_route_duration_estimates_to_itinerary(itinerary)
+
+        leg = updated["transport"][0]
+        self.assertEqual(leg["estimated_minutes"], 18)
+        self.assertEqual(leg["mode"], "開車")
+        self.assertEqual(leg["route_duration_source"], "google_routes")
+        self.assertEqual(updated["route_duration_notice"]["updated_legs"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -28,6 +28,7 @@ from expense_flow import (
     database_unavailable_result,
     ensure_book_from_itinerary,
 )
+from google_routes import estimate_route_duration, routes_api_configured
 from location_flow import resolve_itinerary_spot_coordinates
 from privacy_redaction import redact_sensitive_identifiers, redact_structure
 
@@ -40,6 +41,13 @@ _RECOMMENDATION_REASON_DB_CONTRACT = (
     "set_published_itinerary_recommendation_reason",
 )
 _SHARE_DEADLINE_DAYS = max(1, int(os.getenv("ITINERARY_SHARE_DEADLINE_DAYS", "7")))
+_ROUTE_MODE_LABELS = {
+    "DRIVE": "開車",
+    "WALK": "步行",
+    "BICYCLE": "自行車",
+    "TRANSIT": "大眾運輸",
+    "TWO_WHEELER": "機車",
+}
 
 
 def _draft_type(draft_id: str) -> str:
@@ -418,6 +426,98 @@ def _apply_service_time_notice_to_itinerary(itinerary: dict[str, Any]) -> dict[s
     return {**itinerary, "spots": spots, "service_time_notice": notice}
 
 
+def _spot_sequence(spot: dict[str, Any], fallback: int) -> int:
+    try:
+        return max(1, int(spot.get("sequence") or fallback))
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _find_transport_leg(
+    transport: list[dict[str, Any]],
+    *,
+    from_sequence: int,
+    to_sequence: int,
+    fallback_index: int,
+) -> dict[str, Any]:
+    for leg in transport:
+        if not isinstance(leg, dict):
+            continue
+        try:
+            leg_from = int(leg.get("from_sequence") or 0)
+            leg_to = int(leg.get("to_sequence") or 0)
+        except (TypeError, ValueError):
+            continue
+        if leg_from == from_sequence and leg_to == to_sequence:
+            return leg
+    if 0 <= fallback_index < len(transport) and isinstance(transport[fallback_index], dict):
+        return transport[fallback_index]
+    leg = {"from_sequence": from_sequence, "to_sequence": to_sequence}
+    transport.append(leg)
+    return leg
+
+
+def _has_coordinates(spot: dict[str, Any]) -> bool:
+    return spot.get("latitude") is not None and spot.get("longitude") is not None
+
+
+def _apply_route_duration_estimates_to_itinerary(itinerary: dict[str, Any]) -> dict[str, Any]:
+    """Use Google Routes API to replace local/AI travel-time guesses when possible."""
+    spots = [spot for spot in itinerary.get("spots") or [] if isinstance(spot, dict)]
+    transport = [
+        dict(leg) for leg in itinerary.get("transport") or [] if isinstance(leg, dict)
+    ]
+    if len(spots) < 2 or not routes_api_configured():
+        return {**itinerary, "spots": spots, "transport": transport}
+
+    updated_count = 0
+    for index in range(len(spots) - 1):
+        origin = spots[index]
+        destination = spots[index + 1]
+        if not _has_coordinates(origin) or not _has_coordinates(destination):
+            continue
+        estimate = None
+        try:
+            estimate = estimate_route_duration(
+                origin_latitude=origin.get("latitude"),
+                origin_longitude=origin.get("longitude"),
+                destination_latitude=destination.get("latitude"),
+                destination_longitude=destination.get("longitude"),
+            )
+        except Exception:
+            estimate = None
+        if estimate is None:
+            continue
+        from_sequence = _spot_sequence(origin, index + 1)
+        to_sequence = _spot_sequence(destination, index + 2)
+        leg = _find_transport_leg(
+            transport,
+            from_sequence=from_sequence,
+            to_sequence=to_sequence,
+            fallback_index=index,
+        )
+        leg["from_sequence"] = from_sequence
+        leg["to_sequence"] = to_sequence
+        leg["estimated_minutes"] = estimate.duration_minutes
+        leg["mode"] = _ROUTE_MODE_LABELS.get(estimate.travel_mode, estimate.travel_mode)
+        leg["note"] = "Google Routes API 交通時間"
+        leg["route_duration_source"] = estimate.source
+        leg["route_travel_mode"] = estimate.travel_mode
+        leg["route_routing_preference"] = estimate.routing_preference
+        leg["distance_meters"] = estimate.distance_meters
+        updated_count += 1
+
+    if updated_count:
+        route_notice = {
+            "source": "google_routes",
+            "updated_legs": updated_count,
+            "total_legs": max(0, len(spots) - 1),
+            "note": "交通時間由 Google Routes API 估算，仍可能受即時路況影響。",
+        }
+        return {**itinerary, "spots": spots, "transport": transport, "route_duration_notice": route_notice}
+    return {**itinerary, "spots": spots, "transport": transport}
+
+
 def _ticket_budget_summary_text(ticket_budget: dict[str, Any]) -> str:
     amount = _coerce_ticket_price(ticket_budget.get("estimated_total"))
     if amount is None:
@@ -467,6 +567,13 @@ def stage_generated_itinerary(
         return FlowResult(False)
     if not database_contract_ready(("save_feature_draft",)):
         return database_unavailable_result()
+    resolved_spots, _coordinate_summary = resolve_itinerary_spot_coordinates(
+        list(normalized.get("spots") or []),
+        region=str(normalized.get("region") or ""),
+        line_group_id=line_group_id,
+    )
+    normalized = {**normalized, "spots": resolved_spots}
+    normalized = _apply_route_duration_estimates_to_itinerary(normalized)
     normalized = _apply_ticket_budget_to_itinerary(normalized)
     normalized = _apply_service_time_notice_to_itinerary(normalized)
 
@@ -570,6 +677,7 @@ def _confirm_draft(*, line_group_id: str, line_user_id: str, draft_id: str = "")
         line_group_id=line_group_id,
     )
     itinerary = {**itinerary, "spots": resolved_spots}
+    itinerary = _apply_route_duration_estimates_to_itinerary(itinerary)
     itinerary = _apply_ticket_budget_to_itinerary(itinerary)
     itinerary = _apply_service_time_notice_to_itinerary(itinerary)
 
