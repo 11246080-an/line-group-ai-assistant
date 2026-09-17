@@ -598,11 +598,93 @@ def _load_trip_website_lookup() -> dict[str, Any]:
     }
 
 
+def _published_itinerary_payload(public_id: str) -> dict[str, Any] | None:
+    """Load a currently published itinerary from the same DB used by the website API."""
+    try:
+        import db as db_module
+
+        get_published_itinerary = getattr(db_module, "get_published_itinerary", None)
+        if not callable(get_published_itinerary):
+            return None
+        document = get_published_itinerary(public_id=public_id)
+    except Exception:
+        # Keep the bundled static itineraries usable when the database is unavailable.
+        return None
+
+    if not isinstance(document, dict):
+        return None
+
+    spots: list[dict[str, Any]] = []
+    for index, raw_spot in enumerate(document.get("spots") or [], start=1):
+        if not isinstance(raw_spot, dict):
+            continue
+        spots.append(
+            {
+                "spot_id": _as_text(raw_spot.get("spot_id") or raw_spot.get("id"))
+                or f"{public_id}-spot-{index:02d}",
+                "sequence": _as_int(raw_spot.get("sequence"), default=index),
+                "name": _as_text(raw_spot.get("name") or raw_spot.get("spot_name"))
+                or f"第 {index} 站",
+                "description": _as_text(
+                    raw_spot.get("description") or raw_spot.get("spot_description")
+                ),
+            }
+        )
+
+    budget_value = document.get("budget")
+    if isinstance(budget_value, dict):
+        currency = _as_text(budget_value.get("currency")) or "TWD"
+        if budget_value.get("per_person") is not None:
+            budget = f"每人約 {budget_value['per_person']} {currency}"
+        elif budget_value.get("actual_total") is not None:
+            budget = f"總計約 {budget_value['actual_total']} {currency}"
+        elif budget_value.get("estimated_total") is not None:
+            budget = f"預估總計 {budget_value['estimated_total']} {currency}"
+        else:
+            budget = ""
+    else:
+        budget = _as_text(budget_value)
+
+    transport_value = document.get("transport")
+    if isinstance(transport_value, list):
+        modes = []
+        for leg in transport_value:
+            mode = _as_text(leg.get("mode")) if isinstance(leg, dict) else _as_text(leg)
+            if mode and mode not in modes:
+                modes.append(mode)
+        transport = "/".join(modes)
+    else:
+        transport = _as_text(transport_value)
+
+    return {
+        "kind": "travel_itinerary_import",
+        "version": _as_int(document.get("version"), default=1),
+        "itinerary_id": public_id,
+        "title": _as_text(document.get("title")) or public_id,
+        "region": _as_text(document.get("region")),
+        "budget": budget,
+        "distance": "",
+        "type": _as_text(document.get("type")),
+        "transport": transport,
+        "duration": _as_text(document.get("duration")),
+        "summary": _as_text(document.get("summary")),
+        "description": _as_text(document.get("description")),
+        "bestFor": _as_text(document.get("bestFor") or document.get("best_for")),
+        "comment": _as_text(document.get("comment")),
+        "spots": spots,
+    }
+
+
 def _lookup_itinerary_payload(
     *,
     itinerary_id: str = "",
     itinerary_title: str = "",
 ) -> dict[str, Any]:
+    if itinerary_id:
+        published_itinerary = _published_itinerary_payload(itinerary_id)
+        if published_itinerary is not None:
+            return published_itinerary
+
     lookup = _load_trip_website_lookup()
 
     if itinerary_id:

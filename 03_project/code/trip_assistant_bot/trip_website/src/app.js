@@ -1156,33 +1156,10 @@
     return /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
   }
 
-  async function openLineShareTarget(shareText) {
+  function openLineShareTarget(shareText) {
     const shareUrl = `${LINE_SHARE_URL}${encodeURIComponent(shareText)}`;
-
-    if (isProbablyMobileDevice()) {
-      window.location.href = shareUrl;
-      return true;
-    }
-
-    if (navigator.share) {
-      try {
-        await navigator.share({
-          title: "分享到 LINE 群組",
-          text: shareText,
-        });
-        return true;
-      } catch (error) {
-        if (error && error.name === "AbortError") {
-          return false;
-        }
-        console.warn("Web Share failed", error);
-      }
-    }
-
-    window.alert(
-      "已複製匯入訊息。LINE 群組分享目前以手機操作最順，請在手機上開啟本頁，或把剛剛複製的訊息貼到群組裡送出。"
-    );
-    return false;
+    window.location.assign(shareUrl);
+    return true;
   }
 
   async function copyLineImportPayload(payload) {

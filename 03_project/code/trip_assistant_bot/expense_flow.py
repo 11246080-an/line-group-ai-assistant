@@ -131,6 +131,53 @@ def _parse_participants(value: str) -> tuple[list[str], bool]:
     return participants, bool(participants)
 
 
+def normalize_participants_for_storage(value: Any) -> list[dict[str, Any]]:
+    """Normalize draft participants to the member documents expected by the DB layer."""
+    if value is None:
+        return []
+
+    values = value if isinstance(value, (list, tuple, set)) else [value]
+    participants: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+
+    for item in values:
+        if isinstance(item, dict):
+            line_user_id = str(item.get("line_user_id") or "").strip()[:128]
+            display_name = _clean_name(
+                item.get("display_name") or item.get("name") or line_user_id,
+                max_length=80,
+            )
+        else:
+            line_user_id = ""
+            display_name = _clean_name(item, max_length=80)
+
+        if not display_name and not line_user_id:
+            continue
+
+        if line_user_id:
+            participant = {
+                "type": "line",
+                "line_user_id": line_user_id,
+                "display_name": display_name or line_user_id,
+            }
+            key = ("line", line_user_id)
+        else:
+            participant = {
+                "type": "manual",
+                "display_name": display_name,
+            }
+            key = ("manual", display_name.casefold())
+
+        if key in seen:
+            continue
+        seen.add(key)
+        participants.append(participant)
+        if len(participants) >= 50:
+            break
+
+    return participants
+
+
 def infer_category(text: str) -> str:
     for category, hints in _CATEGORY_HINTS.items():
         if any(hint in text for hint in hints):
@@ -546,9 +593,13 @@ def _confirm_expense(line_group_id: str, line_user_id: str) -> FlowResult:
         )
     if payload.get("missing"):
         return _draft_result_after_edit("expense", payload)
+    expense_payload = {
+        **payload,
+        "participants": normalize_participants_for_storage(payload.get("participants")),
+    }
     expense = _db_function("create_expense")(
         book_id=payload.get("book_id"),
-        expense=redact_structure(payload),
+        expense=redact_structure(expense_payload),
         created_by=line_user_id,
     )
     _db_function("delete_feature_draft")(
@@ -918,7 +969,11 @@ def handle_expense_postback(
             )
             final_book = closed if isinstance(closed, dict) else (book or {})
             expenses = _db_function("list_expenses")(_book_id(final_book), status="confirmed") or []
-            return build_expense_report_result(final_book, list(expenses))
+            result = build_expense_report_result(final_book, list(expenses))
+            # The app uses this signal to create the post-trip sharing vote.
+            # Without it, a manually closed trip only receives the expense report.
+            result.data["trip_closed"] = True
+            return result
         if len(action) == 2 and action[0] == "participants":
             if not database_contract_ready():
                 return database_unavailable_result()
