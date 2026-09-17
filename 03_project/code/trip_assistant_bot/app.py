@@ -1111,6 +1111,24 @@ def _build_itinerary_draft_flex(result: FlowResult) -> FlexMessage | None:
                 "wrap": True,
             },
         )
+    source_notice = draft.get("recommendation_source_notice")
+    source_label = ""
+    if isinstance(source_notice, dict):
+        source_label = redact_sensitive_identifiers(
+            str(source_notice.get("label") or "").strip()
+        )[:80]
+    if source_label:
+        body_contents.insert(
+            3 if draft_metadata else 2,
+            {
+                "type": "text",
+                "text": source_label,
+                "size": "xs",
+                "color": "#147D6F",
+                "margin": "sm",
+                "wrap": True,
+            },
+        )
 
     displayed_spots = spots[:8]
     for index, spot in enumerate(displayed_spots, start=1):

@@ -1634,6 +1634,7 @@ def create_itinerary(
     summary: str = "",
     duration: str = "",
     budget: dict | None = None,
+    recommendation_source_notice: dict | None = None,
 ) -> dict:
     """
     使用者按下「確認行程」後建立正式私人行程。
@@ -1671,6 +1672,7 @@ def create_itinerary(
             "ticket_price_source": spot.get("ticket_price_source"),
             "service_time_summary": spot.get("service_time_summary"),
             "service_time_source": spot.get("service_time_source"),
+            "recommendation_source": spot.get("recommendation_source"),
         })
 
     normalized_transport: list[dict] = []
@@ -1717,6 +1719,9 @@ def create_itinerary(
         "spots": normalized_spots,
         "transport": normalized_transport,
         "budget": budget_doc,
+        "recommendation_source_notice": (
+            recommendation_source_notice if isinstance(recommendation_source_notice, dict) else None
+        ),
         "start_at": None,
         "end_at": None,
         "timezone": "Asia/Taipei",

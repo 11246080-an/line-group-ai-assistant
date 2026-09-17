@@ -204,6 +204,36 @@ def _match_attraction_id_by_name(*, name: str, region: str) -> str:
     return str((candidates[0] or {}).get("attraction_id") or "").strip() if candidates else ""
 
 
+def _apply_tourism_source_notice_to_itinerary(itinerary: dict[str, Any]) -> dict[str, Any]:
+    spots = [spot for spot in itinerary.get("spots") or [] if isinstance(spot, dict)]
+    total_spots = len(spots)
+    if not total_spots:
+        return itinerary
+
+    region = str(itinerary.get("region") or "").strip()
+    matched_count = 0
+    for spot in spots:
+        attraction_id = _spot_attraction_id(spot)
+        if not attraction_id:
+            attraction_id = _match_attraction_id_by_name(
+                name=str(spot.get("name") or "").strip(),
+                region=region,
+            )
+            if attraction_id:
+                spot["attraction_id"] = attraction_id
+        if attraction_id:
+            matched_count += 1
+            spot.setdefault("recommendation_source", "tourism_open_data")
+
+    itinerary["recommendation_source_notice"] = {
+        "label": "景點推薦來源：觀光署資料庫",
+        "provider": "tourism_open_data",
+        "matched_count": matched_count,
+        "total_spots": total_spots,
+    }
+    return itinerary
+
+
 def _estimate_ticket_budget(
     spots: list[dict[str, Any]],
     *,
@@ -596,6 +626,7 @@ def stage_generated_itinerary(
         line_group_id=line_group_id,
     )
     normalized = {**normalized, "spots": resolved_spots}
+    normalized = _apply_tourism_source_notice_to_itinerary(normalized)
     normalized = _apply_route_duration_estimates_to_itinerary(normalized)
     normalized = _apply_ticket_budget_to_itinerary(normalized)
     normalized = _apply_service_time_notice_to_itinerary(normalized)
@@ -700,6 +731,7 @@ def _confirm_draft(*, line_group_id: str, line_user_id: str, draft_id: str = "")
         line_group_id=line_group_id,
     )
     itinerary = {**itinerary, "spots": resolved_spots}
+    itinerary = _apply_tourism_source_notice_to_itinerary(itinerary)
     itinerary = _apply_route_duration_estimates_to_itinerary(itinerary)
     itinerary = _apply_ticket_budget_to_itinerary(itinerary)
     itinerary = _apply_service_time_notice_to_itinerary(itinerary)
@@ -763,6 +795,7 @@ def _confirm_draft(*, line_group_id: str, line_user_id: str, draft_id: str = "")
     optional_fields = {
         "itinerary_type": str(itinerary.get("type") or ""),
         "best_for": str(itinerary.get("best_for") or ""),
+        "recommendation_source_notice": itinerary.get("recommendation_source_notice"),
         "confirmed_by": line_user_id,
     }
     for key, value in optional_fields.items():

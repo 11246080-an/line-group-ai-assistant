@@ -154,6 +154,27 @@ class ItineraryTicketBudgetTests(unittest.TestCase):
         self.assertEqual(leg["route_duration_options"][1]["mode"], "步行")
         self.assertEqual(updated["route_duration_notice"]["updated_legs"], 1)
 
+    def test_tourism_source_notice_marks_matched_spots(self):
+        itinerary = {
+            "region": "台中市",
+            "spots": [
+                {"name": "東勢林場"},
+                {"name": "特色餐廳"},
+            ],
+        }
+        with patch.object(
+            itinerary_flow,
+            "_match_attraction_id_by_name",
+            lambda *, name, region: "tourism-001" if name == "東勢林場" else "",
+        ):
+            updated = itinerary_flow._apply_tourism_source_notice_to_itinerary(itinerary)
+
+        self.assertEqual(updated["recommendation_source_notice"]["label"], "景點推薦來源：觀光署資料庫")
+        self.assertEqual(updated["recommendation_source_notice"]["matched_count"], 1)
+        self.assertEqual(updated["recommendation_source_notice"]["total_spots"], 2)
+        self.assertEqual(updated["spots"][0]["attraction_id"], "tourism-001")
+        self.assertEqual(updated["spots"][0]["recommendation_source"], "tourism_open_data")
+
 
 if __name__ == "__main__":
     unittest.main()
