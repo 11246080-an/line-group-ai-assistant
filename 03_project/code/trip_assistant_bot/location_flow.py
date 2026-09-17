@@ -458,6 +458,56 @@ def _shorten_tourism_text(value: Any, max_length: int = 42) -> str:
     return f"{text[:max_length].rstrip()}..."
 
 
+def _tourism_brief_intro(item: dict[str, Any], *, item_type: str) -> str:
+    if item_type != "attraction":
+        return _shorten_tourism_text(item.get("description"), 44)
+
+    name = str(item.get("name") or "").strip()
+    town = str(item.get("town") or "").strip()
+    description = str(item.get("description") or "").strip()
+    searchable = f"{name} {description}"
+
+    if any(token in searchable for token in ("老街", "街屋", "古街", "聚落", "客家")):
+        theme = "老街與在地文化"
+        activity = "適合散步拍照、吃小吃與感受街區氛圍"
+    elif any(token in searchable for token in ("湖", "水庫", "河濱", "濕地", "埤塘")):
+        theme = "湖畔與自然景觀"
+        activity = "適合散步、拍照與放鬆看風景"
+    elif any(token in searchable for token in ("公園", "步道", "森林", "瀑布", "自然", "生態")):
+        theme = "自然景觀"
+        activity = "適合輕鬆散步、拍照與親近自然"
+    elif any(token in searchable for token in ("美術", "藝術", "文創", "電影", "光影", "展演", "園區")):
+        theme = "藝文與展覽空間"
+        activity = "適合拍照、看展與輕鬆散步"
+    elif any(token in searchable for token in ("紀念", "歷史", "古蹟", "文化", "故事館", "館")):
+        theme = "歷史文化景點"
+        activity = "適合拍照、散步與了解在地故事"
+    else:
+        first_sentence = re.split(r"[。！？!?]", description, maxsplit=1)[0].strip()
+        if first_sentence:
+            return _shorten_tourism_text(first_sentence, 44)
+        theme = "景點候選"
+        activity = "適合輕鬆走走與拍照"
+
+    prefix = f"位於{town}，" if town else ""
+    return _shorten_tourism_text(f"{prefix}{theme}，{activity}。", 44)
+
+
+def _tourism_maps_url(item: dict[str, Any]) -> str:
+    website_url = str(item.get("website_url") or "").strip()
+    if website_url.startswith(("http://", "https://")):
+        return website_url
+
+    name = str(item.get("name") or "").strip()
+    address = str(item.get("address") or "").strip()
+    city = str(item.get("city") or "").strip()
+    town = str(item.get("town") or "").strip()
+    query = " ".join(part for part in (name, address, city, town) if part).strip()
+    if not query:
+        return ""
+    return "https://www.google.com/maps/search/?" + urlencode({"api": "1", "query": query})
+
+
 TAIPEI_TIMEZONE = timezone(timedelta(hours=8))
 RECENT_TOURISM_EVENT_WINDOW_DAYS = 45
 
@@ -557,7 +607,7 @@ def _is_tourism_event_lookup_request(
 def _format_tourism_description(item: dict[str, Any], *, item_type: str) -> str:
     parts: list[str] = []
 
-    raw_description = _shorten_tourism_text(item.get("description"), 44)
+    raw_description = _tourism_brief_intro(item, item_type=item_type)
     if raw_description:
         parts.append(raw_description)
     elif item_type == "attraction":
@@ -607,7 +657,7 @@ def _tourism_item_to_result(item: dict[str, Any], *, item_type: str) -> dict[str
         "description": _format_tourism_description(item, item_type=item_type),
         "distance_km": None,
         "address": address,
-        "maps_url": str(item.get("website_url") or "").strip(),
+        "maps_url": _tourism_maps_url(item),
         "latitude": _coerce_float(item.get("latitude")),
         "longitude": _coerce_float(item.get("longitude")),
         "provider": f"tourism_{item_type}",

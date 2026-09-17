@@ -77,6 +77,24 @@ class TextLocationRecommendationTests(unittest.TestCase):
 
         self.assertIn("適合散步、拍照", result["description"])
         self.assertNotEqual(result["description"], result["address"])
+        self.assertIn("google.com/maps/search", result["maps_url"])
+
+    def test_tourism_long_description_is_rewritten_as_user_friendly_intro(self):
+        result = location_flow._tourism_item_to_result(
+            {
+                "attraction_id": "a2",
+                "name": "中壢光影電影館",
+                "description": "中壢光影電影館位於馬祖新村眷村文創園區，整棟建築物原為眷村居民活動中心，歷經改造成為展演空間。",
+                "city": "桃園市",
+                "town": "中壢區",
+                "address": "桃園市中壢區",
+            },
+            item_type="attraction",
+        )
+
+        self.assertIn("藝文與展覽空間", result["description"])
+        self.assertIn("適合拍照、看展", result["description"])
+        self.assertNotIn("整棟建築物原為", result["description"])
 
 
 if __name__ == "__main__":
