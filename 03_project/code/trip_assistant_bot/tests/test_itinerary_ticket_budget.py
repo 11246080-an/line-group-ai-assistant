@@ -175,6 +175,72 @@ class ItineraryTicketBudgetTests(unittest.TestCase):
         self.assertEqual(updated["spots"][0]["attraction_id"], "tourism-001")
         self.assertEqual(updated["spots"][0]["recommendation_source"], "tourism_open_data")
 
+    def test_constrain_itinerary_replaces_ai_spots_with_tourism_candidates(self):
+        tourism_candidates = [
+            {
+                "attraction_id": "tourism-001",
+                "name": "谷關風景特定區",
+                "description": "自然山林景觀，適合散步拍照。",
+                "city": "臺中市",
+                "town": "和平區",
+                "address": "臺中市和平區",
+                "latitude": 24.2,
+                "longitude": 121.0,
+            },
+            {
+                "attraction_id": "tourism-002",
+                "name": "東勢林場遊樂區",
+                "description": "森林步道與自然景觀。",
+                "city": "臺中市",
+                "town": "東勢區",
+                "address": "臺中市東勢區",
+                "latitude": 24.25,
+                "longitude": 120.83,
+            },
+            {
+                "attraction_id": "tourism-003",
+                "name": "東勢客家文化園區",
+                "description": "文化景點，可順路散步。",
+                "city": "臺中市",
+                "town": "東勢區",
+                "address": "臺中市東勢區",
+                "latitude": 24.26,
+                "longitude": 120.83,
+            },
+        ]
+
+        def fake_ready(names):
+            return True
+
+        def fake_db_function(name):
+            if name == "get_tourism_attractions":
+                return lambda **kwargs: tourism_candidates
+            raise AssertionError(f"unexpected db function: {name}")
+
+        itinerary = {
+            "title": "台中自然一日遊",
+            "region": "台中",
+            "summary": "自然散步、拍照，不要整天逛街",
+            "spots": [
+                {"name": "AI 自己生的特色餐廳", "sequence": 1},
+                {"name": "不存在的山林祕境", "sequence": 2},
+            ],
+            "transport": [{"from_sequence": 1, "to_sequence": 2, "mode": "開車"}],
+        }
+        with patch.object(itinerary_flow, "database_contract_ready", fake_ready), patch.object(
+            itinerary_flow, "_db_function", fake_db_function
+        ):
+            updated = itinerary_flow._constrain_itinerary_to_tourism_attractions(itinerary)
+
+        self.assertEqual([spot["name"] for spot in updated["spots"]], [
+            "谷關風景特定區",
+            "東勢林場遊樂區",
+            "東勢客家文化園區",
+        ])
+        self.assertTrue(all(spot["recommendation_source"] == "tourism_open_data" for spot in updated["spots"]))
+        self.assertEqual(updated["recommendation_source_notice"]["selection_policy"], "tourism_candidates_first")
+        self.assertEqual(len(updated["transport"]), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

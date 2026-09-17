@@ -204,6 +204,196 @@ def _match_attraction_id_by_name(*, name: str, region: str) -> str:
     return str((candidates[0] or {}).get("attraction_id") or "").strip() if candidates else ""
 
 
+_TAIWAN_CITY_ALIASES = {
+    "台北": "臺北市",
+    "臺北": "臺北市",
+    "新北": "新北市",
+    "桃園": "桃園市",
+    "台中": "臺中市",
+    "臺中": "臺中市",
+    "台南": "臺南市",
+    "臺南": "臺南市",
+    "高雄": "高雄市",
+    "基隆": "基隆市",
+    "新竹": "新竹縣",
+    "苗栗": "苗栗縣",
+    "彰化": "彰化縣",
+    "南投": "南投縣",
+    "雲林": "雲林縣",
+    "嘉義": "嘉義縣",
+    "屏東": "屏東縣",
+    "宜蘭": "宜蘭縣",
+    "花蓮": "花蓮縣",
+    "台東": "臺東縣",
+    "臺東": "臺東縣",
+    "澎湖": "澎湖縣",
+    "金門": "金門縣",
+    "連江": "連江縣",
+    "馬祖": "連江縣",
+}
+
+
+def _normalize_itinerary_tourism_city(region: str) -> str:
+    text = str(region or "").strip()
+    if not text:
+        return ""
+    if text.endswith(("市", "縣")):
+        return text.replace("台", "臺")
+    compact = text.replace("出發", "").replace("附近", "").replace("周邊", "").strip()
+    compact = compact.replace("台", "臺")
+    for keyword, city in _TAIWAN_CITY_ALIASES.items():
+        if keyword.replace("台", "臺") in compact:
+            return city
+    return ""
+
+
+def _fetch_tourism_attraction_candidates(*, region: str, limit: int = 120) -> list[dict[str, Any]]:
+    if not database_contract_ready(("get_tourism_attractions",)):
+        return []
+    city = _normalize_itinerary_tourism_city(region)
+    try:
+        items = _db_function("get_tourism_attractions")(city=city or None, limit=limit)
+    except Exception:
+        return []
+    return [item for item in items or [] if isinstance(item, dict)]
+
+
+def _compact_text(value: Any, max_length: int = 72) -> str:
+    text = re.sub(r"\s+", " ", str(value or "").strip())
+    if len(text) <= max_length:
+        return text
+    return text[: max(0, max_length - 1)].rstrip() + "…"
+
+
+def _tourism_candidate_score(candidate: dict[str, Any], preference_text: str) -> int:
+    searchable = " ".join(
+        str(candidate.get(key) or "")
+        for key in ("name", "description", "city", "town", "address")
+    )
+    score = 0
+    for token in ("自然", "森林", "步道", "公園", "風景", "生態", "老街", "文化", "拍照", "散步"):
+        if token in preference_text and token in searchable:
+            score += 4
+        elif token in searchable:
+            score += 1
+    if any(token in preference_text for token in ("不要逛街", "不逛街", "自然")) and "百貨" in searchable:
+        score -= 8
+    if candidate.get("latitude") is not None and candidate.get("longitude") is not None:
+        score += 2
+    if str(candidate.get("description") or "").strip():
+        score += 1
+    return score
+
+
+def _candidate_name_key(candidate: dict[str, Any]) -> str:
+    return re.sub(r"\s+", "", str(candidate.get("name") or "").casefold())
+
+
+def _candidate_to_itinerary_spot(candidate: dict[str, Any], *, sequence: int) -> dict[str, Any]:
+    name = str(candidate.get("name") or "景點").strip()
+    description = _compact_text(candidate.get("description"), 68)
+    if not description:
+        town = str(candidate.get("town") or "").strip()
+        city = str(candidate.get("city") or "").strip()
+        description = _compact_text(" ".join(part for part in (city, town, "觀光署景點資料") if part), 68)
+    return {
+        "name": name,
+        "sequence": sequence,
+        "spot_id": f"spot-{sequence:03d}",
+        "description": description,
+        "address": str(candidate.get("address") or "").strip(),
+        "latitude": candidate.get("latitude"),
+        "longitude": candidate.get("longitude"),
+        "attraction_id": str(candidate.get("attraction_id") or "").strip(),
+        "recommendation_source": "tourism_open_data",
+        "coordinate_source": "tourism_open_data",
+    }
+
+
+def _constrain_itinerary_to_tourism_attractions(itinerary: dict[str, Any]) -> dict[str, Any]:
+    """Keep generated itinerary spots backed by Tourism Administration open data."""
+    candidates = _fetch_tourism_attraction_candidates(region=str(itinerary.get("region") or ""))
+    if not candidates:
+        return itinerary
+
+    preference_text = " ".join(
+        str(itinerary.get(key) or "")
+        for key in ("title", "summary", "type", "best_for", "region", "duration")
+    )
+    ranked_candidates = sorted(
+        candidates,
+        key=lambda item: _tourism_candidate_score(item, preference_text),
+        reverse=True,
+    )
+    by_name = {_candidate_name_key(candidate): candidate for candidate in ranked_candidates}
+
+    selected: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    raw_spots = [spot for spot in itinerary.get("spots") or [] if isinstance(spot, dict)]
+    target_count = min(max(len(raw_spots), 3), 5)
+
+    for spot in raw_spots:
+        name_key = re.sub(r"\s+", "", str(spot.get("name") or "").casefold())
+        candidate = by_name.get(name_key)
+        if candidate is None:
+            for option in ranked_candidates:
+                option_key = _candidate_name_key(option)
+                if name_key and (name_key in option_key or option_key in name_key):
+                    candidate = option
+                    break
+        if candidate is None:
+            continue
+        attraction_id = str(candidate.get("attraction_id") or "").strip()
+        if attraction_id and attraction_id in seen_ids:
+            continue
+        if attraction_id:
+            seen_ids.add(attraction_id)
+        selected.append(candidate)
+        if len(selected) >= target_count:
+            break
+
+    for candidate in ranked_candidates:
+        if len(selected) >= target_count:
+            break
+        attraction_id = str(candidate.get("attraction_id") or "").strip()
+        if attraction_id and attraction_id in seen_ids:
+            continue
+        if attraction_id:
+            seen_ids.add(attraction_id)
+        selected.append(candidate)
+
+    if len(selected) < 2:
+        return itinerary
+
+    spots = [
+        _candidate_to_itinerary_spot(candidate, sequence=index)
+        for index, candidate in enumerate(selected, start=1)
+    ]
+    transport = [
+        {
+            "from_sequence": index,
+            "to_sequence": index + 1,
+            "mode": "開車",
+            "estimated_minutes": None,
+            "note": "",
+        }
+        for index in range(1, len(spots))
+    ]
+    return {
+        **itinerary,
+        "spots": spots,
+        "transport": transport,
+        "recommendation_source_notice": {
+            "label": "景點推薦來源：觀光署資料庫",
+            "provider": "tourism_open_data",
+            "matched_count": len(spots),
+            "total_spots": len(spots),
+            "candidate_count": len(candidates),
+            "selection_policy": "tourism_candidates_first",
+        },
+    }
+
+
 def _apply_tourism_source_notice_to_itinerary(itinerary: dict[str, Any]) -> dict[str, Any]:
     spots = [spot for spot in itinerary.get("spots") or [] if isinstance(spot, dict)]
     total_spots = len(spots)
@@ -620,6 +810,7 @@ def stage_generated_itinerary(
         return FlowResult(False)
     if not database_contract_ready(("save_feature_draft",)):
         return database_unavailable_result()
+    normalized = _constrain_itinerary_to_tourism_attractions(normalized)
     resolved_spots, _coordinate_summary = resolve_itinerary_spot_coordinates(
         list(normalized.get("spots") or []),
         region=str(normalized.get("region") or ""),
@@ -725,6 +916,7 @@ def _confirm_draft(*, line_group_id: str, line_user_id: str, draft_id: str = "")
 
     created_by = str(payload.get("created_by") or line_user_id)
 
+    itinerary = _constrain_itinerary_to_tourism_attractions(itinerary)
     resolved_spots, _coordinate_summary = resolve_itinerary_spot_coordinates(
         list(itinerary.get("spots") or []),
         region=str(itinerary.get("region") or ""),
