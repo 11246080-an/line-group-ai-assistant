@@ -241,6 +241,24 @@ class ItineraryTicketBudgetTests(unittest.TestCase):
         self.assertEqual(updated["recommendation_source_notice"]["selection_policy"], "tourism_candidates_first")
         self.assertEqual(len(updated["transport"]), 2)
 
+    def test_tourism_candidate_description_is_brief_for_line_card(self):
+        candidate = {
+            "attraction_id": "tourism-001",
+            "name": "十果文創園區",
+            "description": (
+                "位於臺南市東山區，鄰近老街與中興路的文創園區，前身為老建築。"
+                "園區保留歷史空間並轉化為展演場域。"
+                "這裡還有許多細節介紹不應全部塞進 LINE 卡片。"
+            ),
+            "city": "臺南市",
+            "town": "東山區",
+        }
+
+        spot = itinerary_flow._candidate_to_itinerary_spot(candidate, sequence=1)
+
+        self.assertLessEqual(len(spot["description"]), 42)
+        self.assertTrue(spot["description"].endswith("…"))
+
 
 if __name__ == "__main__":
     unittest.main()

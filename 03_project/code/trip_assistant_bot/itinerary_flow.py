@@ -265,6 +265,20 @@ def _compact_text(value: Any, max_length: int = 72) -> str:
     return text[: max(0, max_length - 1)].rstrip() + "…"
 
 
+def _brief_spot_description(value: Any, max_length: int = 42) -> str:
+    text = re.sub(r"\s+", " ", str(value or "").strip())
+    if not text:
+        return ""
+    sentences = [
+        sentence.strip()
+        for sentence in re.split(r"(?<=[。！？!?])", text)
+        if sentence.strip()
+    ]
+    if sentences:
+        text = "".join(sentences[:2]).strip()
+    return _compact_text(text, max_length)
+
+
 def _tourism_candidate_score(candidate: dict[str, Any], preference_text: str) -> int:
     searchable = " ".join(
         str(candidate.get(key) or "")
@@ -291,11 +305,11 @@ def _candidate_name_key(candidate: dict[str, Any]) -> str:
 
 def _candidate_to_itinerary_spot(candidate: dict[str, Any], *, sequence: int) -> dict[str, Any]:
     name = str(candidate.get("name") or "景點").strip()
-    description = _compact_text(candidate.get("description"), 68)
+    description = _brief_spot_description(candidate.get("description"), 42)
     if not description:
         town = str(candidate.get("town") or "").strip()
         city = str(candidate.get("city") or "").strip()
-        description = _compact_text(" ".join(part for part in (city, town, "觀光署景點資料") if part), 68)
+        description = _compact_text(" ".join(part for part in (city, town, "觀光署景點資料") if part), 42)
     return {
         "name": name,
         "sequence": sequence,

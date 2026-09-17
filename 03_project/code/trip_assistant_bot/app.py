@@ -1130,14 +1130,14 @@ def _build_itinerary_draft_flex(result: FlowResult) -> FlexMessage | None:
             },
         )
 
-    displayed_spots = spots[:8]
+    displayed_spots = spots[:4]
     for index, spot in enumerate(displayed_spots, start=1):
         try:
             sequence = max(1, int(spot.get("sequence") or index))
         except (TypeError, ValueError):
             sequence = index
         name = redact_sensitive_identifiers(str(spot.get("name") or f"景點 {index}").strip())[:80]
-        description = redact_sensitive_identifiers(str(spot.get("description") or "").strip())[:180]
+        description = redact_sensitive_identifiers(str(spot.get("description") or "").strip())[:70]
         address = redact_sensitive_identifiers(str(spot.get("address") or "").strip())[:140]
         service_time = redact_sensitive_identifiers(
             str(spot.get("service_time_summary") or "").strip()
