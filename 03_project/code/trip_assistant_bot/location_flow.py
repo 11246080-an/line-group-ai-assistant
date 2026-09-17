@@ -342,11 +342,51 @@ def _tourism_area_score(item: dict[str, Any], area_text: str) -> int:
     return score
 
 
+def _tourism_preference_score(
+    item: dict[str, Any],
+    *,
+    query_text: str,
+    activity_types: list[str] | None = None,
+) -> int:
+    preference_text = " ".join(
+        str(value).strip()
+        for value in [query_text, *(activity_types or [])]
+        if str(value).strip()
+    )
+    if not preference_text:
+        return 0
+
+    searchable = " ".join(
+        str(item.get(key) or "")
+        for key in ("name", "description", "town", "address")
+    )
+    weighted_groups = {
+        "老街": ("老街", "古街", "街區", "聚落", "客家"),
+        "湖邊": ("湖", "水庫", "埤塘", "河濱", "海岸"),
+        "自然景觀": ("自然", "風景", "步道", "森林", "瀑布", "濕地", "公園", "生態"),
+        "拍照": ("美術", "文創", "藝術", "景觀", "老街", "公園", "湖"),
+        "散步": ("步道", "公園", "老街", "湖", "河濱", "園區"),
+    }
+
+    score = 0
+    for trigger, related_terms in weighted_groups.items():
+        if trigger not in preference_text:
+            continue
+        if any(term in searchable for term in related_terms):
+            score += 6
+    if any(term in preference_text for term in ("交通不要太偏", "交通方便", "不要太偏")):
+        if any(term in searchable for term in ("市區", "車站", "公園", "老街")):
+            score += 2
+    return score
+
+
 def _rank_tourism_items_by_area(
     items: list[dict[str, Any]],
     *,
     area_text: str,
     city: str,
+    query_text: str = "",
+    activity_types: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     if not items:
         return []
@@ -358,21 +398,30 @@ def _rank_tourism_items_by_area(
     }
     should_filter_by_area = bool(area_text and area_text not in city_aliases)
     scored_items = [
-        (_tourism_area_score(item, area_text), index, item)
+        (
+            _tourism_area_score(item, area_text),
+            _tourism_preference_score(
+                item,
+                query_text=query_text,
+                activity_types=activity_types,
+            ),
+            index,
+            item,
+        )
         for index, item in enumerate(items)
     ]
 
     if should_filter_by_area:
         area_matches = [
-            (score, index, item)
-            for score, index, item in scored_items
-            if score > 0
+            (area_score, preference_score, index, item)
+            for area_score, preference_score, index, item in scored_items
+            if area_score > 0
         ]
         if area_matches:
             scored_items = area_matches
 
-    scored_items.sort(key=lambda entry: (-entry[0], entry[1]))
-    return [item for _score, _index, item in scored_items]
+    scored_items.sort(key=lambda entry: (-(entry[0] + entry[1]), -entry[1], entry[2]))
+    return [item for _area_score, _preference_score, _index, item in scored_items]
 
 
 def _is_tourism_lookup_request(
@@ -508,6 +557,25 @@ def _is_tourism_event_lookup_request(
 def _format_tourism_description(item: dict[str, Any], *, item_type: str) -> str:
     parts: list[str] = []
 
+    raw_description = _shorten_tourism_text(item.get("description"), 44)
+    if raw_description:
+        parts.append(raw_description)
+    elif item_type == "attraction":
+        town = str(item.get("town") or "").strip()
+        name = str(item.get("name") or "").strip()
+        intro_parts: list[str] = []
+        if town:
+            intro_parts.append(f"位於{town}")
+        if any(token in name for token in ("老街", "街")):
+            intro_parts.append("適合散步拍照與感受街區氛圍")
+        elif any(token in name for token in ("湖", "公園", "步道", "濕地", "風景")):
+            intro_parts.append("適合散步、拍照與欣賞自然景觀")
+        elif any(token in name for token in ("美術", "藝術", "文創", "園區")):
+            intro_parts.append("適合拍照、看展與輕鬆散步")
+        else:
+            intro_parts.append("可作為輕鬆走走的景點候選")
+        parts.append("，".join(intro_parts))
+
     fee_info = _shorten_tourism_text(item.get("fee_info"), 48)
     if fee_info:
         parts.append(f"門票：{fee_info}")
@@ -602,6 +670,8 @@ def _build_tourism_text_recommendation(
                     events,
                     area_text=area_text,
                     city=city,
+                    query_text=query_text,
+                    activity_types=activity_types,
                 )
                 results.extend(
                     _tourism_item_to_result(item, item_type="event")
@@ -615,6 +685,8 @@ def _build_tourism_text_recommendation(
                 attractions,
                 area_text=area_text,
                 city=city,
+                query_text=query_text,
+                activity_types=activity_types,
             )
             results.extend(
                 _tourism_item_to_result(item, item_type="attraction")

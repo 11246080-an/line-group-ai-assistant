@@ -1445,13 +1445,33 @@ def _recommendation_source_label(result: dict[str, Any]) -> str:
     return "推薦來源：系統整理"
 
 
+def _recommendation_card_title(result: dict[str, Any]) -> str:
+    city = str(result.get("tourism_city") or "").strip()
+    query_text = str(result.get("query_text") or "").strip()
+    title_parts: list[str] = []
+    if city:
+        title_parts.append(city.replace("、", "・"))
+    else:
+        for token in ("新竹", "宜蘭", "台南", "臺南", "台中", "臺中", "高雄", "台北", "臺北", "花蓮", "嘉義"):
+            if token in query_text:
+                title_parts.append(token)
+                break
+    for token in ("拍照", "散步", "老街", "湖邊", "自然", "文化", "親子", "咖啡"):
+        if token in query_text and token not in title_parts:
+            title_parts.append(token)
+        if len(title_parts) >= 3:
+            break
+    title = "".join(title_parts).strip()
+    return f"{title or '附近'}景點推薦"
+
+
 def _build_recommendation_flex(result: dict[str, Any]) -> FlexMessage | None:
     raw_results = result.get("results")
     items = [item for item in raw_results if isinstance(item, dict)] if isinstance(raw_results, list) else []
     if not items:
         return None
 
-    query_text = redact_sensitive_identifiers(str(result.get("query_text") or "景點推薦").strip())[:80]
+    query_text = redact_sensitive_identifiers(_recommendation_card_title(result))[:60]
     source_label = _recommendation_source_label(result)
     city = redact_sensitive_identifiers(str(result.get("tourism_city") or "").strip())[:32]
     subtitle = city or "依群組討論條件整理"
