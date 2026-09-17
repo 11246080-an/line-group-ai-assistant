@@ -1436,6 +1436,150 @@ def _build_expense_report_flex(result: FlowResult) -> FlexMessage | None:
     )
 
 
+def _recommendation_source_label(result: dict[str, Any]) -> str:
+    provider = str(result.get("provider") or "").strip()
+    if provider.startswith("tourism_open_data"):
+        return "推薦來源：觀光署資料庫"
+    if provider.startswith("google_places"):
+        return "推薦來源：Google Places"
+    return "推薦來源：系統整理"
+
+
+def _build_recommendation_flex(result: dict[str, Any]) -> FlexMessage | None:
+    raw_results = result.get("results")
+    items = [item for item in raw_results if isinstance(item, dict)] if isinstance(raw_results, list) else []
+    if not items:
+        return None
+
+    query_text = redact_sensitive_identifiers(str(result.get("query_text") or "景點推薦").strip())[:80]
+    source_label = _recommendation_source_label(result)
+    city = redact_sensitive_identifiers(str(result.get("tourism_city") or "").strip())[:32]
+    subtitle = city or "依群組討論條件整理"
+
+    body_contents: list[dict[str, Any]] = [
+        {
+            "type": "box",
+            "layout": "horizontal",
+            "spacing": "sm",
+            "contents": [
+                {
+                    "type": "text",
+                    "text": subtitle,
+                    "size": "sm",
+                    "color": "#147D6F",
+                    "weight": "bold",
+                    "flex": 1,
+                    "wrap": True,
+                },
+                {
+                    "type": "text",
+                    "text": "景點推薦",
+                    "size": "sm",
+                    "color": "#52656A",
+                    "align": "end",
+                    "flex": 1,
+                    "wrap": True,
+                },
+            ],
+        },
+        {
+            "type": "text",
+            "text": source_label,
+            "size": "xs",
+            "color": "#147D6F",
+            "margin": "sm",
+            "wrap": True,
+        },
+        {"type": "separator", "margin": "lg", "color": "#DCE7E5"},
+    ]
+
+    displayed_items = items[:4]
+    for index, item in enumerate(displayed_items, start=1):
+        name = redact_sensitive_identifiers(str(item.get("name") or f"推薦 {index}").strip())[:70]
+        description = redact_sensitive_identifiers(str(item.get("description") or "").strip())[:64]
+        subtitle_text = redact_sensitive_identifiers(str(item.get("subtitle") or item.get("address") or "").strip())[:72]
+        detail = description or subtitle_text
+        item_contents: list[dict[str, Any]] = [
+            {
+                "type": "text",
+                "text": f"{index}. {name}",
+                "size": "md",
+                "color": "#263238",
+                "weight": "bold",
+                "wrap": True,
+            }
+        ]
+        if detail:
+            item_contents.append(
+                {
+                    "type": "text",
+                    "text": detail,
+                    "size": "sm",
+                    "color": "#66777B",
+                    "wrap": True,
+                    "margin": "xs",
+                }
+            )
+        maps_url = str(item.get("maps_url") or "").strip()
+        if maps_url.startswith(("http://", "https://")):
+            item_contents.append(
+                {
+                    "type": "text",
+                    "text": "查看地圖 / 詳細資訊",
+                    "size": "xs",
+                    "color": "#147D6F",
+                    "margin": "xs",
+                    "action": {"type": "uri", "uri": maps_url},
+                }
+            )
+        body_contents.append(
+            {
+                "type": "box",
+                "layout": "vertical",
+                "contents": item_contents,
+                "margin": "lg" if index == 1 else "md",
+                "paddingStart": "4px",
+            }
+        )
+
+    if len(items) > len(displayed_items):
+        body_contents.append(
+            {
+                "type": "text",
+                "text": f"另有 {len(items) - len(displayed_items)} 個推薦選項，可再請我縮小條件。",
+                "size": "xs",
+                "color": "#66777B",
+                "wrap": True,
+                "margin": "md",
+            }
+        )
+
+    payload = {
+        "type": "bubble",
+        "size": "mega",
+        "header": {
+            "type": "box",
+            "layout": "vertical",
+            "contents": [
+                {"type": "text", "text": "景點推薦", "size": "xs", "color": "#D5F2EC", "weight": "bold"},
+                {"type": "text", "text": query_text, "size": "xl", "color": "#FFFFFF", "weight": "bold", "wrap": True, "margin": "sm"},
+            ],
+            "backgroundColor": "#147D6F",
+            "paddingAll": "20px",
+        },
+        "body": {
+            "type": "box",
+            "layout": "vertical",
+            "contents": body_contents,
+            "paddingAll": "20px",
+        },
+    }
+    return FlexMessage(
+        alt_text=f"景點推薦：{query_text}"[:400],
+        contents=FlexContainer.from_dict(payload),
+    )
+
+
 def _build_feature_messages(result: FlowResult) -> list[Any]:
     try:
         itinerary_message = _build_itinerary_draft_flex(result)
@@ -2050,12 +2194,21 @@ def _handle_text_location_recommendation_request(
         app.logger.info("Suppressed a duplicate text-location recommendation reply")
         return True
 
-    _reply_text_and_mark(
-        event,
-        conversation_key,
-        scenario_code,
-        group_message,
-    )
+    flex_message = None
+    try:
+        flex_message = _build_recommendation_flex(result)
+    except Exception as exc:
+        _log_failure("Recommendation Flex Message", exc)
+    if flex_message is not None:
+        with ApiClient(configuration) as api_client:
+            line_bot_api = MessagingApi(api_client)
+            line_bot_api.reply_message(
+                ReplyMessageRequest(reply_token=event.reply_token, messages=[flex_message])
+            )
+        _mark_reply_sent(conversation_key, scenario_code, group_message)
+        return True
+
+    _reply_text_and_mark(event, conversation_key, scenario_code, group_message)
     return True
 
 
