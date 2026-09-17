@@ -1988,14 +1988,20 @@ def run_text_location_recommendation(
         return tourism_payload
 
     if os.getenv("GOOGLE_PLACES_API_KEY", "").strip():
-        google_payload = _build_google_places_text_recommendation(
-            query_text=query_text,
-            location_text=location_text,
-            constraints=constraints,
-            activity_types=activity_types,
-            location_source="text_location",
-            line_group_id=line_group_id,
-        )
+        try:
+            google_payload = _build_google_places_text_recommendation(
+                query_text=query_text,
+                location_text=location_text,
+                constraints=constraints,
+                activity_types=activity_types,
+                location_source="text_location",
+                line_group_id=line_group_id,
+            )
+        except Exception as exc:
+            _log_external_failure("Google Places text recommendation", exc)
+            if tourism_payload:
+                return tourism_payload
+            raise
         if tourism_payload:
             merged_results = _merge_recommendation_results(
                 list(tourism_payload.get("results") or []),
