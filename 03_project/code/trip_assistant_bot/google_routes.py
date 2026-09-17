@@ -58,8 +58,8 @@ def _duration_to_minutes(value: Any) -> int | None:
     return max(1, round(seconds / 60))
 
 
-def _travel_mode() -> str:
-    value = os.getenv("GOOGLE_ROUTES_TRAVEL_MODE", "DRIVE").strip().upper()
+def _travel_mode(value: str | None = None) -> str:
+    value = (value or os.getenv("GOOGLE_ROUTES_TRAVEL_MODE", "DRIVE")).strip().upper()
     return value if value in {"DRIVE", "WALK", "BICYCLE", "TRANSIT", "TWO_WHEELER"} else "DRIVE"
 
 
@@ -87,6 +87,7 @@ def estimate_route_duration(
     origin_longitude: Any,
     destination_latitude: Any,
     destination_longitude: Any,
+    travel_mode: str | None = None,
     session: Any = None,
 ) -> RouteDurationEstimate | None:
     """Return a Google Routes duration estimate for one route leg.
@@ -107,7 +108,7 @@ def estimate_route_duration(
     if None in {origin_lat, origin_lng, destination_lat, destination_lng}:
         return None
 
-    travel_mode = _travel_mode()
+    travel_mode = _travel_mode(travel_mode)
     routing_preference = _routing_preference(travel_mode)
     payload: dict[str, Any] = {
         "origin": _lat_lng(origin_lat, origin_lng),
@@ -149,3 +150,44 @@ def estimate_route_duration(
         travel_mode=travel_mode,
         routing_preference=routing_preference,
     )
+
+
+def configured_travel_modes() -> list[str]:
+    raw = os.getenv("GOOGLE_ROUTES_TRAVEL_MODES", "").strip()
+    if not raw:
+        raw = os.getenv("GOOGLE_ROUTES_TRAVEL_MODE", "DRIVE").strip()
+    modes: list[str] = []
+    for value in re.split(r"[,，\s]+", raw):
+        if not value:
+            continue
+        mode = _travel_mode(value)
+        if mode not in modes:
+            modes.append(mode)
+    return modes or ["DRIVE"]
+
+
+def estimate_route_durations(
+    *,
+    origin_latitude: Any,
+    origin_longitude: Any,
+    destination_latitude: Any,
+    destination_longitude: Any,
+    travel_modes: list[str] | None = None,
+    session: Any = None,
+) -> list[RouteDurationEstimate]:
+    estimates: list[RouteDurationEstimate] = []
+    for mode in travel_modes or configured_travel_modes():
+        try:
+            estimate = estimate_route_duration(
+                origin_latitude=origin_latitude,
+                origin_longitude=origin_longitude,
+                destination_latitude=destination_latitude,
+                destination_longitude=destination_longitude,
+                travel_mode=mode,
+                session=session,
+            )
+        except Exception:
+            estimate = None
+        if estimate is not None:
+            estimates.append(estimate)
+    return estimates

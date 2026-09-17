@@ -28,7 +28,7 @@ from expense_flow import (
     database_unavailable_result,
     ensure_book_from_itinerary,
 )
-from google_routes import estimate_route_duration, routes_api_configured
+from google_routes import estimate_route_durations, routes_api_configured
 from location_flow import resolve_itinerary_spot_coordinates
 from privacy_redaction import redact_sensitive_identifiers, redact_structure
 
@@ -461,6 +461,27 @@ def _has_coordinates(spot: dict[str, Any]) -> bool:
     return spot.get("latitude") is not None and spot.get("longitude") is not None
 
 
+def _route_duration_option(estimate: Any) -> dict[str, Any]:
+    return {
+        "mode": _ROUTE_MODE_LABELS.get(estimate.travel_mode, estimate.travel_mode),
+        "travel_mode": estimate.travel_mode,
+        "minutes": estimate.duration_minutes,
+        "distance_meters": estimate.distance_meters,
+        "routing_preference": estimate.routing_preference,
+        "source": estimate.source,
+    }
+
+
+def _primary_route_estimate(estimates: list[Any]) -> Any | None:
+    if not estimates:
+        return None
+    for preferred_mode in ("DRIVE", "TRANSIT", "WALK"):
+        for estimate in estimates:
+            if estimate.travel_mode == preferred_mode:
+                return estimate
+    return estimates[0]
+
+
 def _apply_route_duration_estimates_to_itinerary(itinerary: dict[str, Any]) -> dict[str, Any]:
     """Use Google Routes API to replace local/AI travel-time guesses when possible."""
     spots = [spot for spot in itinerary.get("spots") or [] if isinstance(spot, dict)]
@@ -476,16 +497,17 @@ def _apply_route_duration_estimates_to_itinerary(itinerary: dict[str, Any]) -> d
         destination = spots[index + 1]
         if not _has_coordinates(origin) or not _has_coordinates(destination):
             continue
-        estimate = None
+        estimates: list[Any] = []
         try:
-            estimate = estimate_route_duration(
+            estimates = estimate_route_durations(
                 origin_latitude=origin.get("latitude"),
                 origin_longitude=origin.get("longitude"),
                 destination_latitude=destination.get("latitude"),
                 destination_longitude=destination.get("longitude"),
             )
         except Exception:
-            estimate = None
+            estimates = []
+        estimate = _primary_route_estimate(estimates)
         if estimate is None:
             continue
         from_sequence = _spot_sequence(origin, index + 1)
@@ -502,6 +524,7 @@ def _apply_route_duration_estimates_to_itinerary(itinerary: dict[str, Any]) -> d
         leg["mode"] = _ROUTE_MODE_LABELS.get(estimate.travel_mode, estimate.travel_mode)
         leg["note"] = "Google Routes API 交通時間"
         leg["route_duration_source"] = estimate.source
+        leg["route_duration_options"] = [_route_duration_option(item) for item in estimates]
         leg["route_travel_mode"] = estimate.travel_mode
         leg["route_routing_preference"] = estimate.routing_preference
         leg["distance_meters"] = estimate.distance_meters

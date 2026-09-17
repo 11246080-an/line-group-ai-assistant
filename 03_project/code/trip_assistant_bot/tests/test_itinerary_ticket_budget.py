@@ -116,13 +116,22 @@ class ItineraryTicketBudgetTests(unittest.TestCase):
         self.assertIn("營業時間提醒", itinerary_flow._service_time_summary_text(updated["service_time_notice"]))
 
     def test_route_duration_estimates_replace_ai_transport_minutes(self):
-        fake_estimate = SimpleNamespace(
-            duration_minutes=18,
-            distance_meters=6800,
-            travel_mode="DRIVE",
-            routing_preference="TRAFFIC_AWARE",
-            source="google_routes",
-        )
+        fake_estimates = [
+            SimpleNamespace(
+                duration_minutes=18,
+                distance_meters=6800,
+                travel_mode="DRIVE",
+                routing_preference="TRAFFIC_AWARE",
+                source="google_routes",
+            ),
+            SimpleNamespace(
+                duration_minutes=52,
+                distance_meters=5100,
+                travel_mode="WALK",
+                routing_preference="",
+                source="google_routes",
+            ),
+        ]
         itinerary = {
             "spots": [
                 {"sequence": 1, "name": "A", "latitude": 23.1, "longitude": 120.1},
@@ -133,7 +142,7 @@ class ItineraryTicketBudgetTests(unittest.TestCase):
             ],
         }
         with patch.object(itinerary_flow, "routes_api_configured", lambda: True), patch.object(
-            itinerary_flow, "estimate_route_duration", lambda **kwargs: fake_estimate
+            itinerary_flow, "estimate_route_durations", lambda **kwargs: fake_estimates
         ):
             updated = itinerary_flow._apply_route_duration_estimates_to_itinerary(itinerary)
 
@@ -141,6 +150,8 @@ class ItineraryTicketBudgetTests(unittest.TestCase):
         self.assertEqual(leg["estimated_minutes"], 18)
         self.assertEqual(leg["mode"], "開車")
         self.assertEqual(leg["route_duration_source"], "google_routes")
+        self.assertEqual(len(leg["route_duration_options"]), 2)
+        self.assertEqual(leg["route_duration_options"][1]["mode"], "步行")
         self.assertEqual(updated["route_duration_notice"]["updated_legs"], 1)
 
 

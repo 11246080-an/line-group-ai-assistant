@@ -1684,6 +1684,7 @@ def create_itinerary(
             "estimated_minutes": leg.get("estimated_minutes"),
             "note": leg.get("note", ""),
             "route_duration_source": leg.get("route_duration_source"),
+            "route_duration_options": leg.get("route_duration_options"),
             "route_travel_mode": leg.get("route_travel_mode"),
             "route_routing_preference": leg.get("route_routing_preference"),
             "distance_meters": leg.get("distance_meters"),

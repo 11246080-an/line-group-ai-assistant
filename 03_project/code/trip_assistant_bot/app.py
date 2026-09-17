@@ -1172,17 +1172,37 @@ def _build_itinerary_draft_flex(result: FlowResult) -> FlexMessage | None:
         leg = transport_by_sequence.get(sequence)
         if not isinstance(leg, dict):
             continue
-        mode = redact_sensitive_identifiers(str(leg.get("mode") or "").strip())[:40]
         note = redact_sensitive_identifiers(str(leg.get("note") or "").strip())[:80]
-        try:
-            minutes = int(str(leg.get("estimated_minutes") or ""))
-        except (TypeError, ValueError):
-            minutes = 0
-        transport_parts = [
-            part
-            for part in (mode, f"約 {minutes} 分鐘" if minutes > 0 else "", note)
-            if part
+        route_options = [
+            option for option in leg.get("route_duration_options") or []
+            if isinstance(option, dict)
         ]
+        option_parts: list[str] = []
+        for option in route_options[:3]:
+            label = redact_sensitive_identifiers(str(option.get("mode") or "").strip())[:16]
+            try:
+                option_minutes = int(str(option.get("minutes") or ""))
+            except (TypeError, ValueError):
+                option_minutes = 0
+            if label and option_minutes > 0:
+                option_parts.append(f"{label}約 {option_minutes} 分")
+        if option_parts:
+            transport_parts = [
+                part
+                for part in (" / ".join(option_parts), note)
+                if part
+            ]
+        else:
+            mode = redact_sensitive_identifiers(str(leg.get("mode") or "").strip())[:40]
+            try:
+                minutes = int(str(leg.get("estimated_minutes") or ""))
+            except (TypeError, ValueError):
+                minutes = 0
+            transport_parts = [
+                part
+                for part in (mode, f"約 {minutes} 分鐘" if minutes > 0 else "", note)
+                if part
+            ]
         if transport_parts:
             body_contents.append(
                 {

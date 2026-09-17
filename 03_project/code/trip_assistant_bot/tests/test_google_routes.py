@@ -2,7 +2,7 @@ import os
 import unittest
 from unittest.mock import patch
 
-from google_routes import estimate_route_duration
+from google_routes import configured_travel_modes, estimate_route_duration
 
 
 class _FakeResponse:
@@ -48,6 +48,10 @@ class GoogleRoutesTests(unittest.TestCase):
         self.assertEqual(result.routing_preference, "TRAFFIC_AWARE")
         headers = session.calls[0][1]["headers"]
         self.assertIn("routes.duration", headers["X-Goog-FieldMask"])
+
+    def test_configured_travel_modes_supports_multiple_values(self):
+        with patch.dict(os.environ, {"GOOGLE_ROUTES_TRAVEL_MODES": "DRIVE,WALK,TRANSIT"}, clear=False):
+            self.assertEqual(configured_travel_modes(), ["DRIVE", "WALK", "TRANSIT"])
 
 
 if __name__ == "__main__":
