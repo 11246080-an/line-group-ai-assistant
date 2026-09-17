@@ -234,13 +234,18 @@ def update_expense_book_schedule(
         return _copy(book)
 
 
-def close_expense_book(*, book_id: Any, closed_by: str) -> dict[str, Any]:
+def close_expense_book(*, book_id: Any, closed_by: str, line_group_id: str) -> dict[str, Any]:
     with _lock:
         book = _active_book(book_id)
-        if str(book.get("created_by") or "") != str(closed_by):
-            raise PermissionError("只有測試帳本建立者可以結束行程")
+        if str(book.get("line_group_id") or "") != str(line_group_id):
+            raise PermissionError("找不到這個群組目前進行中的測試帳本，或帳本已經被關閉")
         current = _now()
-        book.update({"status": "closed", "closed_at": current, "updated_at": current})
+        book.update({
+            "status": "closed",
+            "closed_at": current,
+            "closed_by": str(closed_by),
+            "updated_at": current,
+        })
         return _copy(book)
 
 
