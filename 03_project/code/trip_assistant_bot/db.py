@@ -782,16 +782,25 @@ def update_expense_book_schedule(
     return updated
 
 
-def close_expense_book(*, book_id: Any, closed_by: str) -> dict:
-    """提前關閉帳本。只有帳本建立者可以關閉進行中的帳本。"""
+def close_expense_book(*, book_id: Any, closed_by: str, line_group_id: str) -> dict:
+    """
+    提前關閉帳本。同一個 line_group_id 的群組成員都可以結束該群組的進行中
+    帳本，不再要求 closed_by == created_by（DB 交接：同群組成員結束行程）。
+
+    - 查詢／更新條件同時比對 book_id 與 line_group_id，避免其他群組關閉
+      不屬於自己的帳本。
+    - closed_by 只用來記錄實際點擊「確認結束」的成員，不影響是否能操作。
+    - 已關閉的帳本（status != active）不會再被 find_one_and_update 命中，
+      不可重複關閉。
+    """
     now = _utc_now()
     updated = get_db().expense_books.find_one_and_update(
-        {"_id": _as_object_id(book_id), "status": "active", "created_by": closed_by},
-        {"$set": {"status": "closed", "closed_at": now, "updated_at": now}},
+        {"_id": _as_object_id(book_id), "line_group_id": line_group_id, "status": "active"},
+        {"$set": {"status": "closed", "closed_at": now, "closed_by": closed_by, "updated_at": now}},
         return_document=ReturnDocument.AFTER,
     )
     if updated is None:
-        raise PermissionError("只有帳本建立者可以關閉進行中的帳本")
+        raise PermissionError("找不到這個群組目前進行中的帳本，或帳本已經被關閉")
     return updated
 
 
