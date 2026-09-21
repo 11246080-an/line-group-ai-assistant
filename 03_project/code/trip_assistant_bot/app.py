@@ -2792,8 +2792,6 @@ _POLL_STUCK_KEYWORDS = (
     "猶豫",
     "每個都想",
     "都想去",
-    "都可以去",
-    "都很有趣",
 )
 
 _POLL_OPTION_ACTIVITY_WORDS = (
@@ -2950,11 +2948,14 @@ def _try_propose_automatic_poll(
         return False
     scenario_code = str(result.get("scenario_code") or "").strip()
     scenario_name = str(result.get("scenario_name") or "").strip()
+    has_stuck_signal = _has_poll_stuck_signal(recent_messages)
+    if not has_stuck_signal:
+        return False
     candidate_options = _filter_poll_options_to_recent_messages(
         _clean_auto_poll_options(result),
         recent_messages,
     )
-    if len(candidate_options) < 2 and _has_poll_stuck_signal(recent_messages):
+    if len(candidate_options) < 2:
         candidate_options = _extract_poll_options_from_recent_messages(recent_messages)
     is_vote_scenario = scenario_code == "劇本九" or scenario_name == "投票決策"
     if not is_vote_scenario and not _is_semantic_poll_decision(
@@ -2966,7 +2967,6 @@ def _try_propose_automatic_poll(
     if not _is_llm_analysis_result(result):
         # LLM 失敗時的舊備援分類含關鍵字計分，不用它自動建立投票。
         return False
-    has_stuck_signal = _has_poll_stuck_signal(recent_messages)
     participants = _recent_discussion_participants(conversation_key)
     if has_stuck_signal and line_user_id and line_user_id not in participants:
         # Demo/testing often uses one account to simulate a group discussion.
