@@ -103,7 +103,7 @@ from location_flow import (
     save_recent_location_context,
 )
 from weather_flow import run_weather_recommendation
-from route_optimization import build_optimized_route_reply, should_optimize_route
+from route_optimization import build_optimized_route_result, should_optimize_route
 from expense_flow import (
     ActionSpec,
     FlowResult,
@@ -1735,6 +1735,166 @@ def _build_weather_flex(result: FlowResult) -> FlexMessage | None:
     )
 
 
+def _build_route_optimization_flex(result: FlowResult) -> FlexMessage | None:
+    card = result.data.get("route_card") if isinstance(result.data, dict) else None
+    if not isinstance(card, dict):
+        return None
+
+    title = redact_sensitive_identifiers(str(card.get("title") or "路線最佳化"))[:60]
+    subtitle = redact_sensitive_identifiers(str(card.get("subtitle") or "景點順序建議"))[:100]
+    spots = [item for item in card.get("spots") or [] if isinstance(item, dict)]
+    if len(spots) < 2:
+        return None
+    maps_url = str(card.get("maps_url") or "").strip()
+    if not maps_url.startswith(("http://", "https://")):
+        maps_url = ""
+    distance_km = card.get("distance_km")
+    notice = redact_sensitive_identifiers(str(card.get("notice") or ""))[:160]
+    missing = [
+        redact_sensitive_identifiers(str(item).strip())[:40]
+        for item in card.get("missing") or []
+        if str(item).strip()
+    ]
+
+    body_contents: list[dict[str, Any]] = [
+        {"type": "text", "text": subtitle, "size": "sm", "color": "#52656A", "wrap": True},
+    ]
+    if isinstance(distance_km, (int, float)):
+        body_contents.append(
+            {
+                "type": "box",
+                "layout": "vertical",
+                "backgroundColor": "#E7F4F0",
+                "cornerRadius": "12px",
+                "paddingAll": "12px",
+                "margin": "lg",
+                "contents": [
+                    {"type": "text", "text": "估算總距離", "size": "xs", "color": "#147D6F", "weight": "bold"},
+                    {"type": "text", "text": f"約 {distance_km:g} 公里", "size": "lg", "color": "#17324D", "weight": "bold", "margin": "xs"},
+                ],
+            }
+        )
+
+    body_contents.extend(
+        [
+            {"type": "separator", "margin": "lg", "color": "#DCE7E5"},
+            {"type": "text", "text": "建議順序", "size": "sm", "weight": "bold", "color": "#147D6F", "margin": "lg"},
+        ]
+    )
+    for index, spot in enumerate(spots[:8], start=1):
+        name = redact_sensitive_identifiers(str(spot.get("name") or f"景點 {index}").strip())[:70]
+        address = redact_sensitive_identifiers(str(spot.get("address") or "").strip())[:90]
+        row_contents: list[dict[str, Any]] = [
+            {
+                "type": "text",
+                "text": f"{index}.",
+                "size": "md",
+                "weight": "bold",
+                "color": "#147D6F",
+                "align": "center",
+                "gravity": "center",
+                "flex": 0,
+            },
+            {
+                "type": "box",
+                "layout": "vertical",
+                "contents": [
+                    {"type": "text", "text": name, "size": "md", "weight": "bold", "color": "#263238", "wrap": True},
+                ],
+                "flex": 1,
+                "paddingStart": "10px",
+            },
+        ]
+        if address:
+            row_contents[1]["contents"].append(
+                {"type": "text", "text": address, "size": "xs", "color": "#66777B", "wrap": True, "margin": "xs"}
+            )
+        body_contents.append(
+            {
+                "type": "box",
+                "layout": "horizontal",
+                "contents": row_contents,
+                "margin": "md",
+                "spacing": "sm",
+            }
+        )
+
+    if len(spots) > 8:
+        body_contents.append(
+            {
+                "type": "text",
+                "text": f"另有 {len(spots) - 8} 個景點未顯示在卡片中，Google 地圖連結仍包含完整路線。",
+                "size": "xs",
+                "color": "#66777B",
+                "wrap": True,
+                "margin": "md",
+            }
+        )
+    if missing:
+        body_contents.append(
+            {
+                "type": "text",
+                "text": f"尚未辨識：{'、'.join(missing)}",
+                "size": "xs",
+                "color": "#B45309",
+                "wrap": True,
+                "margin": "lg",
+            }
+        )
+    if notice:
+        body_contents.append(
+            {
+                "type": "text",
+                "text": notice,
+                "size": "xs",
+                "color": "#66777B",
+                "wrap": True,
+                "margin": "lg",
+            }
+        )
+
+    payload: dict[str, Any] = {
+        "type": "bubble",
+        "size": "mega",
+        "header": {
+            "type": "box",
+            "layout": "vertical",
+            "contents": [
+                {"type": "text", "text": "路線規劃", "size": "xs", "color": "#D5F2EC", "weight": "bold"},
+                {"type": "text", "text": title, "size": "xl", "color": "#FFFFFF", "weight": "bold", "wrap": True, "margin": "sm"},
+            ],
+            "backgroundColor": "#147D6F",
+            "paddingAll": "20px",
+        },
+        "body": {
+            "type": "box",
+            "layout": "vertical",
+            "contents": body_contents,
+            "paddingAll": "20px",
+        },
+    }
+    if maps_url:
+        payload["footer"] = {
+            "type": "box",
+            "layout": "vertical",
+            "paddingAll": "16px",
+            "contents": [
+                {
+                    "type": "button",
+                    "style": "primary",
+                    "color": "#147D6F",
+                    "height": "sm",
+                    "action": {"type": "uri", "label": "開啟 Google 地圖", "uri": maps_url},
+                }
+            ],
+        }
+
+    return FlexMessage(
+        alt_text=f"路線最佳化：{spots[0].get('name')} 到 {spots[-1].get('name')}"[:400],
+        contents=FlexContainer.from_dict(payload),
+    )
+
+
 def _build_feature_messages(result: FlowResult) -> list[Any]:
     try:
         itinerary_message = _build_itinerary_draft_flex(result)
@@ -1750,6 +1910,13 @@ def _build_feature_messages(result: FlowResult) -> list[Any]:
         expense_report_message = None
     if expense_report_message is not None:
         return [expense_report_message]
+    try:
+        route_message = _build_route_optimization_flex(result)
+    except Exception as exc:
+        _log_failure("Route optimization Flex Message", exc)
+        route_message = None
+    if route_message is not None:
+        return [route_message]
     try:
         weather_message = _build_weather_flex(result)
     except Exception as exc:
@@ -4421,9 +4588,18 @@ def handle_message(event: MessageEvent) -> None:
 
     try:
         if should_optimize_route(result, user_text=user_text):
-            route_reply = build_optimized_route_reply(result, user_text=user_text)
-            if route_reply:
-                _reply_text_and_mark(event, conversation_key, "route_optimization", route_reply)
+            route_result = build_optimized_route_result(result, user_text=user_text)
+            route_reply = str((route_result or {}).get("reply_text") or "").strip()
+            if route_result and route_reply:
+                _reply_feature_result(
+                    event,
+                    FlowResult(
+                        True,
+                        route_reply,
+                        data={"route_card": route_result.get("route_card")},
+                    ),
+                )
+                _mark_reply_sent(conversation_key, "route_optimization", route_reply)
                 _debug_print("Route optimization flow handled after AI decision")
                 return
     except Exception as exc:

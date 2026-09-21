@@ -236,6 +236,22 @@ def build_optimized_route_reply(
     user_text: str = "",
     geocoder: Callable[[str], RouteSpot | None] = geocode_place,
 ) -> str | None:
+    result = build_optimized_route_result(
+        analysis_result,
+        user_text=user_text,
+        geocoder=geocoder,
+    )
+    if not result:
+        return None
+    return str(result.get("reply_text") or "").strip() or None
+
+
+def build_optimized_route_result(
+    analysis_result: dict[str, Any],
+    *,
+    user_text: str = "",
+    geocoder: Callable[[str], RouteSpot | None] = geocode_place,
+) -> dict[str, Any] | None:
     if not should_optimize_route(analysis_result, user_text=user_text):
         return None
     names = _valid_location_names(analysis_result, user_text=user_text)
@@ -248,7 +264,10 @@ def build_optimized_route_reply(
         else:
             resolved.append(spot)
     if len(resolved) < 2:
-        return "我有看到你們想排路線，但目前至少要有 2 個能辨識的景點名稱。可以再補上完整店名或景點名嗎？"
+        return {
+            "reply_text": "我有看到你們想排路線，但目前至少要有 2 個能辨識的景點名稱。可以再補上完整店名或景點名嗎？",
+            "route_card": None,
+        }
 
     route = optimize_spots(resolved)
     lines = ["我幫你們把景點排成較順的順序："]
@@ -256,6 +275,26 @@ def build_optimized_route_reply(
     if missing:
         lines.append(f"尚未辨識：{'、'.join(missing)}；補上更完整名稱後我可以重排。")
     waypoints = "/".join(quote(spot.name, safe="") for spot in route)
-    lines.append(f"Google 地圖路線：https://www.google.com/maps/dir/{waypoints}")
+    maps_url = f"https://www.google.com/maps/dir/{waypoints}"
+    lines.append(f"Google 地圖路線：{maps_url}")
     lines.append("提醒：目前是基礎路線最佳化，實際時間仍會受交通方式、路況與營業時間影響。")
-    return "\n".join(lines)
+    return {
+        "reply_text": "\n".join(lines),
+        "route_card": {
+            "title": "路線最佳化",
+            "subtitle": "我幫你們把景點排成較順的順序",
+            "spots": [
+                {
+                    "name": spot.name,
+                    "address": spot.address,
+                    "latitude": spot.latitude,
+                    "longitude": spot.longitude,
+                }
+                for spot in route
+            ],
+            "missing": missing,
+            "maps_url": maps_url,
+            "distance_km": round(route_distance_km(route), 1),
+            "notice": "目前是基礎路線最佳化，實際時間仍會受交通方式、路況與營業時間影響。",
+        },
+    }
