@@ -3371,6 +3371,86 @@ def _should_suppress_duplicate_candidates(
     return False
 
 
+def _has_question_marker(text: str) -> bool:
+    normalized = str(text or "").strip()
+    return any(marker in normalized for marker in ("?", "？", "嗎", "呢", "要不要", "需不需要"))
+
+
+def _normalize_known_info_values(value: Any) -> list[str]:
+    if isinstance(value, list):
+        raw_values = value
+    elif isinstance(value, (tuple, set)):
+        raw_values = list(value)
+    elif value:
+        raw_values = [value]
+    else:
+        raw_values = []
+
+    normalized: list[str] = []
+    ignored_values = {"附近", "目前位置", "現在位置", "當前位置", "未定", "無", "null"}
+    for item in raw_values:
+        text = redact_sensitive_identifiers(str(item or "").strip())
+        if not text or text in ignored_values or len(text) > 80:
+            continue
+        if text not in normalized:
+            normalized.append(text)
+    return normalized
+
+
+def _has_recent_known_info(
+    recent_messages: list[str],
+    extracted_info: dict[str, Any],
+    field_name: str,
+) -> bool:
+    recent_text = _recent_message_body_text(recent_messages[-5:])
+    compact_recent_text = "".join(recent_text.split())
+    for value in _normalize_known_info_values(extracted_info.get(field_name)):
+        compact_value = "".join(value.split())
+        if compact_value and compact_value in compact_recent_text:
+            return True
+    return False
+
+
+def _should_suppress_redundant_known_info_question(
+    recent_messages: list[str],
+    result: dict[str, Any],
+    reply_text: str,
+) -> bool:
+    """Avoid asking again for facts already mentioned within the latest 5 turns."""
+    candidate = str(reply_text or "").strip()
+    if not candidate or not _has_question_marker(candidate):
+        return False
+
+    extracted_info = result.get("extracted_info")
+    if not isinstance(extracted_info, dict):
+        return False
+
+    compact_reply = "".join(candidate.split())
+    slot_question_keywords = {
+        "location": ("去哪", "哪裡", "哪兒", "地點", "地區", "城市", "附近"),
+        "time": ("什麼時候", "哪天", "日期", "時間", "幾點", "早上", "中午", "下午", "晚上"),
+        "people_count": ("幾個人", "幾人", "人數", "多少人"),
+        "budget": ("預算", "多少錢", "金額", "花多少", "價位"),
+        "transport": ("交通", "開車", "走路", "步行", "大眾運輸", "捷運", "公車"),
+    }
+    for field_name, keywords in slot_question_keywords.items():
+        if any(keyword in compact_reply for keyword in keywords) and _has_recent_known_info(
+            recent_messages,
+            extracted_info,
+            field_name,
+        ):
+            return True
+
+    if any(keyword in compact_reply for keyword in ("想要什麼", "偏好", "喜歡什麼", "什麼類型")):
+        return _has_recent_known_info(recent_messages, extracted_info, "activity_types") or _has_recent_known_info(
+            recent_messages,
+            extracted_info,
+            "constraints",
+        )
+
+    return False
+
+
 def _mark_reply_sent(
     conversation_key: str,
     scenario_code: str,
@@ -4692,6 +4772,14 @@ def handle_message(event: MessageEvent) -> None:
                     app.logger.info("Suppressed a duplicate external-search reply")
                     _debug_print("略過語意相近的重複回覆。")
                     return
+                if _should_suppress_redundant_known_info_question(
+                    recent_messages,
+                    result,
+                    final_reply,
+                ):
+                    app.logger.info("Suppressed a redundant known-info question")
+                    _debug_print("略過最近 5 句內已知資訊的重複補問。")
+                    return
 
                 if processing_hint_sent and final_reply:
                     _debug_print("Sending final reply after the early processing hint")
@@ -4729,6 +4817,15 @@ def handle_message(event: MessageEvent) -> None:
                         app.logger.info("External search required but no reply text was available")
 
             elif suggested_reply:
+                if _should_suppress_redundant_known_info_question(
+                    recent_messages,
+                    result,
+                    suggested_reply,
+                ):
+                    app.logger.info("Suppressed a redundant known-info question")
+                    _debug_print("略過最近 5 句內已知資訊的重複補問。")
+                    return
+
                 if _should_suppress_duplicate_reply(
                     conversation_key,
                     scenario_code,
