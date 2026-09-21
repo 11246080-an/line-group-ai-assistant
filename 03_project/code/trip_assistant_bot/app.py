@@ -1601,6 +1601,140 @@ def _build_recommendation_flex(result: dict[str, Any]) -> FlexMessage | None:
     )
 
 
+def _build_weather_flex(result: FlowResult) -> FlexMessage | None:
+    card = result.data.get("weather_card") if isinstance(result.data, dict) else None
+    if not isinstance(card, dict):
+        return None
+
+    county_name = redact_sensitive_identifiers(str(card.get("county_name") or "天氣資訊"))[:40]
+    time_label = redact_sensitive_identifiers(str(card.get("time_label") or "近期預報"))[:60]
+    weather = redact_sensitive_identifiers(str(card.get("weather") or "未提供"))[:60]
+    pop = redact_sensitive_identifiers(str(card.get("pop") or ""))[:20]
+    min_temp = redact_sensitive_identifiers(str(card.get("min_temp") or ""))[:20]
+    max_temp = redact_sensitive_identifiers(str(card.get("max_temp") or ""))[:20]
+    comfort = redact_sensitive_identifiers(str(card.get("comfort") or ""))[:80]
+    recommendation = redact_sensitive_identifiers(str(card.get("recommendation") or ""))[:120]
+    source = redact_sensitive_identifiers(str(card.get("source") or "中央氣象署"))[:80]
+    weather_risk = bool(card.get("weather_risk"))
+    accent_color = "#C76F21" if weather_risk else "#147D6F"
+    header_gradient = "#B85E1E" if weather_risk else "#147D6F"
+
+    metric_contents: list[dict[str, Any]] = [
+        {
+            "type": "box",
+            "layout": "vertical",
+            "spacing": "xs",
+            "contents": [
+                {"type": "text", "text": "天氣", "size": "xs", "color": "#6B7280"},
+                {"type": "text", "text": weather, "size": "md", "weight": "bold", "color": "#263238", "wrap": True},
+            ],
+        }
+    ]
+    if pop:
+        metric_contents.append(
+            {
+                "type": "box",
+                "layout": "vertical",
+                "spacing": "xs",
+                "contents": [
+                    {"type": "text", "text": "降雨機率", "size": "xs", "color": "#6B7280"},
+                    {"type": "text", "text": f"{pop}%", "size": "md", "weight": "bold", "color": accent_color},
+                ],
+            }
+        )
+    if min_temp or max_temp:
+        temp_text = f"{min_temp or '?'} - {max_temp or '?'} 度"
+        metric_contents.append(
+            {
+                "type": "box",
+                "layout": "vertical",
+                "spacing": "xs",
+                "contents": [
+                    {"type": "text", "text": "氣溫", "size": "xs", "color": "#6B7280"},
+                    {"type": "text", "text": temp_text, "size": "md", "weight": "bold", "color": "#263238"},
+                ],
+            }
+        )
+
+    body_contents: list[dict[str, Any]] = [
+        {
+            "type": "text",
+            "text": f"{county_name}｜{time_label}",
+            "size": "sm",
+            "color": "#6B7280",
+            "wrap": True,
+        },
+        {
+            "type": "box",
+            "layout": "vertical",
+            "spacing": "md",
+            "contents": metric_contents,
+            "margin": "lg",
+        },
+    ]
+    if comfort:
+        body_contents.append(
+            {
+                "type": "text",
+                "text": f"體感：{comfort}",
+                "size": "sm",
+                "color": "#4B5563",
+                "wrap": True,
+                "margin": "lg",
+            }
+        )
+    if recommendation:
+        body_contents.append(
+            {
+                "type": "box",
+                "layout": "vertical",
+                "backgroundColor": "#FFF4E8" if weather_risk else "#E7F4F0",
+                "cornerRadius": "12px",
+                "paddingAll": "12px",
+                "margin": "lg",
+                "contents": [
+                    {"type": "text", "text": "出遊提醒", "size": "sm", "weight": "bold", "color": accent_color},
+                    {"type": "text", "text": recommendation, "size": "sm", "color": "#263238", "wrap": True, "margin": "xs"},
+                ],
+            }
+        )
+    body_contents.append(
+        {
+            "type": "text",
+            "text": f"資料來源：{source}",
+            "size": "xs",
+            "color": "#8A8F98",
+            "wrap": True,
+            "margin": "lg",
+        }
+    )
+
+    payload = {
+        "type": "bubble",
+        "size": "mega",
+        "header": {
+            "type": "box",
+            "layout": "vertical",
+            "contents": [
+                {"type": "text", "text": "天氣資訊", "size": "xs", "color": "#D5F2EC", "weight": "bold"},
+                {"type": "text", "text": f"{county_name}天氣", "size": "xl", "color": "#FFFFFF", "weight": "bold", "wrap": True, "margin": "sm"},
+            ],
+            "backgroundColor": header_gradient,
+            "paddingAll": "20px",
+        },
+        "body": {
+            "type": "box",
+            "layout": "vertical",
+            "contents": body_contents,
+            "paddingAll": "20px",
+        },
+    }
+    return FlexMessage(
+        alt_text=f"{county_name}天氣：{weather}"[:400],
+        contents=FlexContainer.from_dict(payload),
+    )
+
+
 def _build_feature_messages(result: FlowResult) -> list[Any]:
     try:
         itinerary_message = _build_itinerary_draft_flex(result)
@@ -1616,6 +1750,13 @@ def _build_feature_messages(result: FlowResult) -> list[Any]:
         expense_report_message = None
     if expense_report_message is not None:
         return [expense_report_message]
+    try:
+        weather_message = _build_weather_flex(result)
+    except Exception as exc:
+        _log_failure("Weather Flex Message", exc)
+        weather_message = None
+    if weather_message is not None:
+        return [weather_message]
     poll_message = _build_anonymous_poll_flex(result)
     if poll_message is not None:
         return [poll_message]
@@ -2116,12 +2257,15 @@ def _handle_weather_recommendation_request(
         app.logger.info("Suppressed a duplicate weather recommendation reply")
         return True
 
-    _reply_text_and_mark(
+    _reply_feature_result(
         event,
-        conversation_key,
-        scenario_code,
-        group_message,
+        FlowResult(
+            True,
+            group_message,
+            data={"weather_card": result.get("weather_card")},
+        ),
     )
+    _mark_reply_sent(conversation_key, scenario_code, group_message)
     return True
 
 

@@ -294,17 +294,32 @@ def _format_time_label(start_time: str, end_time: str) -> str:
     )
 
 
-def _build_weather_message(
+def _weather_recommendation_text(*, weather: str, pop: str) -> tuple[bool, str]:
+    weather_risk = False
+    try:
+        weather_risk = int(pop or "0") >= 40
+    except ValueError:
+        weather_risk = False
+    if "雨" in weather:
+        weather_risk = True
+
+    if weather_risk:
+        return True, "戶外行程建議準備雨具，也可以先想一個室內備案。"
+    return False, "這個時段看起來適合外出，可以安排拍照或散步行程。"
+
+
+def _build_weather_payload(
     *,
     county_name: str,
     query_text: str,
     time_text: str,
     location_record: dict[str, Any],
-) -> str:
+) -> dict[str, Any]:
     element_map = _extract_time_map(location_record)
     wx_entries = element_map.get("Wx") or []
     if not wx_entries:
-        return f"我幫你查了 {county_name} 的天氣，但這次沒有拿到完整預報資料。"
+        message = f"我幫你查了 {county_name} 的天氣，但這次沒有拿到完整預報資料。"
+        return {"group_message": message, "weather_card": None}
 
     time_index = _pick_time_index(wx_entries, time_text, query_text)
     slot = wx_entries[min(time_index, len(wx_entries) - 1)]
@@ -330,20 +345,24 @@ def _build_weather_message(
     if comfort:
         lines.append(f"體感：{comfort}")
 
-    weather_risk = False
-    try:
-        weather_risk = int(pop or "0") >= 40
-    except ValueError:
-        weather_risk = False
-    if "雨" in weather:
-        weather_risk = True
+    weather_risk, recommendation = _weather_recommendation_text(weather=weather, pop=pop)
+    lines.append(recommendation)
 
-    if weather_risk:
-        lines.append("如果你們是戶外行程，建議先準備雨具，也可以順手想一下室內備案。")
-    else:
-        lines.append("如果你們要安排外出行程，這個時段看起來算蠻可以的。")
-
-    return "\n".join(lines).strip()
+    return {
+        "group_message": "\n".join(lines).strip(),
+        "weather_card": {
+            "county_name": county_name,
+            "time_label": time_label,
+            "weather": weather,
+            "pop": pop,
+            "min_temp": min_temp,
+            "max_temp": max_temp,
+            "comfort": comfort,
+            "recommendation": recommendation,
+            "weather_risk": weather_risk,
+            "source": "中央氣象署 36 小時天氣預報",
+        },
+    }
 
 
 def run_weather_recommendation(
@@ -366,7 +385,7 @@ def run_weather_recommendation(
     source_date = _source_date()
     location_record = _location_record_from_daily_cache(county_name, source_date)
     if isinstance(location_record, dict):
-        group_message = _build_weather_message(
+        weather_payload = _build_weather_payload(
             county_name=county_name,
             query_text=query_text,
             time_text=time_text,
@@ -377,7 +396,8 @@ def run_weather_recommendation(
             "county_name": county_name,
             "source_date": source_date,
             "query_text": query_text,
-            "group_message": group_message,
+            "group_message": weather_payload["group_message"],
+            "weather_card": weather_payload.get("weather_card"),
             "results": [],
         }
         _debug_print(
@@ -397,7 +417,7 @@ def run_weather_recommendation(
     if not location_record:
         raise RuntimeError(f"CWA weather returned no location data for {county_name}.")
 
-    group_message = _build_weather_message(
+    weather_payload = _build_weather_payload(
         county_name=county_name,
         query_text=query_text,
         time_text=time_text,
@@ -408,7 +428,8 @@ def run_weather_recommendation(
         "county_name": county_name,
         "source_date": source_date,
         "query_text": query_text,
-        "group_message": group_message,
+        "group_message": weather_payload["group_message"],
+        "weather_card": weather_payload.get("weather_card"),
         "results": [],
     }
     _save_daily_location_record(
