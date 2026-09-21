@@ -2179,6 +2179,7 @@ def _is_direct_weather_question(user_text: str) -> bool:
         return False
 
     question_markers = ("嗎", "呢", "怎麼樣", "如何", "會不會", "有沒有", "?")
+    request_markers = ("查", "查詢", "幫我看", "幫我們看", "看一下", "想知道")
     weather_keywords = (
         "天氣",
         "下雨",
@@ -2189,8 +2190,11 @@ def _is_direct_weather_question(user_text: str) -> bool:
         "會不會熱",
         "會不會冷",
     )
-    return any(keyword in normalized for keyword in weather_keywords) and any(
-        marker in normalized for marker in question_markers
+    has_weather_keyword = any(keyword in normalized for keyword in weather_keywords)
+    if not has_weather_keyword:
+        return False
+    return any(marker in normalized for marker in question_markers) or any(
+        marker in normalized for marker in request_markers
     )
 
 
@@ -2198,8 +2202,7 @@ def _extract_weather_query_payload(
     user_text: str,
     analysis_result: dict[str, Any],
 ) -> dict[str, Any] | None:
-    should_intervene = bool(analysis_result.get("should_intervene"))
-    if not should_intervene and not _is_direct_weather_question(user_text):
+    if not _is_direct_weather_question(user_text):
         return None
 
     reply_trigger = str(analysis_result.get("reply_trigger") or "").strip()
@@ -2225,6 +2228,16 @@ def _extract_weather_query_payload(
         "location_text": location_text,
         "time_text": time_text,
     }
+
+
+def _should_observe_weather_risk_without_reply(
+    user_text: str,
+    analysis_result: dict[str, Any],
+) -> bool:
+    return (
+        _has_weather_request_signal(user_text, analysis_result)
+        and not _is_direct_weather_question(user_text)
+    )
 
 
 def _handle_weather_recommendation_request(
@@ -4316,7 +4329,15 @@ def handle_message(event: MessageEvent) -> None:
         raw_result = analyze_dialogue(
             context_text,
             on_processing_required=(
-                None if _looks_like_current_location_request(user_text) else _send_processing_hint
+                None
+                if (
+                    _looks_like_current_location_request(user_text)
+                    or (
+                        _has_weather_request_signal(user_text, {})
+                        and not _is_direct_weather_question(user_text)
+                    )
+                )
+                else _send_processing_hint
             ),
         )
         app.logger.debug(
@@ -4355,6 +4376,10 @@ def handle_message(event: MessageEvent) -> None:
         confidence_score = float(result.get("confidence_score", 0))
     except (TypeError, ValueError):
         confidence_score = 0.0
+
+    if _should_observe_weather_risk_without_reply(user_text, result):
+        _debug_print("Weather risk mentioned but no direct weather question; keep observing.")
+        return
 
     itinerary_draft = result.get("itinerary_draft")
     if (
