@@ -7,6 +7,7 @@ from io import BytesIO
 import json
 import math
 import os
+import re
 import secrets
 import threading
 import time
@@ -2776,6 +2777,87 @@ def _filter_poll_options_to_recent_messages(
     return filtered[:6]
 
 
+_POLL_STUCK_KEYWORDS = (
+    "選擇障礙",
+    "選不出",
+    "選不出來",
+    "不知道選",
+    "不知道要選",
+    "不知道去哪",
+    "決定不了",
+    "很難決定",
+    "難決定",
+    "好難選",
+    "難選",
+    "猶豫",
+    "每個都想",
+    "都想去",
+    "都可以去",
+    "都很有趣",
+)
+
+_POLL_OPTION_ACTIVITY_WORDS = (
+    "展",
+    "展覽",
+    "活動",
+    "拍貼",
+    "拍照",
+    "逛街",
+    "市集",
+    "夜市",
+    "餐廳",
+    "火鍋",
+    "燒肉",
+    "壽司",
+    "義大利麵",
+    "咖啡",
+    "下午茶",
+    "景點",
+)
+
+_POLL_OPTION_FILLER_PATTERN = re.compile(
+    r"^(我|我們|大家|最近|一直|很想|想|可以|也|不然|或|還是|有看到|看到|"
+    r"聽說|覺得|好像|滿|蠻|很|都|比較|一起|去|看)+"
+)
+
+
+def _has_poll_stuck_signal(recent_messages: list[str]) -> bool:
+    text = _recent_message_body_text(recent_messages[-3:])
+    compact_text = "".join(text.split())
+    return any(keyword in compact_text for keyword in _POLL_STUCK_KEYWORDS)
+
+
+def _clean_poll_option_phrase(value: str) -> str:
+    label = redact_sensitive_identifiers(str(value or "").strip())
+    label = re.sub(r"[。！？!?；;，,、]+$", "", label).strip()
+    label = _POLL_OPTION_FILLER_PATTERN.sub("", label).strip()
+    label = re.sub(r"^(去|看|吃|喝)+", "", label).strip()
+    label = re.split(r"(好像|感覺|應該|可以|適合|附近|那邊|那裡)", label, maxsplit=1)[0].strip() or label
+    label = re.sub(r"(最近|附近|那邊|那裡)$", "", label).strip()
+    label = re.sub(r"的(展|活動|市集|夜市)$", r"\1", label).strip()
+    label = re.sub(r"(也不錯|不錯|可以|好了|耶|欸|啦)$", "", label).strip()
+    return label[:80]
+
+
+def _extract_poll_options_from_recent_messages(recent_messages: list[str]) -> list[str]:
+    """Recover poll options when the LLM drops extracted_info.options on stuck turns."""
+    candidates: list[str] = []
+    for body in _recent_message_body_text(recent_messages[-6:]).splitlines():
+        if any(keyword in body for keyword in _POLL_STUCK_KEYWORDS):
+            continue
+        pieces = re.split(r"[，,。；;！!？?、]|\b或\b|不然|還是", body)
+        for piece in pieces:
+            piece = piece.strip()
+            if not piece:
+                continue
+            if not any(word in piece for word in _POLL_OPTION_ACTIVITY_WORDS):
+                continue
+            label = _clean_poll_option_phrase(piece)
+            if 2 <= len(label) <= 20 and label not in candidates:
+                candidates.append(label)
+    return candidates[:6]
+
+
 def _is_llm_analysis_result(result: dict[str, Any]) -> bool:
     evidence = result.get("evidence") or []
     if not isinstance(evidence, list):
@@ -2813,9 +2895,9 @@ def _is_semantic_poll_decision(
     extracted = result.get("extracted_info")
     if not isinstance(extracted, dict):
         return False
-    if str(extracted.get("decision_state") or "").strip() != "卡住":
+    if str(extracted.get("decision_state") or "").strip() != "卡住" and not _has_poll_stuck_signal(recent_messages):
         return False
-    return _has_multi_member_option_support(recent_messages, options)
+    return _has_poll_stuck_signal(recent_messages) or _has_multi_member_option_support(recent_messages, options)
 
 
 def _has_urgent_poll_signal(messages: list[str]) -> bool:
@@ -2860,6 +2942,7 @@ def _try_propose_automatic_poll(
     *,
     conversation_key: str,
     line_group_id: str,
+    line_user_id: str,
     recent_messages: list[str],
     result: dict[str, Any],
 ) -> bool:
@@ -2871,6 +2954,8 @@ def _try_propose_automatic_poll(
         _clean_auto_poll_options(result),
         recent_messages,
     )
+    if len(candidate_options) < 2 and _has_poll_stuck_signal(recent_messages):
+        candidate_options = _extract_poll_options_from_recent_messages(recent_messages)
     is_vote_scenario = scenario_code == "劇本九" or scenario_name == "投票決策"
     if not is_vote_scenario and not _is_semantic_poll_decision(
         result,
@@ -2881,9 +2966,14 @@ def _try_propose_automatic_poll(
     if not _is_llm_analysis_result(result):
         # LLM 失敗時的舊備援分類含關鍵字計分，不用它自動建立投票。
         return False
+    has_stuck_signal = _has_poll_stuck_signal(recent_messages)
     participants = _recent_discussion_participants(conversation_key)
+    if has_stuck_signal and line_user_id and line_user_id not in participants:
+        # Demo/testing often uses one account to simulate a group discussion.
+        participants.append(line_user_id)
     if len(candidate_options) < 2 or len(participants) < 2:
-        return False
+        if not (has_stuck_signal and len(candidate_options) >= 2 and participants):
+            return False
     question = _build_pending_vote_question(
         result,
         str(result.get("suggested_reply") or ""),
@@ -4151,6 +4241,7 @@ def handle_message(event: MessageEvent) -> None:
             event,
             conversation_key=conversation_key,
             line_group_id=line_group_id,
+            line_user_id=line_user_id,
             recent_messages=_recent_messages,
             result=result,
         ):
