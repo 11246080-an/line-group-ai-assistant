@@ -1013,6 +1013,11 @@ def handle_expense_text(
                 True,
                 f"要結束行程帳本「{_clean_name((book or {}).get('name'))}」並產生報表嗎？",
                 actions=[ActionSpec("確認結束", "postback", "expense|close"), ActionSpec("取消", "postback", "expense|close_cancel")],
+                data={
+                    "expense_close_confirmation": {
+                        "book": redact_structure(book or {}),
+                    }
+                },
             )
         if normalized == "重新開啟帳本":
             if not database_contract_ready(("reopen_expense_book",)):

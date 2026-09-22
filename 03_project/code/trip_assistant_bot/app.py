@@ -1437,6 +1437,100 @@ def _build_expense_report_flex(result: FlowResult) -> FlexMessage | None:
     )
 
 
+def _build_expense_close_confirmation_flex(result: FlowResult) -> FlexMessage | None:
+    data = result.data if isinstance(result.data, dict) else {}
+    confirmation = data.get("expense_close_confirmation")
+    if not isinstance(confirmation, dict):
+        return None
+    book = confirmation.get("book")
+    if not isinstance(book, dict):
+        book = {}
+    title = redact_sensitive_identifiers(str(book.get("name") or "目前行程帳本").strip())[:100]
+
+    footer_contents = [
+        {
+            "type": "button",
+            "style": "primary" if index == 0 else "secondary",
+            "color": "#147D6F" if index == 0 else "#E7EFED",
+            "height": "sm",
+            "action": _expense_draft_flex_action(action_spec),
+        }
+        for index, action_spec in enumerate(result.actions[:2])
+    ]
+
+    payload: dict[str, Any] = {
+        "type": "bubble",
+        "size": "mega",
+        "header": {
+            "type": "box",
+            "layout": "vertical",
+            "backgroundColor": "#147D6F",
+            "paddingAll": "20px",
+            "contents": [
+                {"type": "text", "text": "共同記帳", "size": "xs", "color": "#D5F2EC", "weight": "bold"},
+                {"type": "text", "text": "結束行程帳本", "size": "xl", "color": "#FFFFFF", "weight": "bold", "wrap": True, "margin": "sm"},
+            ],
+        },
+        "body": {
+            "type": "box",
+            "layout": "vertical",
+            "paddingAll": "20px",
+            "contents": [
+                {
+                    "type": "text",
+                    "text": "要結束這本帳本並產生花費報表嗎？",
+                    "size": "sm",
+                    "color": "#52656A",
+                    "wrap": True,
+                },
+                {
+                    "type": "box",
+                    "layout": "vertical",
+                    "backgroundColor": "#E7F4F0",
+                    "cornerRadius": "12px",
+                    "paddingAll": "14px",
+                    "margin": "lg",
+                    "contents": [
+                        {"type": "text", "text": "帳本名稱", "size": "xs", "color": "#147D6F", "weight": "bold"},
+                        {"type": "text", "text": title, "size": "lg", "color": "#17324D", "weight": "bold", "wrap": True, "margin": "xs"},
+                    ],
+                },
+                {
+                    "type": "box",
+                    "layout": "vertical",
+                    "backgroundColor": "#FFF4E8",
+                    "cornerRadius": "12px",
+                    "paddingAll": "12px",
+                    "margin": "lg",
+                    "contents": [
+                        {"type": "text", "text": "確認後會進行", "size": "sm", "weight": "bold", "color": "#B45309"},
+                        {
+                            "type": "text",
+                            "text": "系統會結束目前帳本、彙整已確認支出，並產生可下載的 PDF 花費報表。",
+                            "size": "sm",
+                            "color": "#263238",
+                            "wrap": True,
+                            "margin": "xs",
+                        },
+                    ],
+                },
+            ],
+        },
+    }
+    if footer_contents:
+        payload["footer"] = {
+            "type": "box",
+            "layout": "vertical",
+            "spacing": "sm",
+            "paddingAll": "16px",
+            "contents": footer_contents,
+        }
+    return FlexMessage(
+        alt_text=f"結束行程帳本：{title}"[:400],
+        contents=FlexContainer.from_dict(payload),
+    )
+
+
 def _format_draft_participants(draft: dict[str, Any]) -> str:
     participants = draft.get("participants") or []
     names: list[str] = []
@@ -2210,6 +2304,13 @@ def _build_feature_messages(result: FlowResult) -> list[Any]:
         expense_report_message = None
     if expense_report_message is not None:
         return [expense_report_message]
+    try:
+        expense_close_confirmation_message = _build_expense_close_confirmation_flex(result)
+    except Exception as exc:
+        _log_failure("Expense close confirmation Flex Message", exc)
+        expense_close_confirmation_message = None
+    if expense_close_confirmation_message is not None:
+        return [expense_close_confirmation_message]
     try:
         expense_draft_message = _build_expense_draft_flex(result)
     except Exception as exc:
