@@ -1437,6 +1437,198 @@ def _build_expense_report_flex(result: FlowResult) -> FlexMessage | None:
     )
 
 
+def _format_draft_participants(draft: dict[str, Any]) -> str:
+    participants = draft.get("participants") or []
+    names: list[str] = []
+    if isinstance(participants, list):
+        for participant in participants:
+            if isinstance(participant, dict):
+                value = participant.get("display_name") or participant.get("name") or ""
+            else:
+                value = participant
+            name = redact_sensitive_identifiers(str(value or "").strip())[:30]
+            if name and name not in names:
+                names.append(name)
+    if names:
+        return "、".join(names)
+    missing = draft.get("missing") or []
+    return "尚未選擇" if "分攤對象" in missing else "不分攤"
+
+
+def _format_draft_date(value: Any) -> str:
+    if isinstance(value, datetime):
+        return value.astimezone().strftime("%Y/%m/%d")
+    text = redact_sensitive_identifiers(str(value or "").strip())[:20]
+    return text or "未填寫"
+
+
+def _expense_draft_flex_action(action_spec: ActionSpec) -> dict[str, Any]:
+    label = redact_sensitive_identifiers(action_spec.label.strip())[:20] or "選擇"
+    if action_spec.kind == "uri":
+        return {"type": "uri", "label": label, "uri": action_spec.value}
+    if action_spec.kind == "message":
+        return {"type": "message", "label": label, "text": action_spec.value[:300]}
+    return {
+        "type": "postback",
+        "label": label,
+        "data": action_spec.value[:300],
+        "displayText": label,
+    }
+
+
+def _build_expense_draft_flex(result: FlowResult) -> FlexMessage | None:
+    data = result.data if isinstance(result.data, dict) else {}
+    draft = data.get("expense_draft")
+    if not isinstance(draft, dict):
+        return None
+
+    draft_type = str(data.get("draft_type") or draft.get("source") or "expense").strip()
+    is_invoice = draft_type == "invoice" or str(draft.get("source") or "") == "invoice"
+    title = "發票記帳草稿" if is_invoice else "記帳草稿"
+    item = redact_sensitive_identifiers(str(draft.get("item") or "未填寫").strip())[:80]
+    try:
+        amount = int(draft.get("amount") or 0)
+    except (TypeError, ValueError):
+        amount = 0
+    merchant = redact_sensitive_identifiers(str(draft.get("merchant") or "未填寫").strip())[:80]
+    category = redact_sensitive_identifiers(str(draft.get("category") or "其他").strip())[:40]
+    payer_raw = draft.get("payer")
+    if isinstance(payer_raw, dict):
+        payer_raw = payer_raw.get("display_name") or payer_raw.get("name") or ""
+    payer = redact_sensitive_identifiers(str(payer_raw or "未填寫").strip())[:40]
+    note = redact_sensitive_identifiers(str(draft.get("note") or "無").strip())[:120]
+    participants_text = _format_draft_participants(draft)[:120]
+    date_text = _format_draft_date(draft.get("consumed_at"))
+    missing = [
+        redact_sensitive_identifiers(str(item).strip())[:20]
+        for item in draft.get("missing") or []
+        if str(item).strip()
+    ]
+
+    rows = [
+        ("項目", item),
+        ("金額", f"NT${amount:,}" if amount > 0 else "未填寫"),
+        ("分攤對象", participants_text),
+        ("消費日期", date_text),
+        ("商家", merchant),
+        ("分類", category),
+        ("付款人", payer),
+        ("備註", note),
+    ]
+    body_contents: list[dict[str, Any]] = [
+        {
+            "type": "text",
+            "text": "請確認這筆支出內容，確認後才會寫入帳本。",
+            "size": "sm",
+            "color": "#52656A",
+            "wrap": True,
+        },
+        {
+            "type": "box",
+            "layout": "vertical",
+            "backgroundColor": "#E7F4F0",
+            "cornerRadius": "12px",
+            "paddingAll": "14px",
+            "margin": "lg",
+            "contents": [
+                {"type": "text", "text": "支出金額", "size": "xs", "color": "#147D6F", "weight": "bold"},
+                {
+                    "type": "text",
+                    "text": f"NT${amount:,}" if amount > 0 else "金額未填寫",
+                    "size": "xxl",
+                    "color": "#17324D",
+                    "weight": "bold",
+                    "margin": "xs",
+                },
+                {"type": "text", "text": item, "size": "sm", "color": "#52656A", "wrap": True, "margin": "xs"},
+            ],
+        },
+        {"type": "separator", "margin": "lg", "color": "#DCE7E5"},
+    ]
+    for label, value in rows[2:]:
+        body_contents.append(
+            {
+                "type": "box",
+                "layout": "horizontal",
+                "spacing": "sm",
+                "margin": "md",
+                "contents": [
+                    {"type": "text", "text": label, "size": "sm", "color": "#66777B", "flex": 2},
+                    {
+                        "type": "text",
+                        "text": value,
+                        "size": "sm",
+                        "color": "#263238",
+                        "weight": "bold" if value != "未填寫" else "regular",
+                        "wrap": True,
+                        "flex": 4,
+                    },
+                ],
+            }
+        )
+    if missing:
+        body_contents.append(
+            {
+                "type": "box",
+                "layout": "vertical",
+                "backgroundColor": "#FFF4E8",
+                "cornerRadius": "12px",
+                "paddingAll": "12px",
+                "margin": "lg",
+                "contents": [
+                    {"type": "text", "text": "尚需補充", "size": "sm", "weight": "bold", "color": "#B45309"},
+                    {
+                        "type": "text",
+                        "text": "、".join(missing),
+                        "size": "sm",
+                        "color": "#263238",
+                        "wrap": True,
+                        "margin": "xs",
+                    },
+                ],
+            }
+        )
+
+    footer_contents = [
+        {
+            "type": "button",
+            "style": "primary" if index == 0 else "secondary",
+            "color": "#147D6F" if index == 0 else "#E7EFED",
+            "height": "sm",
+            "action": _expense_draft_flex_action(action_spec),
+        }
+        for index, action_spec in enumerate(result.actions[:5])
+    ]
+
+    payload: dict[str, Any] = {
+        "type": "bubble",
+        "size": "mega",
+        "header": {
+            "type": "box",
+            "layout": "vertical",
+            "contents": [
+                {"type": "text", "text": "共同記帳", "size": "xs", "color": "#D5F2EC", "weight": "bold"},
+                {"type": "text", "text": title, "size": "xl", "color": "#FFFFFF", "weight": "bold", "wrap": True, "margin": "sm"},
+            ],
+            "backgroundColor": "#147D6F",
+            "paddingAll": "20px",
+        },
+        "body": {"type": "box", "layout": "vertical", "contents": body_contents, "paddingAll": "20px"},
+    }
+    if footer_contents:
+        payload["footer"] = {
+            "type": "box",
+            "layout": "vertical",
+            "spacing": "sm",
+            "contents": footer_contents,
+            "paddingAll": "16px",
+        }
+    return FlexMessage(
+        alt_text=f"{title}：{item} NT${amount:,}"[:400],
+        contents=FlexContainer.from_dict(payload),
+    )
+
+
 def _recommendation_source_label(result: dict[str, Any]) -> str:
     provider = str(result.get("provider") or "").strip()
     if provider.startswith("tourism_open_data"):
@@ -1910,6 +2102,13 @@ def _build_feature_messages(result: FlowResult) -> list[Any]:
         expense_report_message = None
     if expense_report_message is not None:
         return [expense_report_message]
+    try:
+        expense_draft_message = _build_expense_draft_flex(result)
+    except Exception as exc:
+        _log_failure("Expense draft Flex Message", exc)
+        expense_draft_message = None
+    if expense_draft_message is not None:
+        return [expense_draft_message]
     try:
         route_message = _build_route_optimization_flex(result)
     except Exception as exc:
