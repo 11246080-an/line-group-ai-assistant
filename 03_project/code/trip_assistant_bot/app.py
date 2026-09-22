@@ -1889,6 +1889,101 @@ def _build_expense_close_confirmation_flex(result: FlowResult) -> FlexMessage | 
     )
 
 
+def _build_expense_confirmed_flex(result: FlowResult) -> FlexMessage | None:
+    data = result.data if isinstance(result.data, dict) else {}
+    expense = data.get("expense_confirmed")
+    if not isinstance(expense, dict) or not expense:
+        return None
+
+    expense_no = redact_sensitive_identifiers(str(expense.get("expense_no") or "已建立").strip())[:30]
+    item = redact_sensitive_identifiers(str(expense.get("item") or "未命名支出").strip())[:80]
+    category = redact_sensitive_identifiers(str(expense.get("category") or "其他").strip())[:40]
+    payer_raw = expense.get("payer")
+    if isinstance(payer_raw, dict):
+        payer_raw = payer_raw.get("display_name") or payer_raw.get("name") or ""
+    payer = redact_sensitive_identifiers(str(payer_raw or "未填寫").strip())[:40]
+    try:
+        amount = int(expense.get("amount") or 0)
+    except (TypeError, ValueError):
+        amount = 0
+    amount_text = f"NT${amount:,}" if amount > 0 else "金額未填寫"
+
+    rows = [
+        ("支出編號", expense_no),
+        ("項目", item),
+        ("分類", category),
+        ("付款人", payer),
+    ]
+    body_contents: list[dict[str, Any]] = [
+        {
+            "type": "text",
+            "text": "這筆支出已寫入目前的行程帳本。",
+            "size": "sm",
+            "color": "#52656A",
+            "wrap": True,
+        },
+        {
+            "type": "box",
+            "layout": "vertical",
+            "backgroundColor": "#E7F4F0",
+            "cornerRadius": "12px",
+            "paddingAll": "14px",
+            "margin": "lg",
+            "contents": [
+                {"type": "text", "text": "支出金額", "size": "xs", "color": "#147D6F", "weight": "bold"},
+                {"type": "text", "text": amount_text, "size": "xxl", "color": "#17324D", "weight": "bold", "margin": "xs"},
+            ],
+        },
+        {"type": "separator", "margin": "lg", "color": "#DCE7E5"},
+    ]
+    for label, value in rows:
+        body_contents.append(
+            {
+                "type": "box",
+                "layout": "horizontal",
+                "spacing": "sm",
+                "margin": "md",
+                "contents": [
+                    {"type": "text", "text": label, "size": "sm", "color": "#66777B", "flex": 2},
+                    {
+                        "type": "text",
+                        "text": value,
+                        "size": "sm",
+                        "color": "#263238",
+                        "weight": "bold",
+                        "wrap": True,
+                        "flex": 4,
+                    },
+                ],
+            }
+        )
+
+    payload = {
+        "type": "bubble",
+        "size": "mega",
+        "header": {
+            "type": "box",
+            "layout": "vertical",
+            "backgroundColor": "#147D6F",
+            "paddingAll": "20px",
+            "contents": [
+                {"type": "text", "text": "共同記帳", "size": "xs", "color": "#D5F2EC", "weight": "bold"},
+                {"type": "text", "text": "記帳成功", "size": "xl", "color": "#FFFFFF", "weight": "bold", "wrap": True, "margin": "sm"},
+            ],
+        },
+        "body": {
+            "type": "box",
+            "layout": "vertical",
+            "paddingAll": "20px",
+            "contents": body_contents,
+        },
+    }
+    return FlexMessage(
+        alt_text=f"記帳成功：{expense_no} {item} {amount_text}"[:400],
+        contents=FlexContainer.from_dict(payload),
+    )
+
+
 def _format_draft_participants(draft: dict[str, Any]) -> str:
     participants = draft.get("participants") or []
     names: list[str] = []
@@ -2794,6 +2889,13 @@ def _build_feature_messages(result: FlowResult) -> list[Any]:
         expense_close_confirmation_message = None
     if expense_close_confirmation_message is not None:
         return [expense_close_confirmation_message]
+    try:
+        expense_confirmed_message = _build_expense_confirmed_flex(result)
+    except Exception as exc:
+        _log_failure("Expense confirmed Flex Message", exc)
+        expense_confirmed_message = None
+    if expense_confirmed_message is not None:
+        return [expense_confirmed_message]
     try:
         expense_draft_message = _build_expense_draft_flex(result)
     except Exception as exc:

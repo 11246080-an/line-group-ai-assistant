@@ -650,7 +650,11 @@ def _confirm_expense(line_group_id: str, line_user_id: str) -> FlowResult:
     )
     expense_no = (expense or {}).get("expense_no") if isinstance(expense, dict) else None
     suffix = f"，支出編號為 {expense_no}" if expense_no else ""
-    return FlowResult(True, f"已完成記帳{suffix}。")
+    return FlowResult(
+        True,
+        f"已完成記帳{suffix}。",
+        data={"expense_confirmed": redact_structure(expense if isinstance(expense, dict) else {})},
+    )
 
 
 def _cancel_draft(line_group_id: str, line_user_id: str) -> FlowResult:
