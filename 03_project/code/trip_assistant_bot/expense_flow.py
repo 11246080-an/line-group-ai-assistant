@@ -66,6 +66,7 @@ _CATEGORY_HINTS = {
     "門票": ("門票", "入場", "票券"),
     "購物": ("購物", "伴手禮", "紀念品"),
 }
+_DRAFT_EDIT_FIELDS = ("項目", "金額", "分攤對象", "消費日期", "商家", "分類", "付款人", "備註")
 
 _DB_REQUIRED_BASE = (
     "get_active_expense_book",
@@ -105,6 +106,27 @@ def database_unavailable_result() -> FlowResult:
     return FlowResult(
         handled=True,
         text="這項功能的資料庫介面還在準備中，目前不會寫入任何資料。請稍後再試。",
+    )
+
+
+def draft_edit_prompt_result(draft_type: str = "expense") -> FlowResult:
+    normalized_type = "invoice" if draft_type == "invoice" else "expense"
+    is_invoice = normalized_type == "invoice"
+    example = "修改發票草稿 金額 2350 商家 ○○海產店" if is_invoice else "修改記帳草稿 金額 1800 商家 ○○餐廳"
+    text = (
+        f"請輸入要修改的內容，例如：{example}。\n"
+        f"可修改：{'、'.join(_DRAFT_EDIT_FIELDS)}。"
+    )
+    return FlowResult(
+        True,
+        text,
+        data={
+            "expense_edit_prompt": {
+                "draft_type": normalized_type,
+                "example": example,
+                "fields": list(_DRAFT_EDIT_FIELDS),
+            }
+        },
     )
 
 
@@ -440,12 +462,7 @@ def _edit_pending_draft(
     prefix, requested_type = next((item for item in prefixes if normalized.startswith(item[0])), ("", ""))
     edit_text = normalized[len(prefix) :].strip(" ，,:：")
     if not edit_text:
-        example_prefix = "修改發票草稿" if requested_type == "invoice" else "修改記帳草稿"
-        return FlowResult(
-            True,
-            f"請在後面輸入要修改的內容，例如：{example_prefix} 金額 1800 商家 ○○餐廳。\n"
-            "可修改：項目、金額、分攤對象、消費日期、商家、分類、付款人、備註。",
-        )
+        return draft_edit_prompt_result(requested_type or "expense")
 
     candidates: list[tuple[str, dict[str, Any]]] = []
     draft_types = (requested_type,) if requested_type else ("expense", "invoice")
@@ -1029,11 +1046,7 @@ def handle_expense_postback(
         if action == ["cancel"]:
             return _cancel_draft(line_group_id, line_user_id)
         if action == ["edit_prompt"]:
-            return FlowResult(
-                True,
-                "請輸入要修改的內容，例如：修改記帳草稿 金額 1800 商家 ○○餐廳。\n"
-                "可修改：項目、金額、分攤對象、消費日期、商家、分類、付款人、備註。",
-            )
+            return draft_edit_prompt_result("expense")
         if action == ["close_cancel"]:
             return FlowResult(True, "已取消結束行程。")
         if action == ["close"]:

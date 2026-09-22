@@ -1629,6 +1629,114 @@ def _build_expense_draft_flex(result: FlowResult) -> FlexMessage | None:
     )
 
 
+def _build_expense_edit_prompt_flex(result: FlowResult) -> FlexMessage | None:
+    data = result.data if isinstance(result.data, dict) else {}
+    prompt = data.get("expense_edit_prompt")
+    if not isinstance(prompt, dict):
+        return None
+
+    draft_type = str(prompt.get("draft_type") or "expense").strip()
+    is_invoice = draft_type == "invoice"
+    title = "修改發票草稿" if is_invoice else "修改記帳草稿"
+    example = redact_sensitive_identifiers(str(prompt.get("example") or "").strip())[:120]
+    if not example:
+        example = "修改發票草稿 金額 2350 商家 ○○海產店" if is_invoice else "修改記帳草稿 金額 1800 商家 ○○餐廳"
+    raw_fields = prompt.get("fields")
+    fields = [
+        redact_sensitive_identifiers(str(field).strip())[:12]
+        for field in raw_fields
+        if str(field).strip()
+    ] if isinstance(raw_fields, list) else []
+    if not fields:
+        fields = ["項目", "金額", "分攤對象", "消費日期", "商家", "分類", "付款人", "備註"]
+
+    field_boxes = [
+        {
+            "type": "box",
+            "layout": "baseline",
+            "spacing": "xs",
+            "contents": [
+                {"type": "text", "text": "•", "size": "sm", "color": "#147D6F", "flex": 0},
+                {"type": "text", "text": field, "size": "sm", "color": "#263238", "wrap": True},
+            ],
+        }
+        for field in fields
+    ]
+
+    payload: dict[str, Any] = {
+        "type": "bubble",
+        "size": "mega",
+        "header": {
+            "type": "box",
+            "layout": "vertical",
+            "backgroundColor": "#147D6F",
+            "paddingAll": "20px",
+            "contents": [
+                {"type": "text", "text": "共同記帳", "size": "xs", "color": "#D5F2EC", "weight": "bold"},
+                {"type": "text", "text": title, "size": "xl", "color": "#FFFFFF", "weight": "bold", "wrap": True, "margin": "sm"},
+            ],
+        },
+        "body": {
+            "type": "box",
+            "layout": "vertical",
+            "paddingAll": "20px",
+            "contents": [
+                {
+                    "type": "text",
+                    "text": "請直接在群組輸入要修改的欄位與新內容。",
+                    "size": "sm",
+                    "color": "#52656A",
+                    "wrap": True,
+                },
+                {
+                    "type": "box",
+                    "layout": "vertical",
+                    "backgroundColor": "#E7F4F0",
+                    "cornerRadius": "12px",
+                    "paddingAll": "14px",
+                    "margin": "lg",
+                    "contents": [
+                        {"type": "text", "text": "輸入範例", "size": "xs", "color": "#147D6F", "weight": "bold"},
+                        {"type": "text", "text": example, "size": "md", "color": "#17324D", "weight": "bold", "wrap": True, "margin": "xs"},
+                    ],
+                },
+                {"type": "separator", "margin": "lg", "color": "#DCE7E5"},
+                {"type": "text", "text": "可修改欄位", "size": "sm", "weight": "bold", "color": "#147D6F", "margin": "lg"},
+                {
+                    "type": "box",
+                    "layout": "vertical",
+                    "spacing": "sm",
+                    "margin": "sm",
+                    "contents": field_boxes,
+                },
+                {
+                    "type": "box",
+                    "layout": "vertical",
+                    "backgroundColor": "#FFF4E8",
+                    "cornerRadius": "12px",
+                    "paddingAll": "12px",
+                    "margin": "lg",
+                    "contents": [
+                        {"type": "text", "text": "小提醒", "size": "sm", "weight": "bold", "color": "#B45309"},
+                        {
+                            "type": "text",
+                            "text": "可以一次修改多個欄位，例如同時改金額和商家。",
+                            "size": "sm",
+                            "color": "#263238",
+                            "wrap": True,
+                            "margin": "xs",
+                        },
+                    ],
+                },
+            ],
+        },
+    }
+    return FlexMessage(
+        alt_text=f"{title}：請輸入要修改的內容"[:400],
+        contents=FlexContainer.from_dict(payload),
+    )
+
+
 def _recommendation_source_label(result: dict[str, Any]) -> str:
     provider = str(result.get("provider") or "").strip()
     if provider.startswith("tourism_open_data"):
@@ -2109,6 +2217,13 @@ def _build_feature_messages(result: FlowResult) -> list[Any]:
         expense_draft_message = None
     if expense_draft_message is not None:
         return [expense_draft_message]
+    try:
+        expense_edit_prompt_message = _build_expense_edit_prompt_flex(result)
+    except Exception as exc:
+        _log_failure("Expense edit prompt Flex Message", exc)
+        expense_edit_prompt_message = None
+    if expense_edit_prompt_message is not None:
+        return [expense_edit_prompt_message]
     try:
         route_message = _build_route_optimization_flex(result)
     except Exception as exc:

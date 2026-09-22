@@ -28,6 +28,7 @@ from expense_flow import (
     _participant_actions,
     database_contract_ready,
     database_unavailable_result,
+    draft_edit_prompt_result,
     format_expense_draft,
     infer_category,
     normalize_participants_for_storage,
@@ -684,11 +685,7 @@ def handle_invoice_postback(
             )
             return _draft_result_after_edit("invoice", payload)
         if parts[1] == "edit_prompt":
-            return FlowResult(
-                True,
-                "請輸入要修改的內容，例如：修改發票草稿 金額 2350 商家 ○○海產店。\n"
-                "可修改：項目、金額、分攤對象、消費日期、商家、分類、付款人、備註。",
-            )
+            return draft_edit_prompt_result("invoice")
         if parts[1] == "confirm":
             if not database_contract_ready(("create_expenses_from_invoice", "delete_feature_draft")):
                 return database_unavailable_result()
