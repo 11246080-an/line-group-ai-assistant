@@ -590,7 +590,7 @@ def _create_book(
     return FlowResult(
         handled=True,
         text=f"已建立行程帳本「{clean_name}」。接下來可以輸入「記帳 項目 金額」。",
-        data={"book": book if isinstance(book, dict) else {}},
+        data={"expense_book_created": book if isinstance(book, dict) else {"name": clean_name}},
     )
 
 

@@ -1889,6 +1889,88 @@ def _build_expense_close_confirmation_flex(result: FlowResult) -> FlexMessage | 
     )
 
 
+def _build_expense_book_created_flex(result: FlowResult) -> FlexMessage | None:
+    data = result.data if isinstance(result.data, dict) else {}
+    book = data.get("expense_book_created")
+    if not isinstance(book, dict):
+        return None
+    title = redact_sensitive_identifiers(str(book.get("name") or "未命名行程").strip())[:100]
+
+    payload = {
+        "type": "bubble",
+        "size": "mega",
+        "header": {
+            "type": "box",
+            "layout": "vertical",
+            "backgroundColor": "#147D6F",
+            "paddingAll": "20px",
+            "contents": [
+                {"type": "text", "text": "共同記帳", "size": "xs", "color": "#D5F2EC", "weight": "bold"},
+                {"type": "text", "text": "帳本建立成功", "size": "xl", "color": "#FFFFFF", "weight": "bold", "wrap": True, "margin": "sm"},
+            ],
+        },
+        "body": {
+            "type": "box",
+            "layout": "vertical",
+            "paddingAll": "20px",
+            "contents": [
+                {
+                    "type": "text",
+                    "text": "已建立新的行程帳本，接下來可以開始記錄支出。",
+                    "size": "sm",
+                    "color": "#52656A",
+                    "wrap": True,
+                },
+                {
+                    "type": "box",
+                    "layout": "vertical",
+                    "backgroundColor": "#E7F4F0",
+                    "cornerRadius": "12px",
+                    "paddingAll": "14px",
+                    "margin": "lg",
+                    "contents": [
+                        {"type": "text", "text": "帳本名稱", "size": "xs", "color": "#147D6F", "weight": "bold"},
+                        {"type": "text", "text": title, "size": "lg", "color": "#17324D", "weight": "bold", "wrap": True, "margin": "xs"},
+                    ],
+                },
+                {"type": "separator", "margin": "lg", "color": "#DCE7E5"},
+                {"type": "text", "text": "下一步可以這樣做", "size": "sm", "weight": "bold", "color": "#147D6F", "margin": "lg"},
+                {
+                    "type": "text",
+                    "text": "輸入「記帳 午餐 1200」新增支出，也可以輸入「發票記帳」用發票辨識建立草稿。",
+                    "size": "sm",
+                    "color": "#52656A",
+                    "wrap": True,
+                    "margin": "xs",
+                },
+                {
+                    "type": "box",
+                    "layout": "vertical",
+                    "backgroundColor": "#FFF4E8",
+                    "cornerRadius": "12px",
+                    "paddingAll": "12px",
+                    "margin": "lg",
+                    "contents": [
+                        {"type": "text", "text": "完成後", "size": "sm", "weight": "bold", "color": "#B45309"},
+                        {
+                            "type": "text",
+                            "text": "輸入「結束記帳」即可產生行程花費報表。",
+                            "size": "sm",
+                            "color": "#263238",
+                            "wrap": True,
+                            "margin": "xs",
+                        },
+                    ],
+                },
+            ],
+        },
+    }
+    return FlexMessage(
+        alt_text=f"帳本建立成功：{title}"[:400],
+        contents=FlexContainer.from_dict(payload),
+    )
+
+
 def _build_expense_confirmed_flex(result: FlowResult) -> FlexMessage | None:
     data = result.data if isinstance(result.data, dict) else {}
     expense = data.get("expense_confirmed")
@@ -2889,6 +2971,13 @@ def _build_feature_messages(result: FlowResult) -> list[Any]:
         expense_close_confirmation_message = None
     if expense_close_confirmation_message is not None:
         return [expense_close_confirmation_message]
+    try:
+        expense_book_created_message = _build_expense_book_created_flex(result)
+    except Exception as exc:
+        _log_failure("Expense book created Flex Message", exc)
+        expense_book_created_message = None
+    if expense_book_created_message is not None:
+        return [expense_book_created_message]
     try:
         expense_confirmed_message = _build_expense_confirmed_flex(result)
     except Exception as exc:
