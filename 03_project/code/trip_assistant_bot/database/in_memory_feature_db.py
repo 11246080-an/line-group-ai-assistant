@@ -234,18 +234,13 @@ def update_expense_book_schedule(
         return _copy(book)
 
 
-def close_expense_book(*, book_id: Any, closed_by: str, line_group_id: str) -> dict[str, Any]:
+def close_expense_book(*, book_id: Any, closed_by: str) -> dict[str, Any]:
     with _lock:
         book = _active_book(book_id)
-        if str(book.get("line_group_id") or "") != str(line_group_id):
-            raise PermissionError("找不到這個群組目前進行中的測試帳本，或帳本已經被關閉")
+        if str(book.get("created_by") or "") != str(closed_by):
+            raise PermissionError("只有測試帳本建立者可以結束行程")
         current = _now()
-        book.update({
-            "status": "closed",
-            "closed_at": current,
-            "closed_by": str(closed_by),
-            "updated_at": current,
-        })
+        book.update({"status": "closed", "closed_at": current, "updated_at": current})
         return _copy(book)
 
 
@@ -698,6 +693,23 @@ def get_vote_results(*, poll_id: str) -> list[dict[str, Any]]:
                 selected = str(vote.get("option_id"))
                 counts[selected] = counts.get(selected, 0) + 1
         return [{"option_id": option_id, "count": count} for option_id, count in counts.items()]
+
+
+def close_active_vote_session(*, line_group_id: str, now: datetime) -> dict[str, Any] | None:
+    with _lock:
+        current = _aware(now) or _now()
+        for poll in reversed(list(_vote_sessions.values())):
+            if poll.get("line_group_id") != str(line_group_id) or poll.get("status") != "active":
+                continue
+            poll.update(
+                {
+                    "status": "closed",
+                    "closed_at": current,
+                    "closed_reason": "manual",
+                }
+            )
+            return _copy(poll)
+        return None
 
 
 def claim_due_vote_sessions(*, now: datetime, limit: int = 50) -> list[dict[str, Any]]:

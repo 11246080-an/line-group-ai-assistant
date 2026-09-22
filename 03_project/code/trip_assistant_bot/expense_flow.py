@@ -83,7 +83,12 @@ def get_feature_database_module() -> Any:
         in {"1", "true", "yes", "on"}
         else "db"
     )
-    return importlib.import_module(module_name)
+    try:
+        return importlib.import_module(module_name)
+    except ModuleNotFoundError:
+        if module_name == "in_memory_feature_db":
+            return importlib.import_module("database.in_memory_feature_db")
+        raise
 
 
 def _db_function(name: str) -> Callable[..., Any]:
