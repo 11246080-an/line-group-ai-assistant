@@ -14,6 +14,7 @@ from weather_flow import sync_cwa_weather_daily_cache
 PushCallback = Callable[[str, str], None]
 ExpenseReportPushCallback = Callable[[str, dict, list[dict]], None]
 ItinerarySharePushCallback = Callable[[str, dict, list[dict]], None]
+PollResultPushCallback = Callable[[str, dict, list[dict]], None]
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -22,6 +23,7 @@ def run_due_tasks(
     push_text: PushCallback,
     push_expense_report: ExpenseReportPushCallback | None = None,
     push_itinerary_share_prompt: ItinerarySharePushCallback | None = None,
+    push_poll_result: PollResultPushCallback | None = None,
     now: datetime | None = None,
     limit: int = 50,
 ) -> dict[str, int]:
@@ -85,8 +87,11 @@ def run_due_tasks(
                 poll_id = str(poll.get("poll_id") or poll.get("_id") or "")
                 results = list(_db_function("get_vote_results")(poll_id=poll_id) or [])
                 push_target_id = str(poll.get("line_group_id") or "")
-                result_text = "投票已截止。\n\n" + format_poll(poll, results)
-                push_text(push_target_id, result_text)
+                if push_poll_result is None:
+                    result_text = "投票已截止。\n\n" + format_poll(poll, results)
+                    push_text(push_target_id, result_text)
+                else:
+                    push_poll_result(push_target_id, poll, results)
                 _db_function("mark_vote_result_announced")(
                     poll_id=poll_id,
                     announced_at=current,

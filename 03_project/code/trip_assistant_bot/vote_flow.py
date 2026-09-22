@@ -176,6 +176,28 @@ def _poll_result(poll: dict[str, Any]) -> FlowResult:
     )
 
 
+def _poll_result_flow(
+    poll: dict[str, Any],
+    results: list[dict[str, Any]],
+    *,
+    prefix: str = "",
+) -> FlowResult:
+    text = format_poll(poll, results)
+    if prefix:
+        text = f"{prefix}\n\n{text}"
+    return FlowResult(
+        True,
+        text,
+        data={
+            "anonymous_poll_result": {
+                "poll": poll,
+                "results": results,
+                "prefix": prefix,
+            }
+        },
+    )
+
+
 def _create_prepared_poll(
     *,
     line_group_id: str,
@@ -490,7 +512,7 @@ def handle_vote_text(text: str, *, line_group_id: str, line_user_id: str) -> Flo
                 poll_id=poll_id,
                 announced_at=_mongo_utc_now(),
             )
-            return FlowResult(True, "投票已提前結束。\n\n" + format_poll(poll, results))
+            return _poll_result_flow(poll, results, prefix="投票已提前結束。")
         except DatabaseFeatureUnavailable:
             return database_unavailable_result()
         except Exception as exc:
@@ -573,7 +595,7 @@ def handle_vote_postback(data: str, *, line_group_id: str, line_user_id: str) ->
                 poll_id=poll_id,
                 announced_at=_mongo_utc_now(),
             )
-            return FlowResult(True, format_poll(poll, results))
+            return _poll_result_flow(poll, results)
         valid_options = {item["id"] for item in _option_rows(poll)}
         if option_id not in valid_options:
             return FlowResult(True, "這個投票選項不存在。")
@@ -594,7 +616,7 @@ def handle_vote_postback(data: str, *, line_group_id: str, line_user_id: str) ->
                 poll_id=poll_id,
                 announced_at=_mongo_utc_now(),
             )
-            return FlowResult(True, format_poll(final_poll, results))
+            return _poll_result_flow(final_poll, results)
         # 不公開選項內容，只讓使用者知道按鈕已成功送出。
         return FlowResult(True, "已收到你的投票，可在截止前重新選擇。")
     except DatabaseFeatureUnavailable:

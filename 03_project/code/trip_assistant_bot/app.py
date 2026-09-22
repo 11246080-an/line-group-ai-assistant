@@ -143,6 +143,7 @@ from vote_flow import (
     create_vote_proposal,
     handle_vote_postback,
     handle_vote_text,
+    _poll_result_flow,
 )
 
 app = Flask(__name__)
@@ -979,6 +980,198 @@ def _build_anonymous_poll_flex(result: FlowResult) -> FlexMessage | None:
     return FlexMessage(
         alt_text=f"匿名投票：{question}"[:400],
         contents=FlexContainer.from_dict(payload),
+    )
+
+
+def _build_anonymous_poll_result_flex(result: FlowResult) -> FlexMessage | None:
+    data = result.data if isinstance(result.data, dict) else {}
+    payload_data = data.get("anonymous_poll_result")
+    if not isinstance(payload_data, dict):
+        return None
+    poll = payload_data.get("poll")
+    raw_results = payload_data.get("results")
+    if not isinstance(poll, dict) or not isinstance(raw_results, list):
+        return None
+
+    question = redact_sensitive_identifiers(str(poll.get("question") or "群組投票").strip())[:200]
+    options: list[tuple[int, str, str]] = []
+    for index, option in enumerate(poll.get("options") or [], start=1):
+        if isinstance(option, dict):
+            option_id = str(option.get("option_id") or option.get("id") or index)
+            label = str(option.get("label") or option.get("text") or option_id)
+        else:
+            option_id = str(index)
+            label = str(option)
+        safe_label = redact_sensitive_identifiers(label.strip())[:80]
+        if safe_label:
+            options.append((index, option_id, safe_label))
+    if not options:
+        return None
+
+    counts = {
+        str(row.get("option_id")): int(row.get("count") or 0)
+        for row in raw_results
+        if isinstance(row, dict)
+    }
+    ranked = sorted(
+        [(original_index, option_id, label, counts.get(option_id, 0)) for original_index, option_id, label in options],
+        key=lambda item: (-item[3], item[0]),
+    )
+    total_votes = sum(count for _, _, _, count in ranked)
+    top_count = ranked[0][3] if ranked else 0
+    winners = [label for _, _, label, count in ranked if count == top_count and top_count > 0]
+    if top_count <= 0:
+        summary = "本次沒有收到任何票。"
+    elif len(winners) == 1:
+        summary = f"{winners[0]} 得票最高。"
+    else:
+        summary = f"{'、'.join(winners[:3])} 並列第一名。"
+
+    max_count = max((count for _, _, _, count in ranked), default=0)
+    result_rows: list[dict[str, Any]] = []
+    previous_count: int | None = None
+    previous_rank = 0
+    for position, (_, _, label, count) in enumerate(ranked, start=1):
+        rank = previous_rank if previous_count == count else position
+        previous_count = count
+        previous_rank = rank
+        percent = int(round((count / max_count) * 100)) if max_count > 0 else 0
+        bar_width = max(1, percent)
+        result_rows.append(
+            {
+                "type": "box",
+                "layout": "vertical",
+                "margin": "lg" if position == 1 else "md",
+                "contents": [
+                    {
+                        "type": "box",
+                        "layout": "horizontal",
+                        "contents": [
+                            {
+                                "type": "text",
+                                "text": f"第{rank}名",
+                                "size": "xs",
+                                "weight": "bold",
+                                "color": "#147D6F" if count == top_count and top_count > 0 else "#66777B",
+                                "flex": 2,
+                            },
+                            {
+                                "type": "text",
+                                "text": label,
+                                "size": "sm",
+                                "weight": "bold" if count == top_count and top_count > 0 else "regular",
+                                "color": "#263238",
+                                "wrap": True,
+                                "flex": 5,
+                            },
+                            {
+                                "type": "text",
+                                "text": f"{count} 票",
+                                "size": "sm",
+                                "weight": "bold",
+                                "color": "#17324D",
+                                "align": "end",
+                                "flex": 2,
+                            },
+                        ],
+                    },
+                    {
+                        "type": "box",
+                        "layout": "horizontal",
+                        "height": "8px",
+                        "backgroundColor": "#E7EFED",
+                        "cornerRadius": "999px",
+                        "margin": "sm",
+                        "contents": [
+                            {
+                                "type": "box",
+                                "layout": "vertical",
+                                "width": f"{bar_width}%",
+                                "backgroundColor": "#147D6F" if count == top_count and top_count > 0 else "#9DB9B2",
+                                "cornerRadius": "999px",
+                                "contents": [],
+                            }
+                        ],
+                    },
+                ],
+            }
+        )
+
+    prefix = redact_sensitive_identifiers(str(payload_data.get("prefix") or "").strip())[:80]
+    body_contents: list[dict[str, Any]] = [
+        {
+            "type": "text",
+            "text": question,
+            "size": "lg",
+            "weight": "bold",
+            "color": "#263238",
+            "wrap": True,
+        },
+        {
+            "type": "box",
+            "layout": "vertical",
+            "backgroundColor": "#E7F4F0",
+            "cornerRadius": "12px",
+            "paddingAll": "14px",
+            "margin": "lg",
+            "contents": [
+                {"type": "text", "text": "投票結論", "size": "xs", "color": "#147D6F", "weight": "bold"},
+                {"type": "text", "text": summary, "size": "md", "color": "#17324D", "weight": "bold", "wrap": True, "margin": "xs"},
+                {"type": "text", "text": f"總票數：{total_votes} 票", "size": "sm", "color": "#52656A", "margin": "xs"},
+            ],
+        },
+    ]
+    if prefix:
+        body_contents.insert(
+            0,
+            {
+                "type": "text",
+                "text": prefix,
+                "size": "sm",
+                "color": "#B45309",
+                "weight": "bold",
+                "wrap": True,
+                "margin": "none",
+            },
+        )
+    body_contents.extend(
+        [
+            {"type": "separator", "margin": "lg", "color": "#DCE7E5"},
+            {"type": "text", "text": "排名結果", "size": "sm", "weight": "bold", "color": "#147D6F", "margin": "lg"},
+            *result_rows,
+            {
+                "type": "text",
+                "text": "投票期間不公開票數；此結果僅顯示匿名彙總。",
+                "size": "xs",
+                "color": "#66777B",
+                "wrap": True,
+                "margin": "lg",
+            },
+        ]
+    )
+    flex_payload = {
+        "type": "bubble",
+        "size": "mega",
+        "header": {
+            "type": "box",
+            "layout": "vertical",
+            "backgroundColor": "#147D6F",
+            "paddingAll": "20px",
+            "contents": [
+                {"type": "text", "text": "匿名投票", "size": "xs", "color": "#D5F2EC", "weight": "bold"},
+                {"type": "text", "text": "投票結果", "size": "xl", "color": "#FFFFFF", "weight": "bold", "wrap": True, "margin": "sm"},
+            ],
+        },
+        "body": {
+            "type": "box",
+            "layout": "vertical",
+            "paddingAll": "20px",
+            "contents": body_contents,
+        },
+    }
+    return FlexMessage(
+        alt_text=f"匿名投票結果：{question}"[:400],
+        contents=FlexContainer.from_dict(flex_payload),
     )
 
 
@@ -2339,6 +2532,13 @@ def _build_feature_messages(result: FlowResult) -> list[Any]:
         weather_message = None
     if weather_message is not None:
         return [weather_message]
+    try:
+        poll_result_message = _build_anonymous_poll_result_flex(result)
+    except Exception as exc:
+        _log_failure("Anonymous poll result Flex Message", exc)
+        poll_result_message = None
+    if poll_result_message is not None:
+        return [poll_result_message]
     poll_message = _build_anonymous_poll_flex(result)
     if poll_message is not None:
         return [poll_message]
@@ -2477,6 +2677,17 @@ def _push_itinerary_share_prompt(
     result = prepare_share_prompt_for_closed_book(book=book, expenses=expenses)
     if result is not None:
         _push_feature_result(push_target_id, result)
+
+
+def _push_poll_result(
+    push_target_id: str,
+    poll: dict[str, Any],
+    results: list[dict[str, Any]],
+) -> None:
+    _push_feature_result(
+        push_target_id,
+        _poll_result_flow(poll, results, prefix="投票已截止。"),
+    )
 
 
 def _is_location_recommendation_request(
@@ -4352,6 +4563,7 @@ def run_internal_tasks():
         push_text=_push_text,
         push_expense_report=_push_expense_report,
         push_itinerary_share_prompt=_push_itinerary_share_prompt,
+        push_poll_result=_push_poll_result,
     )
     return jsonify({"ok": True, **result})
 
@@ -4528,6 +4740,7 @@ def _start_opportunistic_schedule_check() -> None:
                 push_text=_push_text,
                 push_expense_report=_push_expense_report,
                 push_itinerary_share_prompt=_push_itinerary_share_prompt,
+                push_poll_result=_push_poll_result,
             )
         except Exception as exc:
             _log_failure("Opportunistic scheduled tasks", exc)
