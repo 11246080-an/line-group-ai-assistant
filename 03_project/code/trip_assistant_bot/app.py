@@ -62,6 +62,7 @@ from linebot.v3.webhooks import (
 
 from ai_linebot_core.app.engine import analyze_dialogue
 from ai_linebot_core.app.models import AnalysisResult
+from itinerary_classification import classify_itinerary
 from ai_linebot_core.app.line_import import (
     ITINERARY_IMPORT_MARKER,
     LineImportError,
@@ -103,7 +104,7 @@ from location_flow import (
     save_recent_location_context,
 )
 from weather_flow import run_weather_recommendation
-from route_optimization import build_optimized_route_result, should_optimize_route
+from route_optimization import build_optimized_route_reply, should_optimize_route
 from expense_flow import (
     ActionSpec,
     FlowResult,
@@ -4838,6 +4839,11 @@ def _public_itinerary_payload(document: dict[str, Any]) -> dict[str, Any]:
         for leg in document.get("transport") or []
         if isinstance(leg, dict)
     ]
+    classification = classify_itinerary(document)
+    payload["type"] = classification["primary_type"]
+    payload["tags"] = classification["tags"]
+    payload["type_source"] = classification["source"]
+    payload["type_confidence"] = classification["confidence"]
     return _public_json_value(payload)
 
 
@@ -5829,7 +5835,7 @@ def handle_message(event: MessageEvent) -> None:
 
     try:
         if should_optimize_route(result, user_text=user_text):
-            route_result = build_optimized_route_result(result, user_text=user_text)
+            route_result = build_optimized_route_reply(result, user_text=user_text)
             route_reply = str((route_result or {}).get("reply_text") or "").strip()
             if route_result and route_reply:
                 _reply_feature_result(
@@ -5938,7 +5944,7 @@ def handle_message(event: MessageEvent) -> None:
                     _debug_print("略過語意相近的重複回覆。")
                     return
                 if _should_suppress_redundant_known_info_question(
-                    recent_messages,
+                    _recent_messages,
                     result,
                     final_reply,
                 ):
@@ -5983,7 +5989,7 @@ def handle_message(event: MessageEvent) -> None:
 
             elif suggested_reply:
                 if _should_suppress_redundant_known_info_question(
-                    recent_messages,
+                    _recent_messages,
                     result,
                     suggested_reply,
                 ):

@@ -5,7 +5,7 @@
   const MOBILE_QUERY = "(max-width: 760px)";
   const LINE_SHARE_URL = "https://line.me/R/share?text=";
   const LION_AD_URL = "https://travel.liontravel.com/category/zh-tw/taiwan/penghu";
-  const ITINERARY_TYPE_OPTIONS = ["山城", "都市", "河岸", "自然", "美食", "文化", "海線"];
+  const ITINERARY_TYPE_OPTIONS = ["山城", "都市", "河岸", "自然", "美食", "文化", "海線", "綜合"];
   const ITINERARY_TYPES = new Set(ITINERARY_TYPE_OPTIONS);
   const launchParams = parseLaunchParams();
   const sharedSessionToken = normalizeSessionToken(launchParams.get("session_token"));
@@ -1272,6 +1272,7 @@
         if (modes.length) transportLabel = modes.join("/");
       }
 
+      const normalizedType = normalizeItineraryType(itinerary);
       return {
         ...itinerary,
         id,
@@ -1279,7 +1280,8 @@
         budget: budgetLabel,
         transportLegs: Array.isArray(transportValue) ? transportValue : [],
         transport: transportLabel,
-        type: normalizeItineraryType(itinerary),
+        type: normalizedType,
+        tags: normalizeItineraryTags(itinerary, normalizedType),
         bestFor: String(itinerary.bestFor || itinerary.best_for || "").trim(),
         comment: String(itinerary.comment || "").trim(),
         lineBotKey: `linebot:${id}`,
@@ -1303,20 +1305,15 @@
   function normalizeItineraryType(itinerary) {
     const provided = String(itinerary.type || "").trim();
     if (ITINERARY_TYPES.has(provided)) return provided;
+    return "綜合";
+  }
 
-    const searchable = [
-      itinerary.title,
-      itinerary.summary,
-      itinerary.description,
-      ...(Array.isArray(itinerary.spots) ? itinerary.spots.map((spot) => `${spot?.name || ""} ${spot?.description || ""}`) : []),
-    ].join(" ");
-    if (/(海岸|海邊|海景|沙灘|漁港|海港|濱海)/.test(searchable)) return "海線";
-    if (/(河岸|河濱|溪流|湖畔|水岸)/.test(searchable)) return "河岸";
-    if (/(美食|小吃|夜市|餐廳|咖啡|市場)/.test(searchable)) return "美食";
-    if (/(文化|古蹟|老街|博物館|美術館|寺廟|歷史)/.test(searchable)) return "文化";
-    if (/(山城|山區|登山|步道|森林)/.test(searchable)) return "山城";
-    if (/(自然|公園|瀑布|農場|濕地|生態)/.test(searchable)) return "自然";
-    return "都市";
+  function normalizeItineraryTags(itinerary, primaryType) {
+    const tags = Array.isArray(itinerary.tags)
+      ? itinerary.tags.map((tag) => String(tag || "").trim()).filter((tag) => ITINERARY_TYPES.has(tag))
+      : [];
+    if (primaryType !== "綜合" && !tags.includes(primaryType)) tags.unshift(primaryType);
+    return [...new Set(tags)];
   }
 
   function uniqueOptions(key) {
@@ -1333,7 +1330,11 @@
   }
 
   function matchesFilter(item, key, value) {
-    return value === "all" || item[key] === value;
+    if (value === "all") return true;
+    if (key === "type") {
+      return item.type === value || (Array.isArray(item.tags) && item.tags.includes(value));
+    }
+    return item[key] === value;
   }
 
   function createMetaBox(label, value) {
