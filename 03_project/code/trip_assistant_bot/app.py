@@ -4452,6 +4452,7 @@ def _is_explicit_feature_command(text: str) -> bool:
             "發票記帳",
             "查看花費",
             "產生花費明細",
+            "結束記帳",
             "結束行程",
             "重新開啟帳本",
             "加入帳本",

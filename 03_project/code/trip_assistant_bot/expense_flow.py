@@ -746,6 +746,7 @@ def handle_expense_text(
             "取消支出",
             "查看花費",
             "產生花費明細",
+            "結束記帳",
             "結束行程",
             "重新開啟帳本",
             "加入帳本",
@@ -1002,7 +1003,7 @@ def handle_expense_text(
                 return error
             expenses = _db_function("list_expenses")(_book_id(book or {}), status="confirmed") or []
             return build_expense_report_result(book or {}, list(expenses))
-        if normalized == "結束行程":
+        if normalized in {"結束行程", "結束記帳"}:
             if not database_contract_ready(("get_active_expense_book",)):
                 return database_unavailable_result()
             book, error = _active_book_or_result(line_group_id)
