@@ -16,6 +16,7 @@ from expense_flow import (
     DatabaseFeatureUnavailable,
     FlowResult,
     _db_function,
+    database_contract_diagnostics,
     database_contract_ready,
     database_unavailable_result,
 )
@@ -498,7 +499,39 @@ def handle_vote_text(text: str, *, line_group_id: str, line_user_id: str) -> Flo
             "mark_vote_result_announced",
         )
         if not database_contract_ready(required):
-            return database_unavailable_result()
+            fallback_required = (
+                "get_active_vote_session",
+                "get_vote_results",
+                "mark_vote_result_announced",
+            )
+            fallback_module_name, fallback_missing, fallback_error = database_contract_diagnostics(fallback_required)
+            if not fallback_missing and not fallback_error:
+                try:
+                    poll = _db_function("get_active_vote_session")(line_group_id=line_group_id)
+                    if not isinstance(poll, dict):
+                        return FlowResult(True, "目前沒有進行中的投票。")
+                    poll_id = _poll_id(poll)
+                    results = list(_db_function("get_vote_results")(poll_id=poll_id) or [])
+                    _db_function("mark_vote_result_announced")(
+                        poll_id=poll_id,
+                        announced_at=_mongo_utc_now(),
+                    )
+                    poll = {**poll, "status": "closed", "closed_reason": "manual_fallback"}
+                    _LOGGER.warning(
+                        "Vote close used fallback without close_active_vote_session (%s)",
+                        fallback_module_name,
+                    )
+                    return _poll_result_flow(poll, results, prefix="投票已結束。")
+                except Exception as exc:
+                    _LOGGER.exception("Vote close fallback failed (%s)", type(exc).__name__)
+            module_name, missing, error = database_contract_diagnostics(required)
+            if error:
+                _LOGGER.error("Vote close DB module unavailable: %s", error)
+                return FlowResult(True, f"投票結束目前無法連到資料庫模組：{error}")
+            missing_text = "、".join(missing) if missing else "未知介面"
+            module_text = module_name or "未知 DB 模組"
+            _LOGGER.error("Vote close DB contract missing in %s: %s", module_text, missing_text)
+            return FlowResult(True, f"投票結束資料庫介面尚未完整，目前載入：{module_text}，缺少：{missing_text}。")
         try:
             poll = _db_function("close_active_vote_session")(
                 line_group_id=line_group_id,

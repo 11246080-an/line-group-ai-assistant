@@ -100,11 +100,17 @@ def _db_function(name: str) -> Callable[..., Any]:
 
 
 def database_contract_ready(required: tuple[str, ...] = _DB_REQUIRED_BASE) -> bool:
+    _, missing, error = database_contract_diagnostics(required)
+    return not missing and not error
+
+
+def database_contract_diagnostics(required: tuple[str, ...] = _DB_REQUIRED_BASE) -> tuple[str, list[str], str]:
     try:
         module = get_feature_database_module()
-    except Exception:
-        return False
-    return all(callable(getattr(module, name, None)) for name in required)
+    except Exception as exc:
+        return "", list(required), f"{type(exc).__name__}: {exc}"
+    missing = [name for name in required if not callable(getattr(module, name, None))]
+    return getattr(module, "__name__", ""), missing, ""
 
 
 def database_unavailable_result() -> FlowResult:
