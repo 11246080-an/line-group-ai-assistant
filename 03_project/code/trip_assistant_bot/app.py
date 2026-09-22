@@ -2024,6 +2024,124 @@ def _build_expense_edit_prompt_flex(result: FlowResult) -> FlexMessage | None:
     )
 
 
+def _build_invoice_input_options_flex(result: FlowResult) -> FlexMessage | None:
+    data = result.data if isinstance(result.data, dict) else {}
+    options_data = data.get("invoice_input_options")
+    if not isinstance(options_data, dict):
+        return None
+
+    book = options_data.get("book")
+    book_name = ""
+    if isinstance(book, dict):
+        book_name = redact_sensitive_identifiers(str(book.get("name") or "").strip())[:80]
+    actions_by_label = {
+        redact_sensitive_identifiers(action_spec.label.strip()): action_spec
+        for action_spec in result.actions
+    }
+    option_specs = [
+        ("直接拍照", "拍攝紙本發票或收據，立即進行雲端辨識。"),
+        ("從相簿選擇", "選擇已拍好的發票照片，適合補登支出。"),
+        ("掃描 QR Code", "掃描電子發票 QR Code，快速帶入發票資訊。"),
+    ]
+    button_contents: list[dict[str, Any]] = []
+    for index, (label, description) in enumerate(option_specs):
+        action_spec = actions_by_label.get(label)
+        if action_spec is None:
+            continue
+        button_contents.append(
+            {
+                "type": "box",
+                "layout": "vertical",
+                "backgroundColor": "#E7F4F0" if index == 0 else "#F1F7F5",
+                "cornerRadius": "12px",
+                "paddingAll": "12px",
+                "margin": "md" if button_contents else "none",
+                "action": _expense_draft_flex_action(action_spec),
+                "contents": [
+                    {"type": "text", "text": label, "size": "md", "weight": "bold", "color": "#147D6F"},
+                    {"type": "text", "text": description, "size": "xs", "color": "#52656A", "wrap": True, "margin": "xs"},
+                ],
+            }
+        )
+    if not button_contents:
+        return None
+
+    body_contents: list[dict[str, Any]] = [
+        {
+            "type": "text",
+            "text": "請選擇要用哪一種方式建立發票記帳草稿。",
+            "size": "sm",
+            "color": "#52656A",
+            "wrap": True,
+        },
+    ]
+    if book_name:
+        body_contents.append(
+            {
+                "type": "box",
+                "layout": "vertical",
+                "backgroundColor": "#E7F4F0",
+                "cornerRadius": "12px",
+                "paddingAll": "12px",
+                "margin": "lg",
+                "contents": [
+                    {"type": "text", "text": "目前帳本", "size": "xs", "color": "#147D6F", "weight": "bold"},
+                    {"type": "text", "text": book_name, "size": "md", "color": "#17324D", "weight": "bold", "wrap": True, "margin": "xs"},
+                ],
+            }
+        )
+    body_contents.extend(
+        [
+            {"type": "separator", "margin": "lg", "color": "#DCE7E5"},
+            {"type": "text", "text": "輸入方式", "size": "sm", "weight": "bold", "color": "#147D6F", "margin": "lg"},
+            *button_contents,
+            {
+                "type": "box",
+                "layout": "vertical",
+                "backgroundColor": "#FFF4E8",
+                "cornerRadius": "12px",
+                "paddingAll": "12px",
+                "margin": "lg",
+                "contents": [
+                    {"type": "text", "text": "隱私提醒", "size": "sm", "weight": "bold", "color": "#B45309"},
+                    {
+                        "type": "text",
+                        "text": "發票照片只用於辨識，不會長期保存；請勿上傳身分證或信用卡。",
+                        "size": "sm",
+                        "color": "#263238",
+                        "wrap": True,
+                        "margin": "xs",
+                    },
+                ],
+            },
+        ]
+    )
+    payload = {
+        "type": "bubble",
+        "size": "mega",
+        "header": {
+            "type": "box",
+            "layout": "vertical",
+            "backgroundColor": "#147D6F",
+            "paddingAll": "20px",
+            "contents": [
+                {"type": "text", "text": "共同記帳", "size": "xs", "color": "#D5F2EC", "weight": "bold"},
+                {"type": "text", "text": "發票輸入方式", "size": "xl", "color": "#FFFFFF", "weight": "bold", "wrap": True, "margin": "sm"},
+            ],
+        },
+        "body": {
+            "type": "box",
+            "layout": "vertical",
+            "paddingAll": "20px",
+            "contents": body_contents,
+        },
+    }
+    return FlexMessage(
+        alt_text="發票輸入方式：直接拍照、從相簿選擇、掃描 QR Code",
+        contents=FlexContainer.from_dict(payload),
+    )
+
+
 def _recommendation_source_label(result: dict[str, Any]) -> str:
     provider = str(result.get("provider") or "").strip()
     if provider.startswith("tourism_open_data"):
@@ -2511,6 +2629,13 @@ def _build_feature_messages(result: FlowResult) -> list[Any]:
         expense_draft_message = None
     if expense_draft_message is not None:
         return [expense_draft_message]
+    try:
+        invoice_input_options_message = _build_invoice_input_options_flex(result)
+    except Exception as exc:
+        _log_failure("Invoice input options Flex Message", exc)
+        invoice_input_options_message = None
+    if invoice_input_options_message is not None:
+        return [invoice_input_options_message]
     try:
         expense_edit_prompt_message = _build_expense_edit_prompt_flex(result)
     except Exception as exc:

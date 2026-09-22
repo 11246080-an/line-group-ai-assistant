@@ -213,6 +213,7 @@ def start_invoice_flow(
                 ActionSpec("從相簿選擇", "uri", build_invoice_liff_url(session.token, request_base_url, mode="library")),
                 ActionSpec("掃描 QR Code", "uri", build_invoice_liff_url(session.token, request_base_url, mode="qr")),
             ],
+            data={"invoice_input_options": {"book": redact_structure(book), "session_token": session.token}},
         )
     except DatabaseFeatureUnavailable:
         return database_unavailable_result()
