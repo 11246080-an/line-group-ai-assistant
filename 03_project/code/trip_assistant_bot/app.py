@@ -1525,6 +1525,171 @@ def _build_itinerary_draft_flex(result: FlowResult) -> FlexMessage | None:
     )
 
 
+def _build_itinerary_share_request_flex(result: FlowResult) -> FlexMessage | None:
+    data = result.data if isinstance(result.data, dict) else {}
+    request_data = data.get("itinerary_share_request")
+    if not isinstance(request_data, dict):
+        return None
+
+    title = redact_sensitive_identifiers(str(request_data.get("title") or "這次行程").strip())[:100]
+    try:
+        eligible_count = int(request_data.get("eligible_count") or 0)
+    except (TypeError, ValueError):
+        eligible_count = 0
+    try:
+        required_count = int(request_data.get("required_count") or 0)
+    except (TypeError, ValueError):
+        required_count = 0
+    deadline = request_data.get("deadline_at")
+    deadline_text = ""
+    if isinstance(deadline, datetime):
+        deadline_text = deadline.astimezone().strftime("%m/%d %H:%M")
+
+    footer_contents = [
+        {
+            "type": "button",
+            "style": "primary" if index == 0 else "secondary",
+            "color": "#147D6F" if index == 0 else "#E7EFED",
+            "height": "sm",
+            "action": _itinerary_flex_action(action_spec),
+        }
+        for index, action_spec in enumerate(result.actions[:2])
+    ]
+
+    stats_contents: list[dict[str, Any]] = [
+        {
+            "type": "box",
+            "layout": "vertical",
+            "flex": 1,
+            "backgroundColor": "#E7F4F0",
+            "cornerRadius": "12px",
+            "paddingAll": "12px",
+            "contents": [
+                {"type": "text", "text": "符合資格", "size": "xs", "color": "#66777B"},
+                {"type": "text", "text": f"{eligible_count} 位", "size": "lg", "weight": "bold", "color": "#17324D", "margin": "xs"},
+            ],
+        },
+        {
+            "type": "box",
+            "layout": "vertical",
+            "flex": 1,
+            "backgroundColor": "#E7F4F0",
+            "cornerRadius": "12px",
+            "paddingAll": "12px",
+            "contents": [
+                {"type": "text", "text": "公開門檻", "size": "xs", "color": "#66777B"},
+                {"type": "text", "text": f"{required_count} 位同意", "size": "lg", "weight": "bold", "color": "#17324D", "margin": "xs"},
+            ],
+        },
+    ]
+    if deadline_text:
+        stats_contents.append(
+            {
+                "type": "box",
+                "layout": "vertical",
+                "flex": 1,
+                "backgroundColor": "#E7F4F0",
+                "cornerRadius": "12px",
+                "paddingAll": "12px",
+                "contents": [
+                    {"type": "text", "text": "截止", "size": "xs", "color": "#66777B"},
+                    {"type": "text", "text": deadline_text, "size": "md", "weight": "bold", "color": "#17324D", "wrap": True, "margin": "xs"},
+                ],
+            }
+        )
+
+    body_contents: list[dict[str, Any]] = [
+        {
+            "type": "text",
+            "text": "這趟行程已結束，是否同意匿名分享到公開行程網站？",
+            "size": "sm",
+            "color": "#52656A",
+            "wrap": True,
+        },
+        {
+            "type": "box",
+            "layout": "vertical",
+            "backgroundColor": "#E7F4F0",
+            "cornerRadius": "12px",
+            "paddingAll": "14px",
+            "margin": "lg",
+            "contents": [
+                {"type": "text", "text": "行程名稱", "size": "xs", "color": "#147D6F", "weight": "bold"},
+                {"type": "text", "text": title, "size": "lg", "color": "#17324D", "weight": "bold", "wrap": True, "margin": "xs"},
+            ],
+        },
+        {
+            "type": "box",
+            "layout": "horizontal",
+            "spacing": "sm",
+            "margin": "lg",
+            "contents": stats_contents,
+        },
+        {"type": "separator", "margin": "lg", "color": "#DCE7E5"},
+        {"type": "text", "text": "會公開的內容", "size": "sm", "weight": "bold", "color": "#147D6F", "margin": "lg"},
+        {
+            "type": "text",
+            "text": "景點順序、交通方式、彙總預算與匿名化行程摘要。",
+            "size": "sm",
+            "color": "#52656A",
+            "wrap": True,
+            "margin": "xs",
+        },
+        {
+            "type": "box",
+            "layout": "vertical",
+            "backgroundColor": "#FFF4E8",
+            "cornerRadius": "12px",
+            "paddingAll": "12px",
+            "margin": "lg",
+            "contents": [
+                {"type": "text", "text": "不會公開", "size": "sm", "weight": "bold", "color": "#B45309"},
+                {
+                    "type": "text",
+                    "text": "群組名稱、成員名稱、付款人、聊天內容與個人資料。",
+                    "size": "sm",
+                    "color": "#263238",
+                    "wrap": True,
+                    "margin": "xs",
+                },
+            ],
+        },
+    ]
+
+    payload: dict[str, Any] = {
+        "type": "bubble",
+        "size": "mega",
+        "header": {
+            "type": "box",
+            "layout": "vertical",
+            "backgroundColor": "#147D6F",
+            "paddingAll": "20px",
+            "contents": [
+                {"type": "text", "text": "行程分享同意", "size": "xs", "color": "#D5F2EC", "weight": "bold"},
+                {"type": "text", "text": "匿名分享確認", "size": "xl", "color": "#FFFFFF", "weight": "bold", "wrap": True, "margin": "sm"},
+            ],
+        },
+        "body": {
+            "type": "box",
+            "layout": "vertical",
+            "paddingAll": "20px",
+            "contents": body_contents,
+        },
+    }
+    if footer_contents:
+        payload["footer"] = {
+            "type": "box",
+            "layout": "vertical",
+            "spacing": "sm",
+            "paddingAll": "16px",
+            "contents": footer_contents,
+        }
+    return FlexMessage(
+        alt_text=f"匿名分享確認：{title}"[:400],
+        contents=FlexContainer.from_dict(payload),
+    )
+
+
 def _build_expense_report_flex(result: FlowResult) -> FlexMessage | None:
     data = result.data if isinstance(result.data, dict) else {}
     report = data.get("expense_report")
@@ -2608,6 +2773,13 @@ def _build_feature_messages(result: FlowResult) -> list[Any]:
         itinerary_message = None
     if itinerary_message is not None:
         return [itinerary_message]
+    try:
+        itinerary_share_request_message = _build_itinerary_share_request_flex(result)
+    except Exception as exc:
+        _log_failure("Itinerary share request Flex Message", exc)
+        itinerary_share_request_message = None
+    if itinerary_share_request_message is not None:
+        return [itinerary_share_request_message]
     try:
         expense_report_message = _build_expense_report_flex(result)
     except Exception as exc:

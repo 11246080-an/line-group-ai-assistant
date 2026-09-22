@@ -1338,6 +1338,7 @@ def prepare_share_prompt_for_closed_book(
     itinerary_id = str(itinerary.get("itinerary_id") or "")
     title = redact_sensitive_identifiers(str(itinerary.get("title") or book.get("name") or "這次行程"))
     required_count = share_approval_required(len(eligible_keys))
+    deadline_at = current + timedelta(days=_SHARE_DEADLINE_DAYS)
     return FlowResult(
         True,
         (
@@ -1350,7 +1351,15 @@ def prepare_share_prompt_for_closed_book(
             ActionSpec("同意匿名分享", "postback", f"itinerary_share|approve|{itinerary_id}"),
             ActionSpec("不同意分享", "postback", f"itinerary_share|decline|{itinerary_id}"),
         ],
-        data={"itinerary_share_request": itinerary_id},
+        data={
+            "itinerary_share_request": {
+                "itinerary_id": itinerary_id,
+                "title": title,
+                "eligible_count": len(eligible_keys),
+                "required_count": required_count,
+                "deadline_at": deadline_at,
+            }
+        },
     )
 
 
