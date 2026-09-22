@@ -3327,6 +3327,33 @@ def _looks_like_text_location_lookup(user_text: str) -> bool:
     )
 
 
+def _infer_text_location_from_recent_messages(recent_messages: list[str]) -> str:
+    recent_text = _recent_message_body_text(recent_messages[-6:])
+    return _infer_text_location_from_user_text(recent_text)
+
+
+def _infer_text_activity_types_from_recent_messages(recent_messages: list[str]) -> list[str]:
+    recent_text = _recent_message_body_text(recent_messages[-6:])
+    return _infer_text_activity_types_from_user_text(recent_text)
+
+
+def _looks_like_recent_text_location_lookup(user_text: str, recent_messages: list[str]) -> bool:
+    normalized_text = str(user_text or "").strip()
+    if not normalized_text or not recent_messages:
+        return False
+    if _has_weather_request_signal(normalized_text, {}):
+        return False
+    if _looks_like_current_location_request(normalized_text):
+        return False
+    if not any(term in normalized_text for term in TEXT_LOCATION_REQUEST_TERMS):
+        return False
+
+    recent_text = _recent_message_body_text(recent_messages[-6:])
+    if not _infer_text_location_from_user_text(recent_text):
+        return False
+    return any(term in f"{recent_text}\n{normalized_text}" for term in TEXT_LOCATION_LOOKUP_TERMS)
+
+
 def _is_itinerary_budget_or_planning_request(
     user_text: str,
     analysis_result: dict[str, Any],
@@ -3360,6 +3387,7 @@ def _is_itinerary_budget_or_planning_request(
 def _extract_text_location_query_payload(
     user_text: str,
     analysis_result: dict[str, Any],
+    recent_messages: list[str] | None = None,
 ) -> dict[str, Any] | None:
     if _has_weather_request_signal(user_text, analysis_result):
         return None
@@ -3371,7 +3399,11 @@ def _extract_text_location_query_payload(
         and analysis_result.get("should_intervene")
     )
     has_direct_text_location_signal = _looks_like_text_location_lookup(user_text)
-    if not has_ai_text_location_signal and not has_direct_text_location_signal:
+    has_recent_text_location_signal = _looks_like_recent_text_location_lookup(
+        user_text,
+        recent_messages or [],
+    )
+    if not has_ai_text_location_signal and not has_direct_text_location_signal and not has_recent_text_location_signal:
         return None
 
     extracted_info = analysis_result.get("extracted_info") or {}
@@ -3394,6 +3426,9 @@ def _extract_text_location_query_payload(
     if not normalized_locations:
         inferred_location = _infer_text_location_from_user_text(user_text)
         normalized_locations = [inferred_location] if inferred_location else []
+    if not normalized_locations and recent_messages:
+        inferred_recent_location = _infer_text_location_from_recent_messages(recent_messages)
+        normalized_locations = [inferred_recent_location] if inferred_recent_location else []
     if not normalized_locations:
         return None
 
@@ -3411,9 +3446,18 @@ def _extract_text_location_query_payload(
     for inferred_type in _infer_text_activity_types_from_user_text(user_text):
         if inferred_type not in normalized_activity_types:
             normalized_activity_types.append(inferred_type)
+    for inferred_type in _infer_text_activity_types_from_recent_messages(recent_messages or []):
+        if inferred_type not in normalized_activity_types:
+            normalized_activity_types.append(inferred_type)
+
+    query_text = user_text.strip()
+    if has_recent_text_location_signal and recent_messages:
+        recent_text = _recent_message_body_text(recent_messages[-6:])
+        if recent_text:
+            query_text = f"{recent_text}\n{query_text}".strip()
 
     return {
-        "query_text": user_text.strip(),
+        "query_text": query_text,
         "location_text": location_text,
         "constraints": [str(item).strip() for item in constraints if str(item).strip()],
         "activity_types": normalized_activity_types,
@@ -5838,7 +5882,11 @@ def handle_message(event: MessageEvent) -> None:
         _log_failure("Location recommendation flow", exc)
 
     try:
-        text_location_payload = _extract_text_location_query_payload(user_text, result)
+        text_location_payload = _extract_text_location_query_payload(
+            user_text,
+            result,
+            recent_messages=_recent_messages,
+        )
         if text_location_payload:
             if not processing_hint_sent:
                 _send_processing_hint("text_location_recommendation")
