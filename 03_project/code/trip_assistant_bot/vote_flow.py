@@ -329,6 +329,30 @@ def _proposal_text(question: str, options: list[str]) -> str:
     return redact_sensitive_identifiers("\n".join(lines))
 
 
+def _proposal_result(payload: dict[str, Any]) -> FlowResult:
+    question = str(payload.get("question") or "大家最後想選哪一個？")
+    options = [
+        str(option).strip()
+        for option in payload.get("options") or []
+        if str(option).strip()
+    ]
+    proposal_id = str(payload.get("proposal_id") or "")
+    if not proposal_id or len(options) < 2:
+        return FlowResult(False)
+    return FlowResult(
+        True,
+        _proposal_text(question, options),
+        actions=_proposal_actions(proposal_id),
+        data={
+            "vote_proposal": {
+                "proposal_id": proposal_id,
+                "question": question,
+                "options": options,
+            }
+        },
+    )
+
+
 def _get_vote_proposal(line_group_id: str) -> dict[str, Any] | None:
     stored = _db_function("get_feature_draft")(
         line_group_id=line_group_id,
@@ -387,11 +411,11 @@ def create_vote_proposal(
     try:
         active = _db_function("get_active_vote_session")(line_group_id=line_group_id)
         if isinstance(active, dict):
-            return FlowResult(True, "")
+            return _poll_result(active)
 
         existing = _get_vote_proposal(line_group_id)
         if isinstance(existing, dict) and fingerprint and existing.get("discussion_fingerprint") == fingerprint:
-            return FlowResult(True, "")
+            return _proposal_result(existing)
 
         anonymity_salt = secrets.token_hex(16)
         eligible_keys = sorted(
@@ -419,12 +443,7 @@ def create_vote_proposal(
             draft_type=_PROPOSAL_DRAFT_TYPE,
             payload=payload,
         )
-        return FlowResult(
-            True,
-            _proposal_text(clean_question, clean_options),
-            actions=_proposal_actions(proposal_id),
-            data={"vote_proposal": {"proposal_id": proposal_id}},
-        )
+        return _proposal_result(payload)
     except DatabaseFeatureUnavailable:
         return database_unavailable_result()
     except Exception as exc:

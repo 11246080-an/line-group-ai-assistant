@@ -985,6 +985,131 @@ def _build_anonymous_poll_flex(result: FlowResult) -> FlexMessage | None:
     )
 
 
+def _build_vote_proposal_flex(result: FlowResult) -> FlexMessage | None:
+    data = result.data if isinstance(result.data, dict) else {}
+    proposal = data.get("vote_proposal")
+    if not isinstance(proposal, dict):
+        return None
+    question = redact_sensitive_identifiers(
+        str(proposal.get("question") or "大家最後想選哪一個？").strip()
+    )[:200]
+    options = [
+        redact_sensitive_identifiers(str(option).strip())[:80]
+        for option in proposal.get("options") or []
+        if str(option).strip()
+    ]
+    if len(options) < 2:
+        return None
+
+    body_contents: list[dict[str, Any]] = [
+        {
+            "type": "text",
+            "text": "匿名投票提案",
+            "size": "sm",
+            "color": "#147D6F",
+            "weight": "bold",
+        },
+        {
+            "type": "text",
+            "text": question,
+            "size": "xl",
+            "weight": "bold",
+            "wrap": True,
+            "margin": "md",
+        },
+        {
+            "type": "text",
+            "text": "看起來大家還沒收斂，可以先建立匿名投票讓大家選。",
+            "size": "sm",
+            "color": "#666666",
+            "wrap": True,
+            "margin": "md",
+        },
+    ]
+    for index, label in enumerate(options, start=1):
+        body_contents.append(
+            {
+                "type": "text",
+                "text": f"{index}. {label}",
+                "size": "md",
+                "color": "#263238",
+                "wrap": True,
+                "margin": "sm" if index > 1 else "lg",
+            }
+        )
+
+    footer_contents: list[dict[str, Any]] = []
+    for index, action_spec in enumerate(result.actions[:2]):
+        label = redact_sensitive_identifiers(action_spec.label.strip())[:20] or "選擇"
+        if action_spec.kind == "uri":
+            action: dict[str, Any] = {
+                "type": "uri",
+                "label": label,
+                "uri": action_spec.value,
+            }
+        elif action_spec.kind == "message":
+            action = {
+                "type": "message",
+                "label": label,
+                "text": action_spec.value[:300],
+            }
+        else:
+            action = {
+                "type": "postback",
+                "label": label,
+                "data": action_spec.value[:300],
+                "displayText": label,
+            }
+        footer_contents.append(
+            {
+                "type": "button",
+                "style": "primary" if index == 0 else "secondary",
+                "color": "#168A78" if index == 0 else "#DCEFEA",
+                "height": "sm",
+                "margin": "sm" if index else "none",
+                "action": action,
+            }
+        )
+
+    payload: dict[str, Any] = {
+        "type": "bubble",
+        "size": "mega",
+        "header": {
+            "type": "box",
+            "layout": "vertical",
+            "contents": [
+                {
+                    "type": "text",
+                    "text": "建立匿名投票？",
+                    "size": "xl",
+                    "weight": "bold",
+                    "color": "#FFFFFF",
+                    "wrap": True,
+                }
+            ],
+            "backgroundColor": "#168A78",
+            "paddingAll": "20px",
+        },
+        "body": {
+            "type": "box",
+            "layout": "vertical",
+            "contents": body_contents,
+            "paddingAll": "20px",
+        },
+    }
+    if footer_contents:
+        payload["footer"] = {
+            "type": "box",
+            "layout": "vertical",
+            "contents": footer_contents,
+            "paddingAll": "16px",
+        }
+    return FlexMessage(
+        alt_text=f"匿名投票提案：{question}"[:400],
+        contents=FlexContainer.from_dict(payload),
+    )
+
+
 def _build_anonymous_poll_result_flex(result: FlowResult) -> FlexMessage | None:
     data = result.data if isinstance(result.data, dict) else {}
     payload_data = data.get("anonymous_poll_result")
@@ -3154,6 +3279,13 @@ def _build_feature_messages(result: FlowResult) -> list[Any]:
         poll_result_message = None
     if poll_result_message is not None:
         return [poll_result_message]
+    try:
+        vote_proposal_message = _build_vote_proposal_flex(result)
+    except Exception as exc:
+        _log_failure("Vote proposal Flex Message", exc)
+        vote_proposal_message = None
+    if vote_proposal_message is not None:
+        return [vote_proposal_message]
     poll_message = _build_anonymous_poll_flex(result)
     if poll_message is not None:
         return [poll_message]
@@ -6211,6 +6343,8 @@ def handle_message(event: MessageEvent) -> None:
                 None
                 if (
                     _looks_like_current_location_request(user_text)
+                    or _looks_like_cost_or_ticket_lookup(user_text)
+                    or _is_exchanging_new_information(_recent_messages)
                     or (
                         _has_weather_request_signal(user_text, {})
                         and not _is_direct_weather_question(user_text)
