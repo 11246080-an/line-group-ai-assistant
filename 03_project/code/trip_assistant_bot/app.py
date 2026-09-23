@@ -3440,6 +3440,21 @@ def _looks_like_point_to_point_directions_request(user_text: str) -> bool:
     return has_origin_destination and has_direction_intent
 
 
+def _looks_like_cost_or_ticket_lookup(user_text: str) -> bool:
+    normalized_text = str(user_text or "").strip()
+    if not normalized_text:
+        return False
+    has_cost_signal = any(
+        term in normalized_text
+        for term in ("花費", "票價", "門票", "費用", "預算", "多少錢", "價錢", "價格")
+    )
+    has_lookup_signal = any(
+        term in normalized_text
+        for term in ("查", "查詢", "比較", "看", "整理", "估", "估算", "負責")
+    )
+    return has_cost_signal and has_lookup_signal
+
+
 def _extract_point_to_point_route_names(
     user_text: str,
     analysis_result: dict[str, Any],
@@ -3579,6 +3594,8 @@ def _looks_like_text_location_lookup(user_text: str) -> bool:
         return False
     if _looks_like_point_to_point_directions_request(normalized_text):
         return False
+    if _looks_like_cost_or_ticket_lookup(normalized_text):
+        return False
     if _has_weather_request_signal(normalized_text, {}):
         return False
     if _looks_like_current_location_request(normalized_text):
@@ -3606,6 +3623,8 @@ def _looks_like_recent_text_location_lookup(user_text: str, recent_messages: lis
     if not normalized_text or not recent_messages:
         return False
     if _looks_like_point_to_point_directions_request(normalized_text):
+        return False
+    if _looks_like_cost_or_ticket_lookup(normalized_text):
         return False
     if _has_weather_request_signal(normalized_text, {}):
         return False
@@ -3656,6 +3675,8 @@ def _extract_text_location_query_payload(
     recent_messages: list[str] | None = None,
 ) -> dict[str, Any] | None:
     if _looks_like_point_to_point_directions_request(user_text):
+        return None
+    if _looks_like_cost_or_ticket_lookup(user_text):
         return None
     if _has_weather_request_signal(user_text, analysis_result):
         return None
