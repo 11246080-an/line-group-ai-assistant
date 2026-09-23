@@ -3288,6 +3288,32 @@ TEXT_LOCATION_REQUEST_TERMS = (
 )
 
 
+def _looks_like_point_to_point_directions_request(user_text: str) -> bool:
+    normalized_text = str(user_text or "").strip()
+    if not normalized_text:
+        return False
+    has_origin_destination = bool(
+        re.search(r"從.+?(?:到|去|前往).+", normalized_text)
+        or re.search(r".+?(?:到|去|前往).+?(?:怎麼去|怎麼走|交通|路線|搭什麼)", normalized_text)
+    )
+    has_direction_intent = any(
+        term in normalized_text
+        for term in (
+            "怎麼去",
+            "怎麼走",
+            "交通方式",
+            "交通路線",
+            "路線",
+            "導航",
+            "搭什麼",
+            "公車",
+            "捷運",
+            "開車",
+        )
+    )
+    return has_origin_destination and has_direction_intent
+
+
 def _infer_text_location_from_user_text(user_text: str) -> str:
     normalized_text = str(user_text or "").strip()
     if not normalized_text:
@@ -3316,6 +3342,8 @@ def _looks_like_text_location_lookup(user_text: str) -> bool:
     normalized_text = str(user_text or "").strip()
     if not normalized_text:
         return False
+    if _looks_like_point_to_point_directions_request(normalized_text):
+        return False
     if _has_weather_request_signal(normalized_text, {}):
         return False
     if _looks_like_current_location_request(normalized_text):
@@ -3341,6 +3369,8 @@ def _infer_text_activity_types_from_recent_messages(recent_messages: list[str]) 
 def _looks_like_recent_text_location_lookup(user_text: str, recent_messages: list[str]) -> bool:
     normalized_text = str(user_text or "").strip()
     if not normalized_text or not recent_messages:
+        return False
+    if _looks_like_point_to_point_directions_request(normalized_text):
         return False
     if _has_weather_request_signal(normalized_text, {}):
         return False
@@ -3390,6 +3420,8 @@ def _extract_text_location_query_payload(
     analysis_result: dict[str, Any],
     recent_messages: list[str] | None = None,
 ) -> dict[str, Any] | None:
+    if _looks_like_point_to_point_directions_request(user_text):
+        return None
     if _has_weather_request_signal(user_text, analysis_result):
         return None
     if _is_itinerary_budget_or_planning_request(user_text, analysis_result):
