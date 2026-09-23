@@ -4399,6 +4399,68 @@ def _has_urgent_poll_signal(messages: list[str]) -> bool:
     )
 
 
+_DECISION_COMPLETED_PATTERNS = (
+    r"已經?(?:訂位|訂房|預約|確認|定案|決定|買票|購票|付款|付訂金|安排好)",
+    r"(?:訂位|訂房|預約|車票|門票|票|餐廳|住宿).{0,8}(?:完成|好了|好|確認)",
+    r"(?:就|先)?照(?:這個|這版|原本|剛剛|上面|目前).{0,6}(?:安排|版本|走|做)",
+    r"(?:不用|先不要|不需要).{0,8}(?:再選|再改|推薦|排行程|查|整理)",
+    r"(?:都|全部|大家).{0,8}(?:確認|決定|同意|OK|好了)",
+    r"(?:分工|行程|交通|餐廳|住宿|票).{0,8}(?:完成|確認|處理好了|弄好了)",
+)
+
+_DIRECT_HELP_PATTERNS = (
+    r"(?:幫我|幫忙|可以幫|請幫|麻煩).{0,18}(?:查|整理|推薦|規劃|安排|比較|估|算|排|建立|發起)",
+    r"(?:怎麼去|怎麼走|路線|導航|交通方式|搭什麼|開車|捷運|公車).{0,12}(?:嗎|呢|\?|？)?$",
+    r"(?:票價|門票|營業時間|天氣|附近|推薦|有什麼|哪個比較|怎麼排).{0,18}(?:嗎|呢|\?|？)",
+    r"(?:排一版|排個|整理一下|查一下|估一下|算一下|看一下|建立投票|發起投票)",
+)
+
+
+def _matches_any_pattern(text: str, patterns: tuple[str, ...]) -> bool:
+    return any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in patterns)
+
+
+def _has_recent_completed_decision_signal(recent_messages: list[str]) -> bool:
+    recent_text = _recent_message_body_text(recent_messages[-5:])
+    return _matches_any_pattern(recent_text, _DECISION_COMPLETED_PATTERNS)
+
+
+def _has_direct_help_request(user_text: str) -> bool:
+    text = str(user_text or "").strip()
+    if not text:
+        return False
+    return _matches_any_pattern(text, _DIRECT_HELP_PATTERNS)
+
+
+def _should_suppress_completed_decision_intervention(
+    user_text: str,
+    recent_messages: list[str],
+    result: dict[str, Any],
+) -> bool:
+    """Do not interrupt after the group has already settled the plan.
+
+    Users can still explicitly ask for navigation, weather, route planning, or
+    other follow-up help. This only blocks unsolicited nudges after completion
+    signals such as bought tickets, confirmed booking, or "就照這版".
+    """
+    if _has_direct_help_request(user_text):
+        return False
+
+    scenario_code = str(result.get("scenario_code") or "").strip()
+    scenario_name = str(result.get("scenario_name") or "").strip()
+    extracted = result.get("extracted_info")
+    decision_state = ""
+    if isinstance(extracted, dict):
+        decision_state = str(extracted.get("decision_state") or "").strip()
+
+    ai_thinks_done = (
+        scenario_code == "劇本十二"
+        or scenario_name == "決策完成與執行支援"
+        or decision_state == "已定案"
+    )
+    return ai_thinks_done or _has_recent_completed_decision_signal(recent_messages)
+
+
 def _build_pending_vote_question(
     result: dict[str, Any],
     suggested_reply: str,
@@ -5790,6 +5852,17 @@ def handle_message(event: MessageEvent) -> None:
         confidence_score = float(result.get("confidence_score", 0))
     except (TypeError, ValueError):
         confidence_score = 0.0
+
+    if (
+        should_intervene
+        and _should_suppress_completed_decision_intervention(
+            user_text,
+            _recent_messages,
+            result,
+        )
+    ):
+        _debug_print("Detected completed decision without a direct help request; keep quiet.")
+        return
 
     if _should_observe_weather_risk_without_reply(user_text, result):
         _debug_print("Weather risk mentioned but no direct weather question; keep observing.")
