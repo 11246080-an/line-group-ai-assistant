@@ -4648,6 +4648,78 @@ def _is_semantic_poll_decision(
     return _has_poll_stuck_signal(recent_messages) or _has_multi_member_option_support(recent_messages, options)
 
 
+_INFO_EXCHANGE_KEYWORDS = (
+    "交通",
+    "車程",
+    "路線",
+    "怎麼去",
+    "票價",
+    "門票",
+    "花費",
+    "費用",
+    "預算",
+    "餐廳",
+    "吃",
+    "午餐",
+    "晚餐",
+    "訂位",
+    "營業時間",
+    "開放時間",
+    "優點",
+    "缺點",
+    "優缺點",
+    "比較",
+    "附近",
+    "查",
+    "查一下",
+    "我查",
+    "我負責",
+    "補充",
+    "資料",
+    "天氣",
+    "下雨",
+    "時間",
+    "多久",
+)
+
+_POLL_SUGGESTION_KEYWORDS = (
+    "投票",
+    "匿名投票",
+    "建立投票",
+    "發起投票",
+    "選哪一個",
+    "最後想選",
+    "用投票",
+    "投個票",
+)
+
+
+def _is_exchanging_new_information(recent_messages: list[str]) -> bool:
+    if _has_poll_stuck_signal(recent_messages):
+        return False
+    recent_text = _recent_message_body_text(recent_messages[-5:])
+    compact_text = "".join(recent_text.split())
+    if not compact_text:
+        return False
+    return any(keyword in compact_text for keyword in _INFO_EXCHANGE_KEYWORDS)
+
+
+def _looks_like_poll_suggestion(text: str) -> bool:
+    normalized_text = str(text or "").strip()
+    if not normalized_text:
+        return False
+    return any(keyword in normalized_text for keyword in _POLL_SUGGESTION_KEYWORDS)
+
+
+def _should_suppress_poll_during_info_exchange(
+    recent_messages: list[str],
+    reply_text: str = "",
+) -> bool:
+    if not _is_exchanging_new_information(recent_messages):
+        return False
+    return not reply_text or _looks_like_poll_suggestion(reply_text)
+
+
 def _has_urgent_poll_signal(messages: list[str]) -> bool:
     text = "\n".join(messages[-5:])
     return any(
@@ -4762,6 +4834,10 @@ def _try_propose_automatic_poll(
     scenario_name = str(result.get("scenario_name") or "").strip()
     has_stuck_signal = _has_poll_stuck_signal(recent_messages)
     if not has_stuck_signal:
+        return False
+    if _should_suppress_poll_during_info_exchange(recent_messages):
+        app.logger.info("Suppressed automatic poll while members are still exchanging information")
+        _debug_print("成員仍在交換交通、票價、餐廳或優缺點資訊，暫不建立投票。")
         return False
     candidate_options = _filter_poll_options_to_recent_messages(
         _clean_auto_poll_options(result),
@@ -6340,6 +6416,13 @@ def handle_message(event: MessageEvent) -> None:
                     app.logger.info("Suppressed a redundant known-info question")
                     _debug_print("略過最近 5 句內已知資訊的重複補問。")
                     return
+                if _should_suppress_poll_during_info_exchange(
+                    _recent_messages,
+                    final_reply,
+                ):
+                    app.logger.info("Suppressed a poll suggestion while members are still exchanging information")
+                    _debug_print("成員仍在交換資訊，略過過早的投票建議。")
+                    return
 
                 if processing_hint_sent and final_reply:
                     _debug_print("Sending final reply after the early processing hint")
@@ -6384,6 +6467,13 @@ def handle_message(event: MessageEvent) -> None:
                 ):
                     app.logger.info("Suppressed a redundant known-info question")
                     _debug_print("略過最近 5 句內已知資訊的重複補問。")
+                    return
+                if _should_suppress_poll_during_info_exchange(
+                    _recent_messages,
+                    suggested_reply,
+                ):
+                    app.logger.info("Suppressed a poll suggestion while members are still exchanging information")
+                    _debug_print("成員仍在交換資訊，略過過早的投票建議。")
                     return
 
                 if _should_suppress_duplicate_reply(
