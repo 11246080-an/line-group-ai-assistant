@@ -1188,7 +1188,26 @@ def create_invoice_import(*, book_id: Any, source_fingerprint: str, created_by: 
 # ── 投票（匿名） ──────────────────────────────────────────────────
 
 def get_active_vote_session(*, line_group_id: str) -> dict | None:
-    return get_db().vote_sessions.find_one({"line_group_id": line_group_id, "status": "active"})
+    """
+    回傳群組目前仍有效的 active 投票。
+
+    若舊投票的 status 還是 active，但 deadline_at 已經過期，這裡會順手把它
+    關閉，避免過期投票卡住後續建立新投票。
+    """
+    db = get_db()
+    now = _utc_now()
+    poll = db.vote_sessions.find_one({"line_group_id": line_group_id, "status": "active"})
+    if poll is None:
+        return None
+    deadline_at = _ensure_aware_utc(poll.get("deadline_at"))
+    if deadline_at is not None and now >= deadline_at:
+        db.vote_sessions.find_one_and_update(
+            {"_id": poll["_id"], "status": "active"},
+            {"$set": {"status": "closed", "closed_at": now, "closed_reason": "deadline"}},
+            return_document=ReturnDocument.AFTER,
+        )
+        return None
+    return poll
 
 
 def create_vote_session(
