@@ -4956,6 +4956,8 @@ def _should_suppress_completed_decision_intervention(
 def _build_pending_vote_question(
     result: dict[str, Any],
     suggested_reply: str,
+    candidate_options: list[str] | None = None,
+    recent_messages: list[str] | None = None,
 ) -> str:
     combined_text = "\n".join(
         [
@@ -4963,12 +4965,42 @@ def _build_pending_vote_question(
             str(result.get("scenario_name") or ""),
             "\n".join(str(item) for item in result.get("evidence") or []),
             "\n".join(str(item) for item in result.get("system_behavior") or []),
+            _recent_message_body_text((recent_messages or [])[-5:]),
         ]
     )
-    if any(word in combined_text for word in ("晚餐", "午餐", "聚餐", "吃", "餐廳")):
+    option_text = " ".join(str(option) for option in candidate_options or [])
+    travel_words = (
+        "景點",
+        "出遊",
+        "行程",
+        "去哪",
+        "旅遊",
+        "旅行",
+        "走走",
+        "溫泉",
+        "地熱",
+        "公園",
+        "老街",
+        "夜市",
+        "展",
+        "館",
+        "海邊",
+        "湖",
+        "山",
+        "瀑布",
+        "步道",
+        "農場",
+        "園區",
+    )
+    meal_words = ("晚餐", "午餐", "聚餐", "吃", "餐廳", "火鍋", "拉麵", "壽司", "咖啡")
+    if any(word in option_text for word in travel_words):
+        return "這次景點要選哪一個？"
+    if any(word in option_text for word in meal_words):
         return "這次聚餐要選哪一個？"
-    if any(word in combined_text for word in ("景點", "出遊", "行程", "去哪")):
+    if any(word in combined_text for word in travel_words):
         return "這次行程要選哪一個？"
+    if any(word in combined_text for word in ("晚餐", "午餐", "聚餐", "吃")):
+        return "這次聚餐要選哪一個？"
     return "大家最後想選哪一個？"
 
 
@@ -5018,6 +5050,8 @@ def _try_propose_automatic_poll(
     question = _build_pending_vote_question(
         result,
         str(result.get("suggested_reply") or ""),
+        candidate_options=candidate_options,
+        recent_messages=recent_messages,
     )
     fingerprint_source = json.dumps(
         {"question": question, "options": candidate_options},
