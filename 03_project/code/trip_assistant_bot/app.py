@@ -4629,6 +4629,43 @@ def _has_question_marker(text: str) -> bool:
     return any(marker in normalized for marker in ("?", "？", "嗎", "呢", "要不要", "需不需要"))
 
 
+def _has_substantive_answer_before_followup_question(text: str) -> bool:
+    """Return true when a useful answer precedes a trailing follow-up question."""
+    candidate = str(text or "").strip()
+    if len(candidate) < 80:
+        return False
+    question_positions = [
+        position
+        for marker in ("?", "？", "嗎", "呢", "要不要", "需不需要")
+        for position in [candidate.find(marker)]
+        if position >= 0
+    ]
+    if not question_positions:
+        return False
+    prefix = candidate[: min(question_positions)].strip()
+    if len(prefix) < 40:
+        return False
+    return any(
+        marker in prefix
+        for marker in (
+            "建議",
+            "可以",
+            "搭乘",
+            "公車",
+            "捷運",
+            "計程車",
+            "步行",
+            "約",
+            "分鐘",
+            "費用",
+            "票價",
+            "路線",
+            "從",
+            "到",
+        )
+    )
+
+
 def _normalize_known_info_values(value: Any) -> list[str]:
     if isinstance(value, list):
         raw_values = value
@@ -4672,6 +4709,8 @@ def _should_suppress_redundant_known_info_question(
     """Avoid asking again for facts already mentioned within the latest 5 turns."""
     candidate = str(reply_text or "").strip()
     if not candidate or not _has_question_marker(candidate):
+        return False
+    if _has_substantive_answer_before_followup_question(candidate):
         return False
 
     extracted_info = result.get("extracted_info")
