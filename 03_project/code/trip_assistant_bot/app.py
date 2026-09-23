@@ -12,7 +12,7 @@ import secrets
 import threading
 import time
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 from uuid import uuid4
 
 from dotenv import load_dotenv
@@ -104,7 +104,8 @@ from location_flow import (
     save_recent_location_context,
 )
 from weather_flow import run_weather_recommendation
-from route_optimization import build_optimized_route_reply, should_optimize_route
+from google_routes import estimate_route_durations
+from route_optimization import build_optimized_route_reply, geocode_place, should_optimize_route
 from expense_flow import (
     ActionSpec,
     FlowResult,
@@ -2943,6 +2944,124 @@ def _build_route_optimization_flex(result: FlowResult) -> FlexMessage | None:
     )
 
 
+def _build_point_to_point_route_flex(result: FlowResult) -> FlexMessage | None:
+    card = result.data.get("point_to_point_route_card") if isinstance(result.data, dict) else None
+    if not isinstance(card, dict):
+        return None
+
+    origin = card.get("origin") if isinstance(card.get("origin"), dict) else {}
+    destination = card.get("destination") if isinstance(card.get("destination"), dict) else {}
+    origin_name = redact_sensitive_identifiers(str(origin.get("name") or "起點").strip())[:70]
+    destination_name = redact_sensitive_identifiers(str(destination.get("name") or "終點").strip())[:70]
+    origin_address = redact_sensitive_identifiers(str(origin.get("address") or "").strip())[:90]
+    destination_address = redact_sensitive_identifiers(str(destination.get("address") or "").strip())[:90]
+    maps_url = str(card.get("maps_url") or "").strip()
+    if not maps_url.startswith(("http://", "https://")):
+        maps_url = ""
+
+    mode_labels = {"DRIVE": "開車", "WALK": "步行", "TRANSIT": "大眾運輸"}
+    mode_colors = {"DRIVE": "#147D6F", "WALK": "#2F6F9F", "TRANSIT": "#A05A00"}
+    estimate_contents: list[dict[str, Any]] = []
+    for estimate in [item for item in card.get("estimates") or [] if isinstance(item, dict)][:3]:
+        mode = str(estimate.get("travel_mode") or "").upper()
+        minutes = estimate.get("duration_minutes")
+        distance_meters = estimate.get("distance_meters")
+        label = mode_labels.get(mode, mode or "交通")
+        duration_text = f"約 {minutes} 分鐘" if isinstance(minutes, int) else "暫無資料"
+        distance_text = ""
+        if isinstance(distance_meters, int) and distance_meters > 0:
+            distance_text = f"約 {distance_meters / 1000:.1f} 公里"
+        detail_contents = [
+            {"type": "text", "text": duration_text, "size": "sm", "weight": "bold", "color": "#263238", "align": "end"}
+        ]
+        if distance_text:
+            detail_contents.append(
+                {"type": "text", "text": distance_text, "size": "xs", "color": "#66777B", "align": "end", "margin": "xs"}
+            )
+        estimate_contents.append(
+            {
+                "type": "box",
+                "layout": "horizontal",
+                "contents": [
+                    {"type": "text", "text": label, "size": "sm", "weight": "bold", "color": mode_colors.get(mode, "#147D6F"), "flex": 3},
+                    {"type": "box", "layout": "vertical", "contents": detail_contents, "flex": 4},
+                ],
+                "margin": "md",
+            }
+        )
+
+    if not estimate_contents:
+        estimate_contents.append(
+            {
+                "type": "text",
+                "text": "目前 Google Routes API 沒有回傳可用交通時間，建議先開啟 Google 地圖查看即時路線。",
+                "size": "sm",
+                "color": "#B45309",
+                "wrap": True,
+                "margin": "md",
+            }
+        )
+
+    body_contents: list[dict[str, Any]] = [
+        {"type": "text", "text": "Google Places 解析地點，Google Routes API 估算交通時間。", "size": "xs", "color": "#66777B", "wrap": True},
+        {
+            "type": "box",
+            "layout": "vertical",
+            "backgroundColor": "#E7F4F0",
+            "cornerRadius": "14px",
+            "paddingAll": "14px",
+            "margin": "lg",
+            "contents": [
+                {"type": "text", "text": "起點", "size": "xs", "color": "#147D6F", "weight": "bold"},
+                {"type": "text", "text": origin_name, "size": "md", "color": "#263238", "weight": "bold", "wrap": True, "margin": "xs"},
+                {"type": "text", "text": origin_address or "地址未提供", "size": "xs", "color": "#66777B", "wrap": True, "margin": "xs"},
+                {"type": "separator", "margin": "md", "color": "#CFE3DE"},
+                {"type": "text", "text": "終點", "size": "xs", "color": "#147D6F", "weight": "bold", "margin": "md"},
+                {"type": "text", "text": destination_name, "size": "md", "color": "#263238", "weight": "bold", "wrap": True, "margin": "xs"},
+                {"type": "text", "text": destination_address or "地址未提供", "size": "xs", "color": "#66777B", "wrap": True, "margin": "xs"},
+            ],
+        },
+        {"type": "separator", "margin": "lg", "color": "#DCE7E5"},
+        {"type": "text", "text": "交通時間", "size": "sm", "weight": "bold", "color": "#147D6F", "margin": "lg"},
+        *estimate_contents,
+        {"type": "text", "text": "實際時間仍會受路況、班次與出發時間影響。", "size": "xs", "color": "#66777B", "wrap": True, "margin": "lg"},
+    ]
+    payload: dict[str, Any] = {
+        "type": "bubble",
+        "size": "mega",
+        "header": {
+            "type": "box",
+            "layout": "vertical",
+            "contents": [
+                {"type": "text", "text": "交通查詢", "size": "xs", "color": "#D5F2EC", "weight": "bold"},
+                {"type": "text", "text": f"{origin_name} → {destination_name}", "size": "xl", "color": "#FFFFFF", "weight": "bold", "wrap": True, "margin": "sm"},
+            ],
+            "backgroundColor": "#147D6F",
+            "paddingAll": "20px",
+        },
+        "body": {"type": "box", "layout": "vertical", "contents": body_contents, "paddingAll": "20px"},
+    }
+    if maps_url:
+        payload["footer"] = {
+            "type": "box",
+            "layout": "vertical",
+            "paddingAll": "16px",
+            "contents": [
+                {
+                    "type": "button",
+                    "style": "primary",
+                    "color": "#147D6F",
+                    "height": "sm",
+                    "action": {"type": "uri", "label": "開啟 Google 地圖", "uri": maps_url},
+                }
+            ],
+        }
+    return FlexMessage(
+        alt_text=f"交通查詢：{origin_name} 到 {destination_name}"[:400],
+        contents=FlexContainer.from_dict(payload),
+    )
+
+
 def _build_feature_messages(result: FlowResult) -> list[Any]:
     try:
         itinerary_message = _build_itinerary_draft_flex(result)
@@ -3014,6 +3133,13 @@ def _build_feature_messages(result: FlowResult) -> list[Any]:
         route_message = None
     if route_message is not None:
         return [route_message]
+    try:
+        point_to_point_route_message = _build_point_to_point_route_flex(result)
+    except Exception as exc:
+        _log_failure("Point-to-point route Flex Message", exc)
+        point_to_point_route_message = None
+    if point_to_point_route_message is not None:
+        return [point_to_point_route_message]
     try:
         weather_message = _build_weather_flex(result)
     except Exception as exc:
@@ -3312,6 +3438,115 @@ def _looks_like_point_to_point_directions_request(user_text: str) -> bool:
         )
     )
     return has_origin_destination and has_direction_intent
+
+
+def _extract_point_to_point_route_names(
+    user_text: str,
+    analysis_result: dict[str, Any],
+) -> tuple[str, str] | None:
+    if not _looks_like_point_to_point_directions_request(user_text):
+        return None
+
+    extracted = analysis_result.get("extracted_info") or {}
+    locations = extracted.get("location") or []
+    if not isinstance(locations, list):
+        locations = [locations]
+    normalized_locations = [
+        str(item).strip()
+        for item in locations
+        if str(item).strip() and str(item).strip() not in {"附近", "目前位置", "現在位置", "當前位置"}
+    ]
+    if len(normalized_locations) >= 2:
+        return normalized_locations[0], normalized_locations[1]
+
+    normalized_text = str(user_text or "").strip()
+    match = re.search(
+        r"從(?P<origin>.+?)(?:到|去|前往)(?P<destination>.+?)(?:怎麼去|怎麼走|交通方式|交通路線|路線|導航|搭什麼|嗎|呢|\?|？|$)",
+        normalized_text,
+    )
+    if match:
+        origin = match.group("origin").strip(" ，,。？?！!：:")
+        destination = match.group("destination").strip(" ，,。？?！!：:")
+        if origin and destination:
+            return origin, destination
+    return None
+
+
+def _point_to_point_maps_url(origin_name: str, destination_name: str) -> str:
+    return (
+        "https://www.google.com/maps/dir/"
+        f"{quote(origin_name, safe='')}/{quote(destination_name, safe='')}"
+    )
+
+
+def _build_point_to_point_route_result(
+    user_text: str,
+    analysis_result: dict[str, Any],
+) -> FlowResult | None:
+    names = _extract_point_to_point_route_names(user_text, analysis_result)
+    if not names:
+        return None
+    origin_name, destination_name = names
+    try:
+        origin = geocode_place(origin_name)
+        destination = geocode_place(destination_name)
+    except Exception as exc:
+        _log_failure("Point-to-point geocoding", exc)
+        origin = None
+        destination = None
+    if origin is None or destination is None:
+        maps_url = _point_to_point_maps_url(origin_name, destination_name)
+        return FlowResult(
+            True,
+            f"我目前無法完整解析「{origin_name}」到「{destination_name}」的座標，先提供 Google 地圖路線給你們查看：{maps_url}",
+            data={
+                "point_to_point_route_card": {
+                    "origin": {"name": origin_name, "address": ""},
+                    "destination": {"name": destination_name, "address": ""},
+                    "estimates": [],
+                    "maps_url": maps_url,
+                }
+            },
+        )
+
+    estimates = estimate_route_durations(
+        origin_latitude=origin.latitude,
+        origin_longitude=origin.longitude,
+        destination_latitude=destination.latitude,
+        destination_longitude=destination.longitude,
+        travel_modes=["DRIVE", "WALK", "TRANSIT"],
+    )
+    estimate_payload = [
+        {
+            "duration_minutes": estimate.duration_minutes,
+            "distance_meters": estimate.distance_meters,
+            "travel_mode": estimate.travel_mode,
+            "routing_preference": estimate.routing_preference,
+            "source": estimate.source,
+        }
+        for estimate in estimates
+    ]
+    maps_url = _point_to_point_maps_url(origin.name, destination.name)
+    text_parts = [f"我用 Google Routes API 估算「{origin.name}」到「{destination.name}」的交通時間："]
+    label_map = {"DRIVE": "開車", "WALK": "步行", "TRANSIT": "大眾運輸"}
+    for item in estimate_payload:
+        label = label_map.get(str(item.get("travel_mode") or ""), str(item.get("travel_mode") or "交通"))
+        text_parts.append(f"{label}約 {item['duration_minutes']} 分鐘")
+    if not estimate_payload:
+        text_parts.append("目前沒有拿到可用交通時間，可以先開 Google 地圖查看即時路線。")
+    text_parts.append(f"Google 地圖：{maps_url}")
+    return FlowResult(
+        True,
+        "\n".join(text_parts),
+        data={
+            "point_to_point_route_card": {
+                "origin": {"name": origin.name, "address": origin.address},
+                "destination": {"name": destination.name, "address": destination.address},
+                "estimates": estimate_payload,
+                "maps_url": maps_url,
+            }
+        },
+    )
 
 
 def _infer_text_location_from_user_text(user_text: str) -> str:
@@ -5976,6 +6211,16 @@ def handle_message(event: MessageEvent) -> None:
             return
     except Exception as exc:
         _log_failure("Automatic poll proposal flow", exc)
+
+    try:
+        point_to_point_result = _build_point_to_point_route_result(user_text, result)
+        if point_to_point_result is not None and point_to_point_result.handled:
+            _reply_feature_result(event, point_to_point_result)
+            _mark_reply_sent(conversation_key, "point_to_point_route", point_to_point_result.text)
+            _debug_print("Point-to-point route flow handled after AI decision")
+            return
+    except Exception as exc:
+        _log_failure("Point-to-point route flow", exc)
 
     try:
         if should_optimize_route(result, user_text=user_text):
