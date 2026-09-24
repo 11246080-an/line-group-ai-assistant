@@ -4777,21 +4777,7 @@ def _is_valid_poll_option_label(label: str) -> bool:
         word in compact for word in ("老街", "夜市", "展覽", "活動")
     ):
         return False
-    return any(word in compact for word in _POLL_OPTION_ACTIVITY_WORDS) or any(
-        place_hint in compact
-        for place_hint in (
-            "華山",
-            "中山",
-            "松菸",
-            "大稻埕",
-            "清水地熱",
-            "礁溪溫泉",
-            "老街",
-            "公園",
-            "溫泉",
-            "地熱",
-        )
-    )
+    return True
 
 
 def _poll_option_appears_in_recent_text(label: str, compact_recent_text: str) -> bool:
@@ -4807,21 +4793,41 @@ def _poll_option_appears_in_recent_text(label: str, compact_recent_text: str) ->
 
 
 def _extract_poll_options_from_recent_messages(recent_messages: list[str]) -> list[str]:
-    """Recover poll options when the LLM drops extracted_info.options on stuck turns."""
+    """Use the small LLM to recover poll options from recent dialogue."""
+    recent_text = _recent_message_body_text(recent_messages[-6:]).strip()
+    if not recent_text:
+        return []
+    result = _call_small_json_model(
+        model=OPENAI_TOPIC_JUDGE_MODEL,
+        purpose="Poll option extraction",
+        system_prompt=(
+            "你是群組旅遊對話的投票選項抽取器。"
+            "請只從最近對話中抽出使用者真正提出的候選地點、景點、活動或餐飲選項。"
+            "不要抽出形容詞、偏好理由、條件或狀態，例如「適合拍照的」「交通比較近」「每個都有興趣」。"
+            "請把選項整理成短名稱，例如「華山最近的展覽」可整理成「華山展覽」，"
+            "「松菸有活動」可整理成「松菸活動」。"
+            "只輸出 JSON，格式必須是 {\"options\": [\"...\"]}，選項 2 到 6 個。"
+        ),
+        user_prompt=(
+            f"最近對話：\n{recent_text}\n\n"
+            "請抽出適合建立匿名投票的候選選項。"
+        ),
+    )
+    if not isinstance(result, dict):
+        return []
+    raw_options = result.get("options") or []
+    if not isinstance(raw_options, list):
+        return []
     candidates: list[str] = []
-    for body in _recent_message_body_text(recent_messages[-6:]).splitlines():
-        if any(keyword in body for keyword in _POLL_STUCK_KEYWORDS):
+    recent_compact = "".join(recent_text.split())
+    for value in raw_options:
+        label = _clean_poll_option_phrase(str(value))
+        if not _is_valid_poll_option_label(label):
             continue
-        pieces = re.split(r"[，,。；;！!？?、]|\b或\b|不然|還是", body)
-        for piece in pieces:
-            piece = piece.strip()
-            if not piece:
-                continue
-            if not any(word in piece for word in _POLL_OPTION_ACTIVITY_WORDS):
-                continue
-            label = _clean_poll_option_phrase(piece)
-            if _is_valid_poll_option_label(label) and label not in candidates:
-                candidates.append(label)
+        if not _poll_option_appears_in_recent_text(label, recent_compact):
+            continue
+        if label not in candidates:
+            candidates.append(label)
     return candidates[:6]
 
 
@@ -5094,8 +5100,10 @@ def _try_propose_automatic_poll(
         _clean_auto_poll_options(result),
         recent_messages,
     )
-    if len(candidate_options) < 2:
-        candidate_options = _extract_poll_options_from_recent_messages(recent_messages)
+    recovered_options = _extract_poll_options_from_recent_messages(recent_messages)
+    for option in recovered_options:
+        if option not in candidate_options and len(candidate_options) < 6:
+            candidate_options.append(option)
     is_vote_scenario = scenario_code == "劇本九" or scenario_name == "投票決策"
     if not is_vote_scenario and not _is_semantic_poll_decision(
         result,
