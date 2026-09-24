@@ -4804,6 +4804,12 @@ def _poll_option_appears_in_recent_text(label: str, compact_recent_text: str) ->
     if compact_label.endswith("活動"):
         stem = compact_label.removesuffix("活動")
         return bool(stem and stem in compact_recent_text and "活動" in compact_recent_text)
+    if compact_label.endswith("拍照"):
+        stem = compact_label.removesuffix("拍照")
+        return bool(stem and stem in compact_recent_text and "拍照" in compact_recent_text)
+    if compact_label.endswith("逛街"):
+        stem = compact_label.removesuffix("逛街")
+        return bool(stem and stem in compact_recent_text and "逛街" in compact_recent_text)
     return False
 
 
@@ -4844,6 +4850,58 @@ def _extract_poll_options_from_recent_messages(recent_messages: list[str]) -> li
         if label not in candidates:
             candidates.append(label)
     return candidates[:6]
+
+
+def _build_poll_payload_with_llm(
+    recent_messages: list[str],
+    result: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Ask the small LLM to produce the final poll question and options."""
+    recent_text = _recent_message_body_text(recent_messages[-6:]).strip()
+    if not recent_text:
+        return None
+    extracted = result.get("extracted_info")
+    main_options: list[str] = []
+    if isinstance(extracted, dict):
+        raw_options = extracted.get("options") or []
+        if isinstance(raw_options, list):
+            main_options = [str(item).strip() for item in raw_options if str(item).strip()]
+
+    payload = _call_small_json_model(
+        model=OPENAI_TOPIC_JUDGE_MODEL,
+        purpose="Poll payload builder",
+        system_prompt=(
+            "你是 LINE 群組旅遊助理的投票整理器。"
+            "請根據最近對話，產生最適合顯示在匿名投票卡片上的問題與選項。"
+            "問題必須貼合對話情境與時間，例如對話說「明天早上上完課，下午都沒課」時，"
+            "問題應是「明天下午最想去哪裡？」而不是「明天早上」。"
+            "選項必須是使用者真正提出的候選地點、景點、活動或餐飲項目。"
+            "不要把形容詞、理由、條件或狀態當選項，例如「適合拍照的」「交通比較近」「每個都有興趣」。"
+            "請整理成短名稱，例如「華山最近的展覽」整理成「華山展覽」，"
+            "「大稻埕好像也不錯，滿適合拍照的」整理成「大稻埕」。"
+            "只輸出 JSON，格式：{\"question\":\"...\",\"options\":[\"...\"]}。"
+            "options 必須 2 到 6 個，不要輸出解釋。"
+        ),
+        user_prompt=(
+            f"最近對話：\n{recent_text}\n\n"
+            f"主判斷模型目前抽到的選項：{json.dumps(main_options, ensure_ascii=False)}\n\n"
+            "請輸出最終投票問題與選項。"
+        ),
+    )
+    if not isinstance(payload, dict):
+        return None
+    question = redact_sensitive_identifiers(str(payload.get("question") or "").strip())[:120]
+    raw_options = payload.get("options") or []
+    if not isinstance(raw_options, list):
+        return None
+    options: list[str] = []
+    for value in raw_options:
+        label = _clean_poll_option_phrase(str(value))
+        if _is_valid_poll_option_label(label) and label not in options:
+            options.append(label)
+    if not question or not 2 <= len(options) <= 6:
+        return None
+    return {"question": question, "options": options}
 
 
 def _is_llm_analysis_result(result: dict[str, Any]) -> bool:
@@ -5042,6 +5100,14 @@ def _should_suppress_completed_decision_intervention(
 
 def _extract_vote_time_phrase(recent_messages: list[str], result: dict[str, Any]) -> str:
     recent_text = _recent_message_body_text((recent_messages or [])[-6:])
+    compact_text = "".join(str(recent_text or "").split())
+    if "明天" in compact_text and "下午" in compact_text:
+        return "明天下午"
+    if "今天" in compact_text and "下午" in compact_text:
+        return "今天下午"
+    if "週末" in compact_text and "下午" in compact_text:
+        return "週末下午"
+
     extracted = result.get("extracted_info")
     if isinstance(extracted, dict):
         times = extracted.get("time") or []
@@ -5052,7 +5118,6 @@ def _extract_vote_time_phrase(recent_messages: list[str], result: dict[str, Any]
             if text:
                 return text[:20]
 
-    compact_text = "".join(str(recent_text or "").split())
     patterns = (
         "明天下午",
         "明天上午",
@@ -5155,6 +5220,7 @@ def _try_propose_automatic_poll(
         app.logger.info("Suppressed automatic poll while members are still exchanging information")
         _debug_print("成員仍在交換交通、票價、餐廳或優缺點資訊，暫不建立投票。")
         return False
+    poll_payload = _build_poll_payload_with_llm(recent_messages, result)
     candidate_options = _filter_poll_options_to_recent_messages(
         _clean_auto_poll_options(result),
         recent_messages,
@@ -5163,6 +5229,14 @@ def _try_propose_automatic_poll(
     for option in recovered_options:
         if option not in candidate_options and len(candidate_options) < 6:
             candidate_options.append(option)
+    if isinstance(poll_payload, dict):
+        payload_options = [
+            str(option).strip()
+            for option in poll_payload.get("options") or []
+            if str(option).strip()
+        ]
+        if 2 <= len(payload_options) <= 6:
+            candidate_options = payload_options
     is_vote_scenario = scenario_code == "劇本九" or scenario_name == "投票決策"
     if not is_vote_scenario and not _is_semantic_poll_decision(
         result,
@@ -5180,12 +5254,16 @@ def _try_propose_automatic_poll(
     if len(candidate_options) < 2 or len(participants) < 2:
         if not (has_stuck_signal and len(candidate_options) >= 2 and participants):
             return False
-    question = _build_pending_vote_question(
-        result,
-        str(result.get("suggested_reply") or ""),
-        candidate_options=candidate_options,
-        recent_messages=recent_messages,
-    )
+    question = ""
+    if isinstance(poll_payload, dict):
+        question = str(poll_payload.get("question") or "").strip()
+    if not question:
+        question = _build_pending_vote_question(
+            result,
+            str(result.get("suggested_reply") or ""),
+            candidate_options=candidate_options,
+            recent_messages=recent_messages,
+        )
     fingerprint_source = json.dumps(
         {"question": question, "options": candidate_options},
         ensure_ascii=False,
