@@ -7018,6 +7018,7 @@ def handle_message(event: MessageEvent) -> None:
                 line_user_id=line_user_id,
                 itinerary_draft=itinerary_draft,
                 reply_text=suggested_reply,
+                context_text=_recent_message_body_text(_recent_messages[-10:]),
             )
             if draft_result.handled:
                 _reply_feature_result(event, draft_result)
