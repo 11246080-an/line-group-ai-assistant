@@ -5279,6 +5279,36 @@ def _has_enough_itinerary_requirements(recent_messages: list[str], result: dict[
     return all(flags.values())
 
 
+def _has_enough_itinerary_requirements_from_text(recent_messages: list[str]) -> bool:
+    recent_text = _recent_message_body_text(recent_messages[-10:])
+    compact = "".join(recent_text.split())
+    if not compact:
+        return False
+    ordered_route_signal = (
+        ("先去" in compact or "先到" in compact)
+        and ("再去" in compact or "再到" in compact)
+        and ("接著" in compact or "最後" in compact)
+    )
+    explicit_location_hits = sum(
+        1
+        for keyword in ("北車", "台北車站", "三民書局", "華山", "大稻埕", "松菸", "松山文創")
+        if keyword in compact
+    )
+    flags = {
+        "locations": ordered_route_signal or explicit_location_hits >= 3,
+        "start_time": any(keyword in compact for keyword in ("中午", "12點", "十二點", "下課")),
+        "end_time": any(keyword in compact for keyword in ("7點前", "七點前", "晚上7點", "晚上七點")),
+        "budget": any(keyword in compact for keyword in ("預算", "1000", "一千", "300元", "三百", "沒錢")),
+        "transport": any(keyword in compact for keyword in ("捷運", "走路", "步行", "公車", "交通")),
+        "meal": (
+            any(keyword in compact for keyword in ("午餐", "餐廳", "吃飯"))
+            and any(keyword in compact for keyword in ("300元", "三百", "素食", "排太久", "排隊", "附近"))
+            and any(keyword in compact for keyword in ("素食", "排太久", "排隊"))
+        ),
+    }
+    return all(flags.values())
+
+
 def _build_itinerary_replan_prompt(recent_messages: list[str], result: dict[str, Any]) -> str:
     base = (
         "已整理大家的行程需求。目前的景點順序可能產生折返，"
@@ -7043,6 +7073,20 @@ def handle_message(event: MessageEvent) -> None:
                 "imported_itinerary_context",
                 direct_reply,
             )
+            return
+
+        if (
+            not _has_direct_itinerary_planning_request(user_text)
+            and not _looks_like_itinerary_acceptance_or_comment(user_text)
+            and not _is_direct_weather_question(user_text)
+            and _has_enough_itinerary_requirements_from_text(_recent_messages)
+        ):
+            if _recently_asked_itinerary_replan(conversation_key):
+                _debug_print("Itinerary replan prompt was recently sent before AI; keep quiet.")
+                return
+            prompt = _build_itinerary_replan_prompt(_recent_messages, {})
+            _reply_text_and_mark(event, conversation_key, "itinerary_replan_prompt", prompt)
+            _debug_print("Itinerary requirements complete before AI; sent replan prompt.")
             return
 
         processing_hint_sent = False
