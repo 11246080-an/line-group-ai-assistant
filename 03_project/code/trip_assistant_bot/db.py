@@ -1379,6 +1379,26 @@ def claim_due_vote_sessions(*, now: datetime, limit: int = 50) -> list[dict]:
     return claimed
 
 
+def close_active_vote_session(*, line_group_id: str, now: datetime) -> dict | None:
+    """
+    手動結束群組目前 active 投票，回傳關閉後的投票文件。
+
+    vote_flow.py 會在使用者輸入「結束投票」時呼叫這個介面；若缺少此函式，
+    fallback 只能顯示結果，無法真正把 DB 狀態改成 closed。
+    """
+    return get_db().vote_sessions.find_one_and_update(
+        {"line_group_id": line_group_id, "status": "active"},
+        {
+            "$set": {
+                "status": "closed",
+                "closed_at": now,
+                "closed_reason": "manual",
+            }
+        },
+        return_document=ReturnDocument.AFTER,
+    )
+
+
 def mark_vote_result_announced(*, poll_id: Any, announced_at: datetime) -> None:
     get_db().vote_sessions.update_one(
         {"_id": _as_object_id(poll_id)},
