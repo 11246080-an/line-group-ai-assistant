@@ -105,7 +105,7 @@ from location_flow import (
 )
 from weather_flow import COUNTY_ALIASES, run_weather_recommendation
 from google_routes import estimate_route_durations
-from route_optimization import build_optimized_route_reply, geocode_place, should_optimize_route
+from route_optimization import build_optimized_route_result, geocode_place, should_optimize_route
 from expense_flow import (
     ActionSpec,
     FlowResult,
@@ -5098,6 +5098,74 @@ def _should_suppress_completed_decision_intervention(
     return ai_thinks_done or _has_recent_completed_decision_signal(recent_messages)
 
 
+def _has_direct_itinerary_planning_request(user_text: str) -> bool:
+    text = str(user_text or "").strip()
+    if not text:
+        return False
+    return bool(
+        re.search(
+            r"(幫我|幫我們|麻煩|請).{0,10}(重新排|重排|排一下|排一版|排行程|整理完整行程|安排完整行程)",
+            text,
+        )
+        or re.search(r"(重新排|重排|排一版|排行程|整理完整行程|安排完整行程)", text)
+    )
+
+
+def _planning_requirement_flags(recent_messages: list[str], result: dict[str, Any]) -> dict[str, bool]:
+    recent_text = _recent_message_body_text(recent_messages[-8:])
+    compact = "".join(recent_text.split())
+    extracted = result.get("extracted_info") if isinstance(result, dict) else {}
+    if not isinstance(extracted, dict):
+        extracted = {}
+    locations = extracted.get("location") or extracted.get("options") or []
+    if not isinstance(locations, list):
+        locations = [locations]
+    location_count = len({str(item).strip() for item in locations if str(item).strip()})
+    return {
+        "locations": location_count >= 3,
+        "start_time": any(keyword in compact for keyword in ("中午", "12點", "十二點", "下課")),
+        "end_time": any(keyword in compact for keyword in ("7點前", "七點前", "晚上7點", "晚上七點", "結束")),
+        "budget": any(keyword in compact for keyword in ("預算", "1000", "一千", "300元", "三百", "沒錢")),
+        "transport": any(keyword in compact for keyword in ("捷運", "走路", "步行", "公車", "交通")),
+        "meal": any(keyword in compact for keyword in ("午餐", "餐廳", "吃飯", "素食", "排隊")),
+    }
+
+
+def _has_enough_itinerary_requirements(recent_messages: list[str], result: dict[str, Any]) -> bool:
+    flags = _planning_requirement_flags(recent_messages, result)
+    return all(flags.values())
+
+
+def _should_defer_planning_intervention(
+    user_text: str,
+    recent_messages: list[str],
+    result: dict[str, Any],
+) -> bool:
+    if _has_direct_itinerary_planning_request(user_text):
+        return False
+    scenario_code = str(result.get("scenario_code") or "").strip()
+    scenario_name = str(result.get("scenario_name") or "").strip()
+    is_planning = scenario_code in {"劇本四", "劇本五"} or scenario_name in {
+        "自動行程生成",
+        "路線最佳化",
+    }
+    if not is_planning:
+        return False
+    return not _has_enough_itinerary_requirements(recent_messages, result)
+
+
+def _should_stage_itinerary_draft(
+    user_text: str,
+    recent_messages: list[str],
+    result: dict[str, Any],
+) -> bool:
+    if _has_direct_itinerary_planning_request(user_text):
+        return True
+    # When requirements just became complete, first ask for confirmation instead
+    # of immediately staging a full itinerary card.
+    return False
+
+
 def _extract_vote_time_phrase(recent_messages: list[str], result: dict[str, Any]) -> str:
     recent_text = _recent_message_body_text((recent_messages or [])[-6:])
     compact_text = "".join(str(recent_text or "").split())
@@ -6778,11 +6846,26 @@ def handle_message(event: MessageEvent) -> None:
         return
 
     itinerary_draft = result.get("itinerary_draft")
+    if should_intervene and _should_defer_planning_intervention(user_text, _recent_messages, result):
+        _debug_print("Planning requirements are still incomplete; keep observing.")
+        return
+
     if (
         should_intervene
         and confidence_score >= MIN_INTERVENTION_CONFIDENCE
         and isinstance(itinerary_draft, dict)
     ):
+        if not _should_stage_itinerary_draft(user_text, _recent_messages, result):
+            if _has_enough_itinerary_requirements(_recent_messages, result):
+                prompt = (
+                    "已整理大家的行程需求。目前的景點順序可能產生折返，"
+                    "需要我根據地點位置、時間、預算、交通方式和午餐需求，"
+                    "重新安排完整行程嗎？"
+                )
+                _reply_text_and_mark(event, conversation_key, "itinerary_replan_prompt", prompt)
+                return
+            _debug_print("Itinerary draft appeared before explicit planning request; keep observing.")
+            return
         try:
             draft_result = stage_generated_itinerary(
                 line_group_id=line_group_id,
@@ -6827,7 +6910,7 @@ def handle_message(event: MessageEvent) -> None:
 
     try:
         if should_optimize_route(result, user_text=user_text):
-            route_result = build_optimized_route_reply(result, user_text=user_text)
+            route_result = build_optimized_route_result(result, user_text=user_text)
             route_reply = str((route_result or {}).get("reply_text") or "").strip()
             if route_result and route_reply:
                 _reply_feature_result(
