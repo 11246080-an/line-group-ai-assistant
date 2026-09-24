@@ -5239,7 +5239,11 @@ def _planning_requirement_flags(recent_messages: list[str], result: dict[str, An
         "end_time": any(keyword in compact for keyword in ("7點前", "七點前", "晚上7點", "晚上七點", "結束")),
         "budget": any(keyword in compact for keyword in ("預算", "1000", "一千", "300元", "三百", "沒錢")),
         "transport": any(keyword in compact for keyword in ("捷運", "走路", "步行", "公車", "交通")),
-        "meal": any(keyword in compact for keyword in ("午餐", "餐廳", "吃飯", "素食", "排隊")),
+        "meal": (
+            any(keyword in compact for keyword in ("午餐", "餐廳", "吃飯"))
+            and any(keyword in compact for keyword in ("300元", "三百", "素食", "排太久", "排隊", "沿路", "附近"))
+            and any(keyword in compact for keyword in ("素食", "排太久", "排隊"))
+        ),
     }
 
 
@@ -5260,6 +5264,12 @@ def _build_itinerary_replan_prompt(recent_messages: list[str], result: dict[str,
             "已整理大家的行程需求。目前的景點順序可能產生折返，"
             "需要我根據景點位置、時間、預算、交通方式、午餐需求，"
             "以及已提供的電影時間，重新安排完整行程嗎？"
+        )
+    if any(keyword in recent_text for keyword in ("活動", "展覽")):
+        return (
+            "已整理大家的行程需求。目前的景點順序可能產生折返，"
+            "需要我根據活動資訊、地點位置、時間、預算、交通方式和午餐需求，"
+            "重新安排完整行程嗎？"
         )
     return base
 

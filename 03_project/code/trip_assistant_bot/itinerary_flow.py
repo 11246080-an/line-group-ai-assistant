@@ -325,7 +325,11 @@ def _candidate_to_itinerary_spot(candidate: dict[str, Any], *, sequence: int) ->
 
 
 def _constrain_itinerary_to_tourism_attractions(itinerary: dict[str, Any]) -> dict[str, Any]:
-    """Keep generated itinerary spots backed by Tourism Administration open data."""
+    """Enrich generated itinerary spots with Tourism Administration data when possible.
+
+    The original LLM draft may contain user-selected places.  Keep those places
+    instead of replacing unmatched items with unrelated open-data attractions.
+    """
     candidates = _fetch_tourism_attraction_candidates(region=str(itinerary.get("region") or ""))
     if not candidates:
         return itinerary
@@ -344,7 +348,47 @@ def _constrain_itinerary_to_tourism_attractions(itinerary: dict[str, Any]) -> di
     selected: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
     raw_spots = [spot for spot in itinerary.get("spots") or [] if isinstance(spot, dict)]
-    target_count = min(max(len(raw_spots), 3), 5)
+    if raw_spots:
+        matched_count = 0
+        for index, spot in enumerate(raw_spots, start=1):
+            name_key = re.sub(r"\s+", "", str(spot.get("name") or "").casefold())
+            candidate = by_name.get(name_key)
+            if candidate is None:
+                for option in ranked_candidates:
+                    option_key = _candidate_name_key(option)
+                    if name_key and (name_key in option_key or option_key in name_key):
+                        candidate = option
+                        break
+            if candidate is None:
+                preserved = {**spot, "sequence": index}
+                preserved.setdefault("recommendation_source", "ai_generated")
+                selected.append(preserved)
+                continue
+            attraction_id = str(candidate.get("attraction_id") or "").strip()
+            if attraction_id and attraction_id in seen_ids:
+                preserved = {**spot, "sequence": index}
+                preserved.setdefault("recommendation_source", "ai_generated")
+                selected.append(preserved)
+                continue
+            if attraction_id:
+                seen_ids.add(attraction_id)
+            enriched = _candidate_to_itinerary_spot(candidate, sequence=index)
+            if str(spot.get("description") or "").strip():
+                enriched["description"] = str(spot.get("description") or "").strip()
+            selected.append(enriched)
+            matched_count += 1
+
+        notice = {
+            "label": "部分景點資訊已參考觀光署資料庫",
+            "provider": "tourism_open_data_partial",
+            "matched_count": matched_count,
+            "total_spots": len(selected),
+            "candidate_count": len(candidates),
+            "selection_policy": "preserve_generated_spots",
+        }
+        return {**itinerary, "spots": selected, "recommendation_source_notice": notice}
+
+    target_count = 3
 
     for spot in raw_spots:
         name_key = re.sub(r"\s+", "", str(spot.get("name") or "").casefold())
