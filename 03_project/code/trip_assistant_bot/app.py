@@ -5274,6 +5274,111 @@ def _build_itinerary_replan_prompt(recent_messages: list[str], result: dict[str,
     return base
 
 
+def _build_fallback_itinerary_draft_from_context(
+    recent_messages: list[str],
+    result: dict[str, Any],
+) -> dict[str, Any] | None:
+    recent_text = _recent_message_body_text(recent_messages[-10:])
+    compact = "".join(recent_text.split())
+    extracted = result.get("extracted_info") if isinstance(result, dict) else {}
+    if not isinstance(extracted, dict):
+        extracted = {}
+    location_values = extracted.get("location") or []
+    if not isinstance(location_values, list):
+        location_values = [location_values]
+    location_text = " ".join(str(item or "") for item in location_values)
+    source_text = f"{recent_text}\n{location_text}"
+
+    spots: list[dict[str, Any]] = []
+
+    def add_spot(name: str, description: str, address: str = "", lat: float | None = None, lng: float | None = None) -> None:
+        if any(str(spot.get("name") or "") == name for spot in spots):
+            return
+        spots.append(
+            {
+                "sequence": len(spots) + 1,
+                "name": name,
+                "description": description,
+                "address": address,
+                "latitude": lat,
+                "longitude": lng,
+            }
+        )
+
+    if "午餐" in source_text or "餐廳" in source_text or "素食" in source_text:
+        meal_name = "北商附近餐廳" if "北商" in source_text else "沿路午餐餐廳"
+        meal_desc = "午餐選擇300元以下"
+        if "素食" in source_text:
+            meal_desc += "、有素食選項"
+        if "排太久" in source_text or "不用排" in source_text:
+            meal_desc += "、不用排太久"
+        meal_desc += "的餐廳。"
+        add_spot(meal_name, meal_desc)
+
+    if any(keyword in source_text for keyword in ("三民書局", "買書", "課本", "北車")):
+        add_spot(
+            "台北車站／北車三民書局買書",
+            "購買老師指定課本，完成後再接續文創與老街行程。",
+            "台北車站周邊",
+            25.0478,
+            121.5170,
+        )
+
+    if "華山" in source_text:
+        add_spot(
+            "華山1914文化創意產業園區",
+            "逛展覽與文創市集，適合中午後輕鬆停留。",
+            "台北市中正區八德路一段1號",
+            25.0422,
+            121.5328,
+        )
+
+    if "大稻埕" in source_text:
+        add_spot(
+            "大稻埕",
+            "感受老街風情與特色小店。",
+            "台北市大同區迪化街",
+            25.0543,
+            121.5135,
+        )
+
+    if "松菸" in source_text or "松山文創" in source_text:
+        add_spot(
+            "松山文創園區",
+            "最後安排展覽或活動，方便晚上7點前結束行程。",
+            "台北市信義區光復南路133號",
+            25.0458,
+            121.5674,
+        )
+
+    if len(spots) < 2:
+        return None
+
+    transport = [
+        {
+            "from_sequence": index,
+            "to_sequence": index + 1,
+            "mode": "捷運／步行",
+            "estimated_minutes": None,
+            "note": "依實際路線以捷運與步行銜接",
+        }
+        for index in range(1, len(spots))
+    ]
+    budget = 1000 if any(keyword in compact for keyword in ("1000", "一千")) else None
+    return {
+        "title": "台北中午出發半日文創與老街輕旅行",
+        "region": "台北市",
+        "summary": "中午出發，依序安排午餐、買書、文創展覽與老街散步，交通以捷運和步行為主。",
+        "duration": "半日遊",
+        "estimated_budget": budget,
+        "currency": "TWD",
+        "type": "文化",
+        "best_for": "適合想控制預算、用捷運與步行完成文創展覽和老街行程的朋友。",
+        "spots": spots,
+        "transport": transport,
+    }
+
+
 def _should_defer_planning_intervention(
     user_text: str,
     recent_messages: list[str],
@@ -6996,6 +7101,22 @@ def handle_message(event: MessageEvent) -> None:
         return
 
     itinerary_draft = result.get("itinerary_draft")
+    if (
+        not isinstance(itinerary_draft, dict)
+        and _has_direct_itinerary_planning_request(user_text)
+        and _has_enough_itinerary_requirements(_recent_messages, result)
+    ):
+        fallback_draft = _build_fallback_itinerary_draft_from_context(_recent_messages, result)
+        if fallback_draft:
+            itinerary_draft = fallback_draft
+            should_intervene = True
+            confidence_score = max(confidence_score, MIN_INTERVENTION_CONFIDENCE)
+            suggested_reply = (
+                "我先依照大家已提出的時間、預算、交通、午餐和地點需求，"
+                "整理一版半日行程草稿。"
+            )
+            _debug_print("LLM did not return itinerary_draft; generated fallback itinerary draft.")
+
     if should_intervene and _should_defer_planning_intervention(user_text, _recent_messages, result):
         _debug_print("Planning requirements are still incomplete; keep observing.")
         return
