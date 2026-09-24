@@ -4654,8 +4654,8 @@ def _clean_auto_poll_options(result: dict[str, Any]) -> list[str]:
         return []
     options: list[str] = []
     for value in extracted.get("options") or []:
-        label = redact_sensitive_identifiers(str(value).strip())[:80]
-        if label and label not in options:
+        label = _clean_poll_option_phrase(str(value))
+        if _is_valid_poll_option_label(label) and label not in options:
             options.append(label)
     return options[:6]
 
@@ -4680,9 +4680,12 @@ def _filter_poll_options_to_recent_messages(
     compact_recent_text = "".join(recent_text.split())
     filtered: list[str] = []
     for option in options:
-        label = redact_sensitive_identifiers(str(option).strip())[:80]
-        compact_label = "".join(label.split())
-        if compact_label and compact_label in compact_recent_text and label not in filtered:
+        label = _clean_poll_option_phrase(str(option))
+        if (
+            _is_valid_poll_option_label(label)
+            and _poll_option_appears_in_recent_text(label, compact_recent_text)
+            and label not in filtered
+        ):
             filtered.append(label)
     return filtered[:6]
 
@@ -4723,6 +4726,18 @@ _POLL_OPTION_ACTIVITY_WORDS = (
     "景點",
 )
 
+_POLL_OPTION_BAD_PHRASES = (
+    "適合拍照",
+    "適合拍照的",
+    "滿適合拍照",
+    "蠻適合拍照",
+    "拍照的",
+    "都很有趣",
+    "每個都有興趣",
+    "有點選擇障礙",
+    "選擇障礙",
+)
+
 _POLL_OPTION_FILLER_PATTERN = re.compile(
     r"^(我|我們|大家|最近|一直|很想|想|可以|也|不然|或|還是|有看到|看到|"
     r"聽說|覺得|好像|滿|蠻|很|都|比較|一起|去|看)+"
@@ -4741,10 +4756,54 @@ def _clean_poll_option_phrase(value: str) -> str:
     label = _POLL_OPTION_FILLER_PATTERN.sub("", label).strip()
     label = re.sub(r"^(去|看|吃|喝)+", "", label).strip()
     label = re.split(r"(好像|感覺|應該|可以|適合|附近|那邊|那裡)", label, maxsplit=1)[0].strip() or label
-    label = re.sub(r"(最近|附近|那邊|那裡)$", "", label).strip()
+    label = re.sub(r"(最近的|最近)", "", label).strip()
+    label = re.sub(r"(附近|那邊|那裡)$", "", label).strip()
+    label = re.sub(r"有(展覽|展|活動|市集|夜市)$", r"\1", label).strip()
     label = re.sub(r"的(展|活動|市集|夜市)$", r"\1", label).strip()
     label = re.sub(r"(也不錯|不錯|可以|好了|耶|欸|啦)$", "", label).strip()
     return label[:80]
+
+
+def _is_valid_poll_option_label(label: str) -> bool:
+    normalized = str(label or "").strip()
+    if not 2 <= len(normalized) <= 24:
+        return False
+    compact = "".join(normalized.split())
+    if any(bad_phrase == compact or bad_phrase in compact for bad_phrase in _POLL_OPTION_BAD_PHRASES):
+        return False
+    if compact.startswith(("適合", "滿適合", "蠻適合", "比較適合")):
+        return False
+    if compact.endswith(("的", "而已")) and not any(
+        word in compact for word in ("老街", "夜市", "展覽", "活動")
+    ):
+        return False
+    return any(word in compact for word in _POLL_OPTION_ACTIVITY_WORDS) or any(
+        place_hint in compact
+        for place_hint in (
+            "華山",
+            "中山",
+            "松菸",
+            "大稻埕",
+            "清水地熱",
+            "礁溪溫泉",
+            "老街",
+            "公園",
+            "溫泉",
+            "地熱",
+        )
+    )
+
+
+def _poll_option_appears_in_recent_text(label: str, compact_recent_text: str) -> bool:
+    compact_label = "".join(str(label or "").split())
+    if compact_label and compact_label in compact_recent_text:
+        return True
+    if compact_label.endswith("展覽"):
+        return compact_label.replace("展覽", "展") in compact_recent_text
+    if compact_label.endswith("活動"):
+        stem = compact_label.removesuffix("活動")
+        return bool(stem and stem in compact_recent_text and "活動" in compact_recent_text)
+    return False
 
 
 def _extract_poll_options_from_recent_messages(recent_messages: list[str]) -> list[str]:
@@ -4761,7 +4820,7 @@ def _extract_poll_options_from_recent_messages(recent_messages: list[str]) -> li
             if not any(word in piece for word in _POLL_OPTION_ACTIVITY_WORDS):
                 continue
             label = _clean_poll_option_phrase(piece)
-            if 2 <= len(label) <= 20 and label not in candidates:
+            if _is_valid_poll_option_label(label) and label not in candidates:
                 candidates.append(label)
     return candidates[:6]
 
