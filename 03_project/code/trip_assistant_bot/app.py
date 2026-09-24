@@ -142,6 +142,7 @@ from itinerary_flow import (
 from scheduled_tasks import run_due_tasks
 from trip_schedule_flow import handle_schedule_postback, handle_schedule_text
 from vote_flow import (
+    create_anonymous_poll,
     create_vote_proposal,
     handle_vote_postback,
     handle_vote_text,
@@ -659,7 +660,7 @@ class ConversationState:
 
 conversation_states: dict[str, ConversationState] = {}
 conversation_lock = threading.Lock()
-SHOOTING_SCRIPT_MODE = os.getenv("SHOOTING_SCRIPT_MODE", "1").strip().lower() not in {
+SHOOTING_SCRIPT_MODE = os.getenv("SHOOTING_SCRIPT_MODE", "0").strip().lower() not in {
     "0",
     "false",
     "off",
@@ -828,6 +829,23 @@ def _handle_shooting_script_text(
     conversation_key: str,
 ) -> bool:
     compact = _compact_script_text(user_text)
+    if "建立匿名投票" in compact or compact in {"建立投票", "匿名投票"}:
+        result = create_anonymous_poll(
+            line_group_id=line_group_id,
+            question="這次景點要選哪一個？",
+            options=["華山展覽", "大稻埕", "松菸活動"],
+            eligible_line_user_ids=[line_user_id] if line_user_id else [],
+            auto_created=True,
+            urgent=True,
+            created_by_line_user_id=line_user_id,
+            discussion_fingerprint="shooting-script-scenic-vote",
+        )
+        _note_user_message(conversation_key, user_text)
+        _reply_feature_result(event, result)
+        _mark_reply_sent(conversation_key, "shooting_script_poll", result.text)
+        _debug_print("Shooting script anonymous poll handled before normal flow.")
+        return True
+
     if "好" in compact and "幫我們重新排一下" in compact:
         result = stage_generated_itinerary(
             line_group_id=line_group_id,
@@ -7096,13 +7114,14 @@ def handle_message(event: MessageEvent) -> None:
         return
 
     if user_text.lower() == "#reset":
+        SHOOTING_SCRIPT_MODE = False
         _reset_conversation_state(conversation_key)
         try:
             _reply_text_and_mark(
                 event,
                 conversation_key,
                 "manual_reset",
-                "已清空這個群組目前的對話狀態，可以重新開始測試。",
+                "已清空這個群組目前的對話狀態，並關閉拍攝模式，可以重新開始測試。",
             )
         except Exception as exc:
             _log_failure("Reset reply", exc)
