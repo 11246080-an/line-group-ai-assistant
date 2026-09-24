@@ -5040,6 +5040,41 @@ def _should_suppress_completed_decision_intervention(
     return ai_thinks_done or _has_recent_completed_decision_signal(recent_messages)
 
 
+def _extract_vote_time_phrase(recent_messages: list[str], result: dict[str, Any]) -> str:
+    recent_text = _recent_message_body_text((recent_messages or [])[-6:])
+    extracted = result.get("extracted_info")
+    if isinstance(extracted, dict):
+        times = extracted.get("time") or []
+        if not isinstance(times, list):
+            times = [times]
+        for value in times:
+            text = str(value or "").strip()
+            if text:
+                return text[:20]
+
+    compact_text = "".join(str(recent_text or "").split())
+    patterns = (
+        "明天下午",
+        "明天上午",
+        "明天早上",
+        "明天晚上",
+        "今天下午",
+        "今天晚上",
+        "週末下午",
+        "週末晚上",
+        "這週末",
+        "週末",
+    )
+    for pattern in patterns:
+        if pattern in compact_text:
+            return pattern
+    if "明天" in compact_text and "下午" in compact_text:
+        return "明天下午"
+    if "明天" in compact_text:
+        return "明天"
+    return ""
+
+
 def _build_pending_vote_question(
     result: dict[str, Any],
     suggested_reply: str,
@@ -5056,6 +5091,7 @@ def _build_pending_vote_question(
         ]
     )
     option_text = " ".join(str(option) for option in candidate_options or [])
+    time_phrase = _extract_vote_time_phrase(recent_messages or [], result)
     travel_words = (
         "景點",
         "出遊",
@@ -5081,12 +5117,20 @@ def _build_pending_vote_question(
     )
     meal_words = ("晚餐", "午餐", "聚餐", "吃", "餐廳", "火鍋", "拉麵", "壽司", "咖啡")
     if any(word in option_text for word in travel_words):
+        if time_phrase:
+            return f"{time_phrase}最想去哪裡？"
         return "這次景點要選哪一個？"
     if any(word in option_text for word in meal_words):
+        if time_phrase:
+            return f"{time_phrase}想吃哪一個？"
         return "這次聚餐要選哪一個？"
     if any(word in combined_text for word in travel_words):
+        if time_phrase:
+            return f"{time_phrase}最想去哪裡？"
         return "這次行程要選哪一個？"
     if any(word in combined_text for word in ("晚餐", "午餐", "聚餐", "吃")):
+        if time_phrase:
+            return f"{time_phrase}想吃哪一個？"
         return "這次聚餐要選哪一個？"
     return "大家最後想選哪一個？"
 
