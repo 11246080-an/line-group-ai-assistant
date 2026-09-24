@@ -5301,6 +5301,15 @@ def _build_itinerary_replan_prompt(recent_messages: list[str], result: dict[str,
     return base
 
 
+def _recently_asked_itinerary_replan(conversation_key: str) -> bool:
+    with conversation_lock:
+        state = _get_or_create_state(conversation_key)
+        return (
+            state.last_scenario_code == "itinerary_replan_prompt"
+            and state.user_message_count - state.last_reply_message_count <= 2
+        )
+
+
 def _build_fallback_itinerary_draft_from_context(
     recent_messages: list[str],
     result: dict[str, Any],
@@ -7121,10 +7130,24 @@ def handle_message(event: MessageEvent) -> None:
         return
 
     if (
+        not _has_direct_itinerary_planning_request(user_text)
+        and _has_enough_itinerary_requirements(_recent_messages, result)
+    ):
+        if _recently_asked_itinerary_replan(conversation_key):
+            _debug_print("Itinerary replan prompt was recently sent; keep quiet.")
+            return
+        prompt = _build_itinerary_replan_prompt(_recent_messages, result)
+        _reply_text_and_mark(event, conversation_key, "itinerary_replan_prompt", prompt)
+        return
+
+    if (
         _looks_like_itinerary_condition_update(user_text, result)
         and not _has_direct_itinerary_planning_request(user_text)
     ):
         if _has_enough_itinerary_requirements(_recent_messages, result):
+            if _recently_asked_itinerary_replan(conversation_key):
+                _debug_print("Itinerary replan prompt was recently sent; keep quiet.")
+                return
             prompt = _build_itinerary_replan_prompt(_recent_messages, result)
             _reply_text_and_mark(event, conversation_key, "itinerary_replan_prompt", prompt)
             return
@@ -7159,6 +7182,9 @@ def handle_message(event: MessageEvent) -> None:
     ):
         if not _should_stage_itinerary_draft(user_text, _recent_messages, result):
             if _has_enough_itinerary_requirements(_recent_messages, result):
+                if _recently_asked_itinerary_replan(conversation_key):
+                    _debug_print("Itinerary replan prompt was recently sent; keep quiet.")
+                    return
                 prompt = _build_itinerary_replan_prompt(_recent_messages, result)
                 _reply_text_and_mark(event, conversation_key, "itinerary_replan_prompt", prompt)
                 return
