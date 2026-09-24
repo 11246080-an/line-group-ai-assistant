@@ -5218,6 +5218,33 @@ def _has_direct_itinerary_planning_request(user_text: str) -> bool:
     )
 
 
+def _looks_like_itinerary_acceptance_or_comment(user_text: str) -> bool:
+    text = str(user_text or "").strip()
+    if not text:
+        return False
+    if _has_direct_itinerary_planning_request(text):
+        return False
+    acceptance_terms = (
+        "這樣順",
+        "順很多",
+        "比較合理",
+        "很合理",
+        "可以",
+        "不錯",
+        "就照",
+        "照這版",
+        "這版",
+        "交通費",
+        "不會花太多",
+        "不會太貴",
+        "符合",
+    )
+    itinerary_context_terms = ("吃飯", "買書", "開始逛", "捷運", "走路", "交通", "行程", "路線")
+    return any(term in text for term in acceptance_terms) and any(
+        term in text for term in itinerary_context_terms
+    )
+
+
 def _planning_requirement_flags(recent_messages: list[str], result: dict[str, Any]) -> dict[str, bool]:
     recent_text = _recent_message_body_text(recent_messages[-8:])
     compact = "".join(recent_text.split())
@@ -7087,6 +7114,10 @@ def handle_message(event: MessageEvent) -> None:
 
     if _should_observe_weather_risk_without_reply(user_text, result):
         _debug_print("Weather risk mentioned but no direct weather question; keep observing.")
+        return
+
+    if _looks_like_itinerary_acceptance_or_comment(user_text):
+        _debug_print("Itinerary acceptance/comment detected; keep quiet.")
         return
 
     if (
