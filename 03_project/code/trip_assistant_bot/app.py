@@ -3856,6 +3856,8 @@ def _looks_like_itinerary_condition_update(
         "推薦景點",
         "景點推薦",
         "找景點",
+        "找餐廳推薦",
+        "推薦餐廳",
         "查活動",
         "找活動",
         "附近有沒有",
@@ -3904,6 +3906,10 @@ def _looks_like_itinerary_condition_update(
     )
     has_condition = any(term in normalized_text for term in condition_terms)
     has_trip_context = any(term in normalized_text for term in ("行程", "安排", "路線", "去", "從", "到"))
+    if has_condition and _looks_like_fixed_movie_context("", analysis_result):
+        return True
+    if has_condition and any(term in normalized_text for term in ("午餐", "餐廳", "素食", "預算", "交通", "捷運", "走路", "公車", "點前", "中午")):
+        return True
     return bool(has_condition and has_trip_context)
 
 
@@ -6969,8 +6975,7 @@ def handle_message(event: MessageEvent) -> None:
         return
 
     if (
-        should_intervene
-        and _looks_like_itinerary_condition_update(user_text, result)
+        _looks_like_itinerary_condition_update(user_text, result)
         and not _has_direct_itinerary_planning_request(user_text)
     ):
         if _has_enough_itinerary_requirements(_recent_messages, result):
