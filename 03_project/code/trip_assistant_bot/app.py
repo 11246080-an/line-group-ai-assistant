@@ -103,7 +103,7 @@ from location_flow import (
     run_text_location_recommendation,
     save_recent_location_context,
 )
-from weather_flow import run_weather_recommendation
+from weather_flow import COUNTY_ALIASES, run_weather_recommendation
 from google_routes import estimate_route_durations
 from route_optimization import build_optimized_route_reply, geocode_place, should_optimize_route
 from expense_flow import (
@@ -5955,6 +5955,115 @@ def _is_explicit_feature_command(text: str) -> bool:
     )
 
 
+_LOW_SIGNAL_SHORT_REPLIES = {
+    "好",
+    "好的",
+    "好喔",
+    "好哦",
+    "ok",
+    "OK",
+    "Ok",
+    "收到",
+    "了解",
+    "知道了",
+    "嗯",
+    "恩",
+    "對",
+    "是",
+    "可以",
+    "沒問題",
+    "謝謝",
+    "感謝",
+    "哈哈",
+    "哈",
+}
+
+
+def _should_skip_low_signal_text(user_text: str) -> bool:
+    normalized = str(user_text or "").strip()
+    if not normalized:
+        return True
+    compact = re.sub(r"\s+", "", normalized)
+    if compact in _LOW_SIGNAL_SHORT_REPLIES:
+        return True
+    if len(compact) <= 4 and re.fullmatch(r"[哈呵喔嗯恩啊]+[。！!~～]*", compact):
+        return True
+    return False
+
+
+def _direct_weather_query_has_known_location(user_text: str) -> bool:
+    if not _is_direct_weather_question(user_text):
+        return False
+    normalized = str(user_text or "").strip()
+    return any(alias and alias in normalized for alias in COUNTY_ALIASES)
+
+
+def _should_allow_ai_processing_hint(user_text: str, recent_messages: list[str]) -> bool:
+    if (
+        _looks_like_current_location_request(user_text)
+        or _looks_like_cost_or_ticket_lookup(user_text)
+        or _is_exchanging_new_information(recent_messages)
+        or (
+            _has_weather_request_signal(user_text, {})
+            and not _is_direct_weather_question(user_text)
+        )
+    ):
+        return False
+
+    normalized = str(user_text or "").strip()
+    heavy_request_keywords = (
+        "推薦景點",
+        "景點推薦",
+        "找景點",
+        "查活動",
+        "找活動",
+        "排一日遊",
+        "排半日遊",
+        "排行程",
+        "規劃行程",
+        "幫我排",
+        "幫我們排",
+        "路線最佳化",
+        "怎麼排比較順",
+    )
+    return (
+        _looks_like_text_location_lookup(normalized)
+        or _looks_like_recent_text_location_lookup(normalized, recent_messages)
+        or any(keyword in normalized for keyword in heavy_request_keywords)
+    )
+
+
+def _try_handle_fast_direct_request(
+    event: MessageEvent,
+    *,
+    user_text: str,
+    line_group_id: str,
+    conversation_key: str,
+) -> bool:
+    if _looks_like_point_to_point_directions_request(user_text):
+        route_result = _build_point_to_point_route_result(user_text, {"extracted_info": {}})
+        if route_result is not None and route_result.handled:
+            _reply_feature_result(event, route_result)
+            _mark_reply_sent(conversation_key, "fast_point_to_point_route", route_result.text)
+            _debug_print("Fast point-to-point route flow handled before AI analysis")
+            return True
+
+    if _direct_weather_query_has_known_location(user_text):
+        if _handle_weather_recommendation_request(
+            event,
+            conversation_key,
+            "fast_weather_request",
+            line_group_id,
+            query_text=user_text,
+            location_text="",
+            time_text="",
+        ):
+            _debug_print("Fast weather recommendation flow handled before AI analysis")
+            return True
+
+    return False
+
+
 def _get_group_sender_display_name(line_group_id: str, line_user_id: str) -> str:
     if not line_group_id or not line_user_id:
         return ""
@@ -6305,6 +6414,32 @@ def handle_message(event: MessageEvent) -> None:
             _log_failure("LINE import acknowledgement", exc)
         return
 
+    if _should_skip_low_signal_text(user_text):
+        _debug_print("低資訊短句，略過 AI 分析以加快回應。")
+        return
+
+    if _try_handle_fast_direct_request(
+        event,
+        user_text=user_text,
+        line_group_id=line_group_id,
+        conversation_key=conversation_key,
+    ):
+        try:
+            if line_group_id:
+                upsert_group(line_group_id)
+                upsert_member(line_group_id, line_user_id)
+            save_message(
+                line_group_id,
+                line_user_id,
+                user_text,
+                conversation_key=conversation_key,
+                embedding=None,
+                topic_hint=None,
+            )
+        except Exception as _db_exc:
+            _log_failure("Fast direct request persistence", _db_exc)
+        return
+
     topic_hint = None
     query_embedding = _build_text_embedding(user_text)
     saved_message_id = None
@@ -6374,17 +6509,9 @@ def handle_message(event: MessageEvent) -> None:
         raw_result = analyze_dialogue(
             context_text,
             on_processing_required=(
-                None
-                if (
-                    _looks_like_current_location_request(user_text)
-                    or _looks_like_cost_or_ticket_lookup(user_text)
-                    or _is_exchanging_new_information(_recent_messages)
-                    or (
-                        _has_weather_request_signal(user_text, {})
-                        and not _is_direct_weather_question(user_text)
-                    )
-                )
-                else _send_processing_hint
+                _send_processing_hint
+                if _should_allow_ai_processing_hint(user_text, _recent_messages)
+                else None
             ),
         )
         app.logger.debug(
