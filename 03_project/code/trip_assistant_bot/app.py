@@ -163,11 +163,18 @@ ENABLE_VERBOSE_DEBUG = os.getenv("ENABLE_VERBOSE_DEBUG", "false").strip().lower(
 PROCESSING_HINT_TEXT = "目前 AI 正在找資料，這個回答可能需要一點時間，請稍等一下。"
 LINE_PUSH_RETRY_ATTEMPTS = 3
 LINE_PUSH_RETRY_BASE_DELAY_SECONDS = 0.5
+TAIPEI_TZ = timezone(timedelta(hours=8))
 
 
 def _debug_print(message: str) -> None:
     if ENABLE_VERBOSE_DEBUG:
         print(message, flush=True)
+
+
+def _format_taipei_datetime(value: datetime, fmt: str = "%m/%d %H:%M") -> str:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(TAIPEI_TZ).strftime(fmt)
 
 try:
     ensure_indexes()
@@ -939,7 +946,7 @@ def _build_anonymous_poll_flex(result: FlowResult) -> FlexMessage | None:
         body_contents.append(
             {
                 "type": "text",
-                "text": f"截止：{deadline.astimezone().strftime('%m/%d %H:%M')}",
+                "text": f"截止：{_format_taipei_datetime(deadline)}（台灣時間）",
                 "size": "sm",
                 "color": "#666666",
                 "margin": "sm",
@@ -1670,7 +1677,7 @@ def _build_itinerary_share_request_flex(result: FlowResult) -> FlexMessage | Non
     deadline = request_data.get("deadline_at")
     deadline_text = ""
     if isinstance(deadline, datetime):
-        deadline_text = deadline.astimezone().strftime("%m/%d %H:%M")
+        deadline_text = f"{_format_taipei_datetime(deadline)} 台灣時間"
 
     footer_contents = [
         {

@@ -28,6 +28,7 @@ _POLL_CLOSE_COMMANDS = ("結束投票", "截止投票", "關閉投票")
 _DEADLINE_RE = re.compile(r"(?:限時|截止)\s*(\d{1,3})\s*(分鐘|小時|天)")
 _NORMAL_MINUTES = max(1, int(os.getenv("AUTO_POLL_NORMAL_MINUTES", "10")))
 _URGENT_MINUTES = max(1, int(os.getenv("AUTO_POLL_URGENT_MINUTES", "3")))
+TAIPEI_TZ = timezone(timedelta(hours=8))
 _PROPOSAL_TTL = timedelta(minutes=2)
 _PROPOSAL_DRAFT_TYPE = "vote_proposal"
 _PROPOSAL_GROUP_OWNER = "__group_vote_proposal__"
@@ -116,7 +117,9 @@ def active_poll_actions(poll: dict[str, Any]) -> list[ActionSpec]:
 def _deadline_text(poll: dict[str, Any]) -> str:
     deadline = poll.get("deadline_at")
     if isinstance(deadline, datetime):
-        return deadline.astimezone().strftime("%m/%d %H:%M")
+        if deadline.tzinfo is None:
+            deadline = deadline.replace(tzinfo=timezone.utc)
+        return f"{deadline.astimezone(TAIPEI_TZ).strftime('%m/%d %H:%M')} 台灣時間"
     return "稍後"
 
 
@@ -411,7 +414,7 @@ def create_vote_proposal(
     try:
         active = _db_function("get_active_vote_session")(line_group_id=line_group_id)
         if isinstance(active, dict):
-            return _poll_result(active)
+            return FlowResult(True, "目前已有一個進行中的投票，請先結束投票後再建立新的投票。")
 
         existing = _get_vote_proposal(line_group_id)
         if isinstance(existing, dict) and fingerprint and existing.get("discussion_fingerprint") == fingerprint:
