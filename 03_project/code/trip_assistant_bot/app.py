@@ -1458,7 +1458,7 @@ def _build_itinerary_draft_flex(result: FlowResult) -> FlexMessage | None:
             },
         )
 
-    displayed_spots = spots[:4]
+    displayed_spots = spots[:5]
     for index, spot in enumerate(displayed_spots, start=1):
         try:
             sequence = max(1, int(spot.get("sequence") or index))
@@ -1566,7 +1566,7 @@ def _build_itinerary_draft_flex(result: FlowResult) -> FlexMessage | None:
         body_contents.append(
             {
                 "type": "text",
-                "text": f"另有 {len(spots) - len(displayed_spots)} 個景點，確認後可查看完整內容。",
+                "text": f"另有 {len(spots) - len(displayed_spots)} 個行程點，確認後可查看完整內容。",
                 "size": "xs",
                 "color": "#66777B",
                 "wrap": True,
