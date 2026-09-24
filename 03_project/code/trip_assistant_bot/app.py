@@ -3731,6 +3731,8 @@ def _looks_like_text_location_lookup(user_text: str) -> bool:
     normalized_text = str(user_text or "").strip()
     if not normalized_text:
         return False
+    if _looks_like_itinerary_condition_update(normalized_text):
+        return False
     if _looks_like_point_to_point_directions_request(normalized_text):
         return False
     if _looks_like_cost_or_ticket_lookup(normalized_text):
@@ -3760,6 +3762,8 @@ def _infer_text_activity_types_from_recent_messages(recent_messages: list[str]) 
 def _looks_like_recent_text_location_lookup(user_text: str, recent_messages: list[str]) -> bool:
     normalized_text = str(user_text or "").strip()
     if not normalized_text or not recent_messages:
+        return False
+    if _looks_like_itinerary_condition_update(normalized_text):
         return False
     if _looks_like_point_to_point_directions_request(normalized_text):
         return False
@@ -3808,11 +3812,108 @@ def _is_itinerary_budget_or_planning_request(
     return bool(scenario_signal and planning_signal and (budget_signal or behavior_signal))
 
 
+def _looks_like_fixed_movie_context(
+    user_text: str,
+    analysis_result: dict[str, Any] | None = None,
+) -> bool:
+    normalized_text = str(user_text or "").strip()
+    if not normalized_text:
+        return False
+
+    analysis_result = analysis_result or {}
+    scenario_code = str(analysis_result.get("scenario_code") or "").strip()
+    scenario_name = str(analysis_result.get("scenario_name") or "").strip()
+    extracted_info = analysis_result.get("extracted_info") or {}
+    if not isinstance(extracted_info, dict):
+        extracted_info = {}
+    activity_types = extracted_info.get("activity_types") or []
+    if not isinstance(activity_types, list):
+        activity_types = [activity_types]
+
+    ai_movie_signal = (
+        scenario_code == "劇本十四"
+        or "電影" in scenario_name
+        or any("電影" in str(item) for item in activity_types)
+    )
+    text_movie_signal = any(term in normalized_text for term in ("電影", "影城", "威秀", "場次", "有場"))
+    fixed_time_signal = bool(
+        re.search(r"\d{1,2}\s*[:：]\s*\d{2}", normalized_text)
+        or any(term in normalized_text for term in ("最後", "看完", "結束時間", "剛剛查到"))
+    )
+    return bool((ai_movie_signal or text_movie_signal) and fixed_time_signal)
+
+
+def _looks_like_itinerary_condition_update(
+    user_text: str,
+    analysis_result: dict[str, Any] | None = None,
+) -> bool:
+    normalized_text = str(user_text or "").strip()
+    if not normalized_text:
+        return False
+    if _has_direct_itinerary_planning_request(normalized_text):
+        return False
+    direct_lookup_terms = (
+        "推薦景點",
+        "景點推薦",
+        "找景點",
+        "查活動",
+        "找活動",
+        "附近有沒有",
+        "附近有什麼",
+        "幫我查",
+        "幫我們查",
+        "可以幫我查",
+        "可以幫我們查",
+    )
+    if any(term in normalized_text for term in direct_lookup_terms):
+        return False
+
+    if _looks_like_fixed_movie_context(normalized_text, analysis_result):
+        return True
+
+    condition_terms = (
+        "午餐",
+        "晚餐",
+        "餐廳",
+        "吃飯",
+        "素食",
+        "不用排太久",
+        "排太久",
+        "預算",
+        "不要超過",
+        "以下",
+        "沒錢",
+        "捷運",
+        "走路",
+        "步行",
+        "公車",
+        "交通",
+        "下課",
+        "中午",
+        "晚上",
+        "點前",
+        "買書",
+        "課本",
+        "三民書局",
+        "先去",
+        "再去",
+        "接著",
+        "最後",
+        "順",
+        "折返",
+    )
+    has_condition = any(term in normalized_text for term in condition_terms)
+    has_trip_context = any(term in normalized_text for term in ("行程", "安排", "路線", "去", "從", "到"))
+    return bool(has_condition and has_trip_context)
+
+
 def _extract_text_location_query_payload(
     user_text: str,
     analysis_result: dict[str, Any],
     recent_messages: list[str] | None = None,
 ) -> dict[str, Any] | None:
+    if _looks_like_itinerary_condition_update(user_text, analysis_result):
+        return None
     if _looks_like_point_to_point_directions_request(user_text):
         return None
     if _looks_like_cost_or_ticket_lookup(user_text):
@@ -5121,8 +5222,13 @@ def _planning_requirement_flags(recent_messages: list[str], result: dict[str, An
     if not isinstance(locations, list):
         locations = [locations]
     location_count = len({str(item).strip() for item in locations if str(item).strip()})
+    ordered_route_signal = (
+        ("先去" in compact or "先到" in compact)
+        and ("再去" in compact or "再到" in compact)
+        and ("接著" in compact or "最後" in compact)
+    )
     return {
-        "locations": location_count >= 3,
+        "locations": location_count >= 3 or ordered_route_signal,
         "start_time": any(keyword in compact for keyword in ("中午", "12點", "十二點", "下課")),
         "end_time": any(keyword in compact for keyword in ("7點前", "七點前", "晚上7點", "晚上七點", "結束")),
         "budget": any(keyword in compact for keyword in ("預算", "1000", "一千", "300元", "三百", "沒錢")),
@@ -5134,6 +5240,22 @@ def _planning_requirement_flags(recent_messages: list[str], result: dict[str, An
 def _has_enough_itinerary_requirements(recent_messages: list[str], result: dict[str, Any]) -> bool:
     flags = _planning_requirement_flags(recent_messages, result)
     return all(flags.values())
+
+
+def _build_itinerary_replan_prompt(recent_messages: list[str], result: dict[str, Any]) -> str:
+    base = (
+        "已整理大家的行程需求。目前的景點順序可能產生折返，"
+        "需要我根據地點位置、時間、預算、交通方式和午餐需求，"
+        "重新安排完整行程嗎？"
+    )
+    recent_text = _recent_message_body_text(recent_messages[-8:])
+    if _looks_like_fixed_movie_context(recent_text, result):
+        return (
+            "已整理大家的行程需求。目前的景點順序可能產生折返，"
+            "需要我根據景點位置、時間、預算、交通方式、午餐需求，"
+            "以及已提供的電影時間，重新安排完整行程嗎？"
+        )
+    return base
 
 
 def _should_defer_planning_intervention(
@@ -5148,7 +5270,7 @@ def _should_defer_planning_intervention(
     is_planning = scenario_code in {"劇本四", "劇本五"} or scenario_name in {
         "自動行程生成",
         "路線最佳化",
-    }
+    } or scenario_code == "劇本十四" or "電影" in scenario_name
     if not is_planning:
         return False
     return not _has_enough_itinerary_requirements(recent_messages, result)
@@ -6281,6 +6403,7 @@ def _should_allow_ai_processing_hint(user_text: str, recent_messages: list[str])
     if (
         _looks_like_current_location_request(user_text)
         or _looks_like_cost_or_ticket_lookup(user_text)
+        or _looks_like_itinerary_condition_update(user_text)
         or _is_exchanging_new_information(recent_messages)
         or (
             _has_weather_request_signal(user_text, {})
@@ -6845,6 +6968,18 @@ def handle_message(event: MessageEvent) -> None:
         _debug_print("Weather risk mentioned but no direct weather question; keep observing.")
         return
 
+    if (
+        should_intervene
+        and _looks_like_itinerary_condition_update(user_text, result)
+        and not _has_direct_itinerary_planning_request(user_text)
+    ):
+        if _has_enough_itinerary_requirements(_recent_messages, result):
+            prompt = _build_itinerary_replan_prompt(_recent_messages, result)
+            _reply_text_and_mark(event, conversation_key, "itinerary_replan_prompt", prompt)
+            return
+        _debug_print("Itinerary condition update detected; keep collecting requirements.")
+        return
+
     itinerary_draft = result.get("itinerary_draft")
     if should_intervene and _should_defer_planning_intervention(user_text, _recent_messages, result):
         _debug_print("Planning requirements are still incomplete; keep observing.")
@@ -6857,11 +6992,7 @@ def handle_message(event: MessageEvent) -> None:
     ):
         if not _should_stage_itinerary_draft(user_text, _recent_messages, result):
             if _has_enough_itinerary_requirements(_recent_messages, result):
-                prompt = (
-                    "已整理大家的行程需求。目前的景點順序可能產生折返，"
-                    "需要我根據地點位置、時間、預算、交通方式和午餐需求，"
-                    "重新安排完整行程嗎？"
-                )
+                prompt = _build_itinerary_replan_prompt(_recent_messages, result)
                 _reply_text_and_mark(event, conversation_key, "itinerary_replan_prompt", prompt)
                 return
             _debug_print("Itinerary draft appeared before explicit planning request; keep observing.")
