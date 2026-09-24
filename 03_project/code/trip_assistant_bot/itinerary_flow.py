@@ -29,7 +29,7 @@ from expense_flow import (
     ensure_book_from_itinerary,
 )
 from google_routes import estimate_route_durations, routes_api_configured
-from location_flow import resolve_itinerary_spot_coordinates
+from location_flow import resolve_itinerary_spot_coordinates, run_text_location_recommendation
 from privacy_redaction import redact_sensitive_identifiers, redact_structure
 
 
@@ -853,6 +853,136 @@ def _service_time_summary_text(service_time_notice: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _is_generic_meal_spot(spot: dict[str, Any]) -> bool:
+    name = str(spot.get("name") or "").strip()
+    description = str(spot.get("description") or "").strip()
+    text = f"{name}\n{description}"
+    if not any(keyword in text for keyword in ("午餐", "餐廳", "用餐", "吃飯")):
+        return False
+    generic_terms = ("附近", "沿路", "地點", "選擇", "餐廳")
+    has_specific_address = bool(str(spot.get("address") or "").strip())
+    has_coordinates = spot.get("latitude") is not None and spot.get("longitude") is not None
+    return bool(any(term in name for term in generic_terms) and not (has_specific_address and has_coordinates))
+
+
+def _meal_location_anchor(text: str) -> str:
+    compact = str(text or "").strip()
+    aliases = (
+        ("北商", "國立臺北商業大學 台北"),
+        ("台北商業大學", "國立臺北商業大學 台北"),
+        ("臺北商業大學", "國立臺北商業大學 台北"),
+        ("北車", "台北車站"),
+        ("台北車站", "台北車站"),
+        ("臺北車站", "台北車站"),
+        ("華山", "華山1914文化創意產業園區"),
+        ("松菸", "松山文創園區"),
+        ("大稻埕", "大稻埕"),
+    )
+    for keyword, anchor in aliases:
+        if keyword in compact:
+            return anchor
+    return ""
+
+
+def _meal_constraints_from_itinerary(itinerary: dict[str, Any], spot: dict[str, Any]) -> list[str]:
+    text = " ".join(
+        str(value or "")
+        for value in (
+            itinerary.get("title"),
+            itinerary.get("summary"),
+            itinerary.get("best_for"),
+            spot.get("name"),
+            spot.get("description"),
+        )
+    )
+    constraints = ["午餐", "餐廳"]
+    if "300" in text or "三百" in text:
+        constraints.append("300元以下")
+    if "素食" in text:
+        constraints.append("素食")
+    if "排太久" in text or "不用排" in text:
+        constraints.append("不用排太久")
+    return constraints
+
+
+def _enrich_generic_meal_spots_with_places(
+    itinerary: dict[str, Any],
+    *,
+    line_group_id: str,
+) -> dict[str, Any]:
+    spots = [spot for spot in itinerary.get("spots") or [] if isinstance(spot, dict)]
+    if not spots:
+        return itinerary
+
+    updated_spots: list[dict[str, Any]] = []
+    enriched_count = 0
+    for spot in spots:
+        if not _is_generic_meal_spot(spot):
+            updated_spots.append(spot)
+            continue
+
+        source_text = " ".join(
+            str(value or "")
+            for value in (
+                spot.get("name"),
+                spot.get("description"),
+                itinerary.get("summary"),
+                itinerary.get("best_for"),
+            )
+        )
+        anchor = _meal_location_anchor(source_text) or str(itinerary.get("region") or "").strip()
+        constraints = _meal_constraints_from_itinerary(itinerary, spot)
+        query_text = " ".join(part for part in (anchor, "附近", "餐廳", *constraints) if part)
+        try:
+            payload = run_text_location_recommendation(
+                query_text=query_text,
+                location_text=anchor,
+                constraints=constraints,
+                activity_types=["餐廳"],
+                line_group_id=line_group_id,
+            )
+        except Exception:
+            updated_spots.append(spot)
+            continue
+
+        candidates = [item for item in payload.get("results") or [] if isinstance(item, dict)]
+        if not candidates:
+            updated_spots.append(spot)
+            continue
+
+        candidate = candidates[0]
+        description_parts = [
+            "午餐推薦",
+            str(candidate.get("description") or "").strip(),
+            "Google Places",
+        ]
+        enriched = {
+            **spot,
+            "name": str(candidate.get("name") or spot.get("name") or "").strip(),
+            "description": "｜".join(part for part in description_parts if part),
+            "address": str(candidate.get("address") or candidate.get("subtitle") or spot.get("address") or "").strip(),
+            "latitude": candidate.get("latitude", spot.get("latitude")),
+            "longitude": candidate.get("longitude", spot.get("longitude")),
+            "maps_url": str(candidate.get("maps_url") or spot.get("maps_url") or "").strip(),
+            "recommendation_source": "google_places",
+            "coordinate_source": "google_places",
+        }
+        updated_spots.append(enriched)
+        enriched_count += 1
+
+    if not enriched_count:
+        return itinerary
+    return {
+        **itinerary,
+        "spots": updated_spots,
+        "meal_recommendation_notice": {
+            "provider": "google_places",
+            "matched_count": enriched_count,
+            "label": "午餐推薦來源：Google Places",
+        },
+    }
+
+
 def stage_generated_itinerary(
     *,
     line_group_id: str,
@@ -869,6 +999,10 @@ def stage_generated_itinerary(
     if not database_contract_ready(("save_feature_draft",)):
         return database_unavailable_result()
     normalized = _constrain_itinerary_to_tourism_attractions(normalized)
+    normalized = _enrich_generic_meal_spots_with_places(
+        normalized,
+        line_group_id=line_group_id,
+    )
     resolved_spots, _coordinate_summary = resolve_itinerary_spot_coordinates(
         list(normalized.get("spots") or []),
         region=str(normalized.get("region") or ""),
