@@ -4785,7 +4785,22 @@ def _poll_option_appears_in_recent_text(label: str, compact_recent_text: str) ->
     if compact_label and compact_label in compact_recent_text:
         return True
     if compact_label.endswith("展覽"):
-        return compact_label.replace("展覽", "展") in compact_recent_text
+        stem = compact_label.removesuffix("展覽")
+        if compact_label.replace("展覽", "展") in compact_recent_text:
+            return True
+        return bool(
+            stem
+            and any(
+                pattern in compact_recent_text
+                for pattern in (
+                    f"{stem}展覽",
+                    f"{stem}的展覽",
+                    f"{stem}最近的展覽",
+                    f"{stem}最近展覽",
+                    f"{stem}展",
+                )
+            )
+        )
     if compact_label.endswith("活動"):
         stem = compact_label.removesuffix("活動")
         return bool(stem and stem in compact_recent_text and "活動" in compact_recent_text)
