@@ -44,6 +44,21 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _supports_custom_temperature(model: str) -> bool:
+    return not model.strip().lower().startswith("gpt-6")
+
+
+def _with_optional_temperature(
+    kwargs: dict[str, Any],
+    *,
+    model: str,
+    temperature: float,
+) -> dict[str, Any]:
+    if _supports_custom_temperature(model):
+        kwargs["temperature"] = temperature
+    return kwargs
+
+
 BEACON_CONTEXT_TTL_SECONDS = _env_float("BEACON_CONTEXT_TTL_MINUTES", 10.0) * 60
 LIFF_SESSION_TTL_SECONDS = _env_float("LIFF_SESSION_TTL_MINUTES", 15.0) * 60
 RECENT_LOCATION_CONTEXT_TTL_SECONDS = _env_float(
@@ -827,31 +842,36 @@ def _normalize_location_text_with_llm(location_text: str, query_text: str) -> st
 
     try:
         response = client.chat.completions.create(
-            model=LOCATION_NORMALIZER_MODEL,
-            temperature=0,
-            messages=[
+            **_with_optional_temperature(
                 {
-                    "role": "system",
-                    "content": (
-                        "你是台灣地點名稱正規化助手。"
-                        "請把使用者口語中的地點，轉成最適合拿去查 Google Places 的正式地點名稱。"
-                        "例如北車 -> 台北車站，北商 -> 國立臺北商業大學。"
-                        "只輸出 JSON，格式必須是 {\"normalized_location\": \"...\"}。"
-                        "如果無法更正規化，就原樣輸出。"
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": json.dumps(
+                    "model": LOCATION_NORMALIZER_MODEL,
+                    "messages": [
                         {
-                            "location_text": location_text,
-                            "query_text": query_text,
+                            "role": "system",
+                            "content": (
+                                "你是台灣地點名稱正規化助手。"
+                                "請把使用者口語中的地點，轉成最適合拿去查 Google Places 的正式地點名稱。"
+                                "例如北車 -> 台北車站，北商 -> 國立臺北商業大學。"
+                                "只輸出 JSON，格式必須是 {\"normalized_location\": \"...\"}。"
+                                "如果無法更正規化，就原樣輸出。"
+                            ),
                         },
-                        ensure_ascii=False,
-                    ),
+                        {
+                            "role": "user",
+                            "content": json.dumps(
+                                {
+                                    "location_text": location_text,
+                                    "query_text": query_text,
+                                },
+                                ensure_ascii=False,
+                            ),
+                        },
+                    ],
+                    "response_format": {"type": "json_object"},
                 },
-            ],
-            response_format={"type": "json_object"},
+                model=LOCATION_NORMALIZER_MODEL,
+                temperature=0,
+            )
         )
         content = response.choices[0].message.content or "{}"
         data = _extract_json_object(content)
@@ -1778,12 +1798,17 @@ def _build_openai_fallback_recommendation(
     )
 
     response = client.chat.completions.create(
-        model=model,
-        temperature=0.2,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
+        **_with_optional_temperature(
+            {
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+            },
+            model=model,
+            temperature=0.2,
+        )
     )
     message_content = response.choices[0].message.content or "{}"
     raw = _extract_json_object(message_content)

@@ -202,6 +202,23 @@ OPENAI_LOCATION_JUDGE_MODEL = os.getenv(
     "OPENAI_LOCATION_JUDGE_MODEL",
     OPENAI_TOPIC_JUDGE_MODEL,
 )
+
+
+def _supports_custom_temperature(model: str) -> bool:
+    return not model.strip().lower().startswith("gpt-6")
+
+
+def _with_optional_temperature(
+    kwargs: dict[str, Any],
+    *,
+    model: str,
+    temperature: float,
+) -> dict[str, Any]:
+    if _supports_custom_temperature(model):
+        kwargs["temperature"] = temperature
+    return kwargs
+
+
 TOPIC_SWITCH_SIMILARITY_THRESHOLD = float(
     os.getenv("TOPIC_SWITCH_SIMILARITY_THRESHOLD", "0.72")
 )
@@ -4651,12 +4668,17 @@ def _call_small_json_model(
 
     try:
         response = client.chat.completions.create(
-            model=model,
-            temperature=0,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
+            **_with_optional_temperature(
+                {
+                    "model": model,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                },
+                model=model,
+                temperature=0,
+            )
         )
         content = response.choices[0].message.content or "{}"
         return _extract_json_object(content)
@@ -6895,6 +6917,20 @@ def _handle_feature_text(
         _reply_feature_result(event, result)
         return True
 
+    if user_text.strip() in {"建立匿名投票", "匿名投票"}:
+        result = create_anonymous_poll(
+            line_group_id=line_group_id,
+            question="這次景點要選哪一個？",
+            options=["華山展覽", "大稻埕", "松菸活動"],
+            eligible_line_user_ids=[line_user_id] if line_user_id else [],
+            auto_created=True,
+            urgent=True,
+            created_by_line_user_id=line_user_id,
+            discussion_fingerprint=f"manual-short-poll:{conversation_key}",
+        )
+        _reply_feature_result(event, result)
+        return True
+
     for handler_function in (handle_itinerary_text, handle_vote_text, handle_schedule_text):
         result = handler_function(
             user_text,
@@ -7235,6 +7271,41 @@ def handle_message(event: MessageEvent) -> None:
         except Exception as _db_exc:
             _log_failure("Fast direct request persistence", _db_exc)
         return
+
+    local_script_reply = _shooting_script_reply(user_text)
+    if local_script_reply and any(
+        marker in user_text
+        for marker in (
+            "最好不用排太久",
+            "明天下午會不會下雨",
+            "照這個順序安排",
+            "確認行程",
+        )
+    ):
+        _note_user_message(conversation_key, user_text)
+        _reply_text_and_mark(event, conversation_key, "local_no_api_fallback", local_script_reply)
+        _debug_print("Local no-API fallback reply handled before AI analysis.")
+        return
+
+    if _has_direct_itinerary_planning_request(user_text):
+        fallback_draft = _build_fallback_itinerary_draft_from_context(
+            list(_get_or_create_state(conversation_key).history) + [user_text],
+            {"extracted_info": {}},
+        )
+        if fallback_draft:
+            result = stage_generated_itinerary(
+                line_group_id=line_group_id,
+                line_user_id=line_user_id,
+                itinerary_draft=fallback_draft,
+                reply_text="我先依照大家已提出的時間、預算、交通、午餐和地點需求，整理一版半日行程草稿。",
+                context_text=user_text,
+            )
+            if result.handled:
+                _note_user_message(conversation_key, user_text)
+                _reply_feature_result(event, result)
+                _mark_reply_sent(conversation_key, "local_no_api_itinerary", result.text)
+                _debug_print("Local no-API itinerary fallback handled before AI analysis.")
+                return
 
     topic_hint = None
     query_embedding = _build_text_embedding(user_text)

@@ -42,6 +42,10 @@ INVOICE_MAX_IMAGE_BYTES = max(100_000, int(os.getenv("INVOICE_MAX_IMAGE_BYTES", 
 INVOICE_OCR_MODEL = os.getenv("INVOICE_OCR_MODEL", "gpt-4.1-mini").strip()
 
 
+def _supports_custom_temperature(model: str) -> bool:
+    return not model.strip().lower().startswith("gpt-6")
+
+
 @dataclass
 class InvoiceCaptureSession:
     token: str
@@ -306,9 +310,8 @@ def recognize_invoice_cloud(image_bytes: bytes, mime_type: str) -> dict[str, Any
 
     data_url = f"data:{mime_type};base64,{base64.b64encode(image_bytes).decode('ascii')}"
     client = OpenAI(api_key=api_key)
-    response = client.chat.completions.create(
+    request_kwargs: dict[str, Any] = dict(
         model=INVOICE_OCR_MODEL,
-        temperature=0,
         response_format={"type": "json_object"},
         messages=[
             {
@@ -333,6 +336,9 @@ def recognize_invoice_cloud(image_bytes: bytes, mime_type: str) -> dict[str, Any
             },
         ],
     )
+    if _supports_custom_temperature(INVOICE_OCR_MODEL):
+        request_kwargs["temperature"] = 0
+    response = client.chat.completions.create(**request_kwargs)
     content = response.choices[0].message.content or "{}"
     return _extract_json_object(content)
 

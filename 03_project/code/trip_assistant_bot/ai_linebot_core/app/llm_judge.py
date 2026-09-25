@@ -22,6 +22,10 @@ class LLMJudgeError(RuntimeError):
 ROOT_DIR = Path(__file__).resolve().parent.parent.parent
 
 
+def _supports_custom_temperature(model: str) -> bool:
+    return not model.strip().lower().startswith("gpt-6")
+
+
 def _load_env_file() -> None:
     env_path = ROOT_DIR / ".env"
     if not env_path.exists():
@@ -783,13 +787,16 @@ def _call_openai_json(
     *,
     purpose: str,
 ) -> dict[str, Any]:
+    request_kwargs: dict[str, Any] = {
+        "model": model,
+        "messages": messages,
+        "response_format": {"type": "json_object"},
+    }
+    if _supports_custom_temperature(model):
+        request_kwargs["temperature"] = 0.1
+
     try:
-        response = client.chat.completions.create(
-            model=model,
-            temperature=0.1,
-            messages=messages,
-            response_format={"type": "json_object"},
-        )
+        response = client.chat.completions.create(**request_kwargs)
     except Exception as exc:  # pragma: no cover - network/sdk path
         raise LLMJudgeError(f"OpenAI {purpose} 失敗: {exc}") from exc
 
