@@ -26,6 +26,37 @@ def _supports_custom_temperature(model: str) -> bool:
     return not model.strip().lower().startswith("gpt-6")
 
 
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _should_escalate_to_stronger_model(result: AnalysisResult) -> tuple[bool, str]:
+    threshold = _env_float("OPENAI_ESCALATION_CONFIDENCE_THRESHOLD", 0.85)
+    if result.confidence_score < threshold:
+        return True, f"low_confidence:{result.confidence_score:.2f}"
+    if result.requires_external_search:
+        return True, "external_search"
+    complex_scenarios = {
+        "劇本五",
+        "劇本六",
+        "劇本十二",
+        "劇本十三",
+        "劇本十四",
+        "劇本十五",
+        "劇本十六",
+        "劇本十七",
+    }
+    if result.scenario_code in complex_scenarios:
+        return True, f"complex_scenario:{result.scenario_code}"
+    need_type = str(result.extracted_info.need_type or "")
+    if any(keyword in need_type for keyword in ("行程", "路線", "規劃", "決策", "外部", "查詢")):
+        return True, f"complex_need:{need_type}"
+    return False, ""
+
+
 def _load_env_file() -> None:
     env_path = ROOT_DIR / ".env"
     if not env_path.exists():
@@ -910,6 +941,7 @@ def judge_with_llm(
         raise LLMJudgeError("未設定 OPENAI_API_KEY")
 
     model = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
+    escalation_model = os.getenv("OPENAI_ESCALATION_MODEL", "").strip()
 
     try:
         from openai import OpenAI
@@ -919,6 +951,7 @@ def judge_with_llm(
     client = OpenAI(api_key=api_key)
 
     judgment_messages = _build_judgment_messages(text, extracted_info)
+    print(f"Model router: using fast model {model}")
     judgment_data = _call_openai_json(
         client,
         model,
@@ -926,6 +959,19 @@ def judge_with_llm(
         purpose="情境判斷",
     )
     judgment_result = _normalize_result(judgment_data, extracted_info, text)
+    active_model = model
+
+    should_escalate, escalation_reason = _should_escalate_to_stronger_model(judgment_result)
+    if escalation_model and escalation_model != model and should_escalate:
+        print(f"Model router: escalate to {escalation_model} reason={escalation_reason}")
+        judgment_data = _call_openai_json(
+            client,
+            escalation_model,
+            judgment_messages,
+            purpose="升級情境判斷",
+        )
+        judgment_result = _normalize_result(judgment_data, extracted_info, text)
+        active_model = escalation_model
 
     if not judgment_result.should_intervene:
         return judgment_result
@@ -936,7 +982,7 @@ def judge_with_llm(
     generation_messages = _build_generation_messages(text, judgment_result)
     generated_reply = _call_openai_json(
         client,
-        model,
+        active_model,
         generation_messages,
         purpose="回覆生成",
     )
