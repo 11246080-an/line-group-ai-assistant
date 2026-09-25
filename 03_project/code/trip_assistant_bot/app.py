@@ -5431,6 +5431,9 @@ def _looks_like_itinerary_acceptance_or_comment(user_text: str) -> bool:
         return False
     if _has_direct_itinerary_planning_request(text):
         return False
+    if _is_direct_weather_question(text):
+        return False
+    compact = re.sub(r"\s+", "", text)
     acceptance_terms = (
         "這樣順",
         "順很多",
@@ -5446,9 +5449,48 @@ def _looks_like_itinerary_acceptance_or_comment(user_text: str) -> bool:
         "不會太貴",
         "符合",
     )
-    itinerary_context_terms = ("吃飯", "買書", "開始逛", "捷運", "走路", "交通", "行程", "路線")
-    return any(term in text for term in acceptance_terms) and any(
-        term in text for term in itinerary_context_terms
+    card_comment_terms = (
+        "交通時間也列出來",
+        "交通時間有列",
+        "開車步行大眾運輸",
+        "大眾運輸都有參考",
+        "都有參考",
+        "餐廳也有幫我們找",
+        "有幫我們找素食",
+        "素食選項",
+        "符合大家需求",
+        "比較符合大家需求",
+        "明天不會下雨",
+        "不會下雨",
+        "感覺會很熱",
+        "會很熱",
+        "停留時間縮短",
+        "縮短一點",
+    )
+    itinerary_context_terms = (
+        "吃飯",
+        "買書",
+        "開始逛",
+        "捷運",
+        "走路",
+        "步行",
+        "交通",
+        "行程",
+        "路線",
+        "餐廳",
+        "素食",
+        "北車",
+        "華山",
+        "大稻埕",
+        "松菸",
+        "天氣",
+        "下雨",
+        "熱",
+    )
+    has_context = any(term in text for term in itinerary_context_terms)
+    return has_context and (
+        any(term in text for term in acceptance_terms)
+        or any(term in compact for term in card_comment_terms)
     )
 
 
@@ -7351,6 +7393,10 @@ def handle_message(event: MessageEvent) -> None:
                 "imported_itinerary_context",
                 direct_reply,
             )
+            return
+
+        if _looks_like_itinerary_acceptance_or_comment(user_text):
+            _debug_print("Itinerary acceptance/comment detected before AI; keep quiet.")
             return
 
         if (
