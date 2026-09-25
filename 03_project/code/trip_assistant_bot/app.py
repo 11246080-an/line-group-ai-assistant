@@ -5418,10 +5418,11 @@ def _has_direct_itinerary_planning_request(user_text: str) -> bool:
         return False
     return bool(
         re.search(
-            r"(幫我|幫我們|麻煩|請).{0,10}(重新排|重排|排一下|排一版|排行程|整理完整行程|安排完整行程)",
+            r"(幫我|幫我們|可以幫我|可以幫我們|麻煩|請).{0,16}"
+            r"(重新排|重排|排一下|排一版|排行程|整理完整行程|安排完整行程|評估|怎麼安排|安排比較順|規劃)",
             text,
         )
-        or re.search(r"(重新排|重排|排一版|排行程|整理完整行程|安排完整行程)", text)
+        or re.search(r"(重新排|重排|排一版|排行程|整理完整行程|安排完整行程|怎麼安排比較順|安排比較順)", text)
     )
 
 
@@ -5439,7 +5440,7 @@ def _looks_like_itinerary_acceptance_or_comment(user_text: str) -> bool:
         "順很多",
         "比較合理",
         "很合理",
-        "可以",
+        "這樣可以",
         "不錯",
         "就照",
         "照這版",
