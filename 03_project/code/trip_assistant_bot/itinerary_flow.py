@@ -1450,6 +1450,7 @@ def handle_itinerary_text(
     line_user_id: str,
 ) -> FlowResult:
     normalized = str(text or "").strip()
+    compact = re.sub(r"\s+", "", normalized)
     reason_result = _capture_recommendation_reason(
         normalized,
         line_group_id=line_group_id,
@@ -1457,7 +1458,13 @@ def handle_itinerary_text(
     )
     if reason_result.handled:
         return reason_result
-    if normalized == "確認行程":
+    if (
+        normalized == "確認行程"
+        or (
+            "確認行程" in compact
+            and any(keyword in compact for keyword in ("幫", "請", "行程助理", "先", "一下"))
+        )
+    ):
         try:
             return _confirm_draft(line_group_id=line_group_id, line_user_id=line_user_id)
         except DatabaseFeatureUnavailable:

@@ -35,9 +35,7 @@ def _env_float(name: str, default: float) -> float:
 
 def _should_escalate_to_stronger_model(result: AnalysisResult) -> tuple[bool, str]:
     threshold = _env_float("OPENAI_ESCALATION_CONFIDENCE_THRESHOLD", 0.85)
-    if result.confidence_score < threshold:
-        return True, f"low_confidence:{result.confidence_score:.2f}"
-    if result.requires_external_search:
+    if result.requires_external_search and result.should_intervene:
         return True, "external_search"
     complex_scenarios = {
         "劇本五",
@@ -49,11 +47,13 @@ def _should_escalate_to_stronger_model(result: AnalysisResult) -> tuple[bool, st
         "劇本十六",
         "劇本十七",
     }
-    if result.scenario_code in complex_scenarios:
+    if result.scenario_code in complex_scenarios and result.should_intervene:
         return True, f"complex_scenario:{result.scenario_code}"
     need_type = str(result.extracted_info.need_type or "")
     if any(keyword in need_type for keyword in ("行程", "路線", "規劃", "決策", "外部", "查詢")):
         return True, f"complex_need:{need_type}"
+    if result.confidence_score < threshold and result.should_intervene:
+        return True, f"low_confidence:{result.confidence_score:.2f}"
     return False, ""
 
 
