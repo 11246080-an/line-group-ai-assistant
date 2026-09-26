@@ -81,6 +81,7 @@ from ai_linebot_core.app.line_import import (
 )
 from db import (
     ensure_indexes,
+    get_recent_messages,
     get_similar_messages,
     save_message,
     save_summary,
@@ -4860,6 +4861,80 @@ def _format_retrieved_messages(
     return formatted_messages
 
 
+def _extract_rag_fallback_keywords(text: str) -> set[str]:
+    compact = re.sub(r"\s+", "", str(text or ""))
+    known_terms = (
+        "台北",
+        "台中",
+        "臺中",
+        "高雄",
+        "審計新村",
+        "草悟道",
+        "勤美",
+        "華山",
+        "大稻埕",
+        "松菸",
+        "中山",
+        "北車",
+        "台北車站",
+        "臺北車站",
+        "午餐",
+        "晚餐",
+        "餐廳",
+        "景點",
+        "活動",
+        "展覽",
+        "拍照",
+        "預算",
+        "交通",
+        "下午",
+        "早上",
+        "行程",
+        "順路",
+    )
+    keywords = {term for term in known_terms if term in compact}
+    keywords.update(
+        token
+        for token in re.findall(r"[\u4e00-\u9fff]{2,6}", compact)
+        if token not in {"那個", "剛剛", "什麼", "可以", "我們", "你們", "附近", "還能"}
+    )
+    return keywords
+
+
+def _fallback_recent_messages_by_keyword(
+    line_group_id: str,
+    current_text: str,
+    *,
+    limit: int = 5,
+) -> list[str]:
+    if not line_group_id:
+        return []
+    current_compact = re.sub(r"\s+", "", str(current_text or "").strip())
+    keywords = _extract_rag_fallback_keywords(current_text)
+    if not keywords:
+        return []
+    try:
+        recent_messages = get_recent_messages(line_group_id, limit=30)
+    except Exception as exc:
+        _log_failure("RAG keyword fallback", exc)
+        return []
+
+    scored: list[tuple[int, int, str]] = []
+    for index, message in enumerate(recent_messages):
+        message_text = str(message or "").strip()
+        if not message_text:
+            continue
+        message_compact = re.sub(r"\s+", "", message_text)
+        if current_compact and message_compact == current_compact:
+            continue
+        score = sum(1 for keyword in keywords if keyword in message_compact)
+        if score:
+            scored.append((score, index, message_text))
+
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    return [f"使用者：{message}" for _, _, message in scored[:limit]]
+
+
 def _build_conversation_context(
     conversation_key: str,
     user_text: str,
@@ -4936,6 +5011,15 @@ def _build_conversation_context(
                 )
         except Exception as exc:
             _log_failure("RAG retrieval", exc)
+
+    if line_group_id and query_embedding and not retrieved_messages:
+        retrieved_messages = _fallback_recent_messages_by_keyword(
+            line_group_id,
+            normalized_text,
+            limit=RAG_RETRIEVAL_LIMIT,
+        )
+        if retrieved_messages:
+            _debug_print(f"RAG keyword fallback retrieved {len(retrieved_messages)} messages")
 
     recent_context = "\n".join(history_snapshot)
     retrieved_context = "\n".join(retrieved_messages)
@@ -7381,22 +7465,6 @@ def handle_message(event: MessageEvent) -> None:
     query_embedding = _build_text_embedding(user_text)
     saved_message_id = None
 
-    # ── DB：儲存訊息與群組資訊（失敗不中斷主流程）─────────────
-    try:
-        if line_group_id:
-            upsert_group(line_group_id)
-            upsert_member(line_group_id, line_user_id)
-        saved_message_id = save_message(
-            line_group_id,
-            line_user_id,
-            user_text,
-            conversation_key=conversation_key,
-            embedding=query_embedding,
-            topic_hint=topic_hint,
-        )
-    except Exception as _db_exc:
-        _log_failure("Message persistence", _db_exc)
-
     try:
         _recent_messages, context_text = _build_conversation_context(
             conversation_key,
@@ -7404,8 +7472,26 @@ def handle_message(event: MessageEvent) -> None:
             line_group_id=line_group_id,
             line_user_id=line_user_id,
             query_embedding=query_embedding,
-            exclude_message_id=saved_message_id,
+            exclude_message_id=None,
         )
+
+        # ── DB：儲存訊息與群組資訊（失敗不中斷主流程）─────────────
+        # RAG 必須先查歷史再存當前訊息，否則目前這句自己會變成最高分候選。
+        try:
+            if line_group_id:
+                upsert_group(line_group_id)
+                upsert_member(line_group_id, line_user_id)
+            saved_message_id = save_message(
+                line_group_id,
+                line_user_id,
+                user_text,
+                conversation_key=conversation_key,
+                embedding=query_embedding,
+                topic_hint=topic_hint,
+            )
+        except Exception as _db_exc:
+            _log_failure("Message persistence", _db_exc)
+
         _debug_print(
             f"DEBUG 對話視窗 key={conversation_key}, "
             f"messages={len(_recent_messages)}/{CONVERSATION_WINDOW_SIZE}"
