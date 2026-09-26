@@ -4834,13 +4834,21 @@ def _build_text_embedding(text: str) -> list[float] | None:
         return None
 
 
-def _format_retrieved_messages(similar_messages: list[dict[str, Any]]) -> list[str]:
+def _format_retrieved_messages(
+    similar_messages: list[dict[str, Any]],
+    *,
+    current_text: str = "",
+) -> list[str]:
     formatted_messages: list[str] = []
     seen_texts: set[str] = set()
+    current_compact = re.sub(r"\s+", "", str(current_text or "").strip())
 
     for doc in similar_messages:
         message_text = str(doc.get("message_text") or "").strip()
         if not message_text or message_text in seen_texts:
+            continue
+        message_compact = re.sub(r"\s+", "", message_text)
+        if current_compact and message_compact == current_compact:
             continue
 
         display_name = str(doc.get("display_name") or "").strip()
@@ -4909,7 +4917,23 @@ def _build_conversation_context(
                 limit=RAG_RETRIEVAL_LIMIT,
                 min_score=RAG_MIN_SIMILARITY_SCORE,
             )
-            retrieved_messages = _format_retrieved_messages(similar_messages)
+            retrieved_messages = _format_retrieved_messages(
+                similar_messages,
+                current_text=normalized_text,
+            )
+            if similar_messages:
+                top_score = similar_messages[0].get("similarity_score")
+                _debug_print(
+                    "RAG retrieved "
+                    f"{len(retrieved_messages)}/{len(similar_messages)} messages "
+                    f"(top_score={float(top_score or 0):.2f}, "
+                    f"min_score={RAG_MIN_SIMILARITY_SCORE:.2f})"
+                )
+            else:
+                _debug_print(
+                    "RAG retrieved 0 messages "
+                    f"(min_score={RAG_MIN_SIMILARITY_SCORE:.2f})"
+                )
         except Exception as exc:
             _log_failure("RAG retrieval", exc)
 
@@ -7301,6 +7325,7 @@ def handle_message(event: MessageEvent) -> None:
         conversation_key=conversation_key,
     ):
         try:
+            fast_query_embedding = _build_text_embedding(user_text)
             if line_group_id:
                 upsert_group(line_group_id)
                 upsert_member(line_group_id, line_user_id)
@@ -7309,7 +7334,7 @@ def handle_message(event: MessageEvent) -> None:
                 line_user_id,
                 user_text,
                 conversation_key=conversation_key,
-                embedding=None,
+                embedding=fast_query_embedding,
                 topic_hint=None,
             )
         except Exception as _db_exc:
