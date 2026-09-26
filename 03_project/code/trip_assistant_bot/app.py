@@ -7330,7 +7330,8 @@ def handle_message(event: MessageEvent) -> None:
         _debug_print("Local no-API fallback reply handled before AI analysis.")
         return
 
-    if _has_direct_itinerary_planning_request(user_text):
+    compact_user_text = re.sub(r"\s+", "", user_text)
+    if compact_user_text in {"好，幫我們重新排一下。", "好，幫我們重新排一下", "好幫我們重新排一下"}:
         fallback_draft = _build_fallback_itinerary_draft_from_context(
             list(_get_or_create_state(conversation_key).history) + [user_text],
             {"extracted_info": {}},
