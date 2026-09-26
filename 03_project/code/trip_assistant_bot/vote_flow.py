@@ -24,7 +24,7 @@ from privacy_redaction import redact_sensitive_identifiers
 
 
 _POLL_PREFIXES = ("建立投票", "新增投票", "發起投票")
-_POLL_CLOSE_COMMANDS = ("結束投票", "截止投票", "關閉投票")
+_POLL_CLOSE_COMMANDS = ("結束投票", "投票結束", "截止投票", "關閉投票")
 _DEADLINE_RE = re.compile(r"(?:限時|截止)\s*(\d{1,3})\s*(分鐘|小時|天)")
 _NORMAL_MINUTES = max(1, int(os.getenv("AUTO_POLL_NORMAL_MINUTES", "10")))
 _URGENT_MINUTES = max(1, int(os.getenv("AUTO_POLL_URGENT_MINUTES", "3")))

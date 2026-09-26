@@ -6785,6 +6785,7 @@ def _is_explicit_feature_command(text: str) -> bool:
             "放棄行程草稿",
             "建立投票",
             "結束投票",
+            "投票結束",
             "截止投票",
             "關閉投票",
             "開啟投票",
