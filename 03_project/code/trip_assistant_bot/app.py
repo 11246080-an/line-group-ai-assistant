@@ -5534,6 +5534,46 @@ def _has_direct_itinerary_planning_request(user_text: str) -> bool:
     )
 
 
+def _looks_like_candidate_option_suggestion(user_text: str) -> bool:
+    text = str(user_text or "").strip()
+    if not text:
+        return False
+    compact = re.sub(r"\s+", "", text)
+    completion_terms = ("就照", "照這版", "決定", "定案", "不用改", "不用調整")
+    if any(term in compact for term in completion_terms):
+        return False
+
+    proposal_markers = (
+        "不然",
+        "或是",
+        "也可以",
+        "也不錯",
+        "想去",
+        "想看",
+        "有看到",
+        "有活動",
+        "適合拍照",
+        "拍拍貼",
+    )
+    option_context_terms = (
+        "展覽",
+        "活動",
+        "逛街",
+        "拍照",
+        "景點",
+        "餐廳",
+        "咖啡",
+        "華山",
+        "中山",
+        "松菸",
+        "大稻埕",
+    )
+    return (
+        any(marker in compact for marker in proposal_markers)
+        and any(term in text for term in option_context_terms)
+    )
+
+
 def _looks_like_itinerary_acceptance_or_comment(user_text: str) -> bool:
     text = str(user_text or "").strip()
     if not text:
@@ -5541,6 +5581,8 @@ def _looks_like_itinerary_acceptance_or_comment(user_text: str) -> bool:
     if _has_direct_itinerary_planning_request(text):
         return False
     if _is_direct_weather_question(text):
+        return False
+    if _looks_like_candidate_option_suggestion(text):
         return False
     compact = re.sub(r"\s+", "", text)
     acceptance_terms = (
