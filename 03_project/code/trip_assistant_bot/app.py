@@ -725,7 +725,17 @@ def _strip_script_speaker_prefix(text: str) -> str:
 
 def _looks_like_script_replan_confirmation(text: str) -> bool:
     compact = _compact_script_text(_strip_script_speaker_prefix(text))
-    return compact in {"好，幫我們重新排一下。", "好，幫我們重新排一下", "好幫我們重新排一下"}
+    return compact in {
+        "好，幫我們重新排一下。",
+        "好，幫我們重新排一下",
+        "好幫我們重新排一下",
+        "那就照這個行程順序安排喔。",
+        "那就照這個行程順序安排喔",
+        "那就照這個行程順序安排",
+        "那就照這個順序安排喔。",
+        "那就照這個順序安排喔",
+        "那就照這個順序安排",
+    }
 
 
 def _shooting_script_reply(user_text: str) -> str:
