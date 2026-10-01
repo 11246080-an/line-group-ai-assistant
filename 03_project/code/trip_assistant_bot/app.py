@@ -4120,7 +4120,7 @@ def _looks_like_itinerary_condition_update(
     has_trip_context = any(term in normalized_text for term in ("行程", "安排", "路線", "去", "從", "到"))
     if has_condition and _looks_like_fixed_movie_context("", analysis_result):
         return True
-    if has_condition and any(term in normalized_text for term in ("午餐", "餐廳", "素食", "預算", "交通", "捷運", "走路", "公車", "點前", "中午")):
+    if has_condition and any(term in normalized_text for term in ("午餐", "餐廳", "素食", "預算", "沒錢", "不要超過", "元以下", "1000", "一千", "300", "三百", "交通", "捷運", "走路", "公車", "點前", "中午")):
         return True
     return bool(has_condition and has_trip_context)
 
@@ -7558,6 +7558,14 @@ def handle_message(event: MessageEvent) -> None:
 
         if _looks_like_itinerary_acceptance_or_comment(user_text):
             _debug_print("Itinerary acceptance/comment detected before AI; keep quiet.")
+            return
+
+        if (
+            _looks_like_itinerary_condition_update(user_text, {})
+            and not _has_direct_itinerary_planning_request(user_text)
+            and "最好不用排太久" not in user_text
+        ):
+            _debug_print("Itinerary condition update detected before AI; keep collecting requirements.")
             return
 
         if (
