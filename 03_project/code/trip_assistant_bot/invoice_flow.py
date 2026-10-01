@@ -403,9 +403,22 @@ def _normalize_cloud_result(payload: dict[str, Any], qr_result: dict[str, Any]) 
 
 def recognize_invoice_image(image_bytes: bytes) -> tuple[dict[str, Any], str]:
     safe_image, mime_type = _validate_image(image_bytes)
-    qr_payloads = decode_qr_payloads(safe_image)
+    # Read QR from the original upload first. Resizing/compressing can make
+    # invoice QR codes harder to decode on some phone photos.
+    qr_payloads = decode_qr_payloads(image_bytes)
+    if not qr_payloads:
+        qr_payloads = decode_qr_payloads(safe_image)
     qr_result = parse_taiwan_invoice_qr(qr_payloads)
-    cloud_result = recognize_invoice_cloud(safe_image, mime_type)
+    try:
+        cloud_result = recognize_invoice_cloud(safe_image, mime_type)
+    except Exception as exc:
+        if not qr_result:
+            raise
+        _LOGGER.warning(
+            "Invoice cloud OCR failed; using QR result only (%s)",
+            type(exc).__name__,
+        )
+        cloud_result = {}
     draft = _normalize_cloud_result(cloud_result, qr_result)
     fingerprint_source = "\n".join(qr_payloads).encode("utf-8") if qr_payloads else safe_image
     fingerprint = hashlib.sha256(fingerprint_source).hexdigest()

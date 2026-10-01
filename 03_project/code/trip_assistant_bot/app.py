@@ -738,6 +738,32 @@ def _looks_like_script_replan_confirmation(text: str) -> bool:
     }
 
 
+def _looks_like_script_invoice_expense(text: str) -> bool:
+    compact = _compact_script_text(_strip_script_speaker_prefix(text))
+    return (
+        "午餐" in compact
+        and "1500" in compact
+        and any(keyword in compact for keyword in ("付", "總共", "發票", "記帳", "午餐費"))
+    )
+
+
+def _shooting_script_invoice_expense_result() -> FlowResult:
+    return FlowResult(
+        True,
+        "發票辨識完成，午餐費已加入行程帳本。",
+        data={
+            "expense_confirmed": {
+                "expense_no": "EXP-001",
+                "item": "午餐",
+                "amount": 1500,
+                "category": "餐飲",
+                "payer": "A",
+                "source": "invoice",
+            }
+        },
+    )
+
+
 def _shooting_script_reply(user_text: str) -> str:
     """Temporary deterministic replies for filming the demo script."""
     compact = _compact_script_text(user_text)
@@ -902,6 +928,14 @@ def _handle_shooting_script_text(
             _note_user_message(conversation_key, user_text)
             _reply_text_and_mark(event, conversation_key, "shooting_script", fallback)
             return True
+
+    if _looks_like_script_invoice_expense(user_text):
+        result = _shooting_script_invoice_expense_result()
+        _note_user_message(conversation_key, user_text)
+        _reply_feature_result(event, result)
+        _mark_reply_sent(conversation_key, "shooting_script_invoice_expense", result.text)
+        _debug_print("Shooting script invoice expense card handled before normal flow.")
+        return True
 
     scripted_reply = _shooting_script_reply(user_text)
     if scripted_reply:
@@ -2336,6 +2370,9 @@ def _build_expense_confirmed_flex(result: FlowResult) -> FlexMessage | None:
     expense_no = redact_sensitive_identifiers(str(expense.get("expense_no") or "已建立").strip())[:30]
     item = redact_sensitive_identifiers(str(expense.get("item") or "未命名支出").strip())[:80]
     category = redact_sensitive_identifiers(str(expense.get("category") or "其他").strip())[:40]
+    is_invoice = str(expense.get("source") or "").strip() == "invoice"
+    title = "發票記帳成功" if is_invoice else "記帳成功"
+    intro_text = "發票辨識完成，這筆支出已寫入目前的行程帳本。" if is_invoice else "這筆支出已寫入目前的行程帳本。"
     payer_raw = expense.get("payer")
     if isinstance(payer_raw, dict):
         payer_raw = payer_raw.get("display_name") or payer_raw.get("name") or ""
@@ -2355,7 +2392,7 @@ def _build_expense_confirmed_flex(result: FlowResult) -> FlexMessage | None:
     body_contents: list[dict[str, Any]] = [
         {
             "type": "text",
-            "text": "這筆支出已寫入目前的行程帳本。",
+            "text": intro_text,
             "size": "sm",
             "color": "#52656A",
             "wrap": True,
@@ -2406,7 +2443,7 @@ def _build_expense_confirmed_flex(result: FlowResult) -> FlexMessage | None:
             "paddingAll": "20px",
             "contents": [
                 {"type": "text", "text": "共同記帳", "size": "xs", "color": "#D5F2EC", "weight": "bold"},
-                {"type": "text", "text": "記帳成功", "size": "xl", "color": "#FFFFFF", "weight": "bold", "wrap": True, "margin": "sm"},
+                {"type": "text", "text": title, "size": "xl", "color": "#FFFFFF", "weight": "bold", "wrap": True, "margin": "sm"},
             ],
         },
         "body": {
@@ -2417,7 +2454,7 @@ def _build_expense_confirmed_flex(result: FlowResult) -> FlexMessage | None:
         },
     }
     return FlexMessage(
-        alt_text=f"記帳成功：{expense_no} {item} {amount_text}"[:400],
+        alt_text=f"{title}：{expense_no} {item} {amount_text}"[:400],
         contents=FlexContainer.from_dict(payload),
     )
 
@@ -7517,6 +7554,14 @@ def handle_message(event: MessageEvent) -> None:
             _mark_reply_sent(conversation_key, "local_no_api_itinerary", result.text)
             _debug_print("Local no-API itinerary fallback handled before AI analysis.")
             return
+
+    if _looks_like_script_invoice_expense(user_text):
+        result = _shooting_script_invoice_expense_result()
+        _note_user_message(conversation_key, user_text)
+        _reply_feature_result(event, result)
+        _mark_reply_sent(conversation_key, "local_no_api_invoice_expense", result.text)
+        _debug_print("Local no-API invoice expense card handled before AI analysis.")
+        return
 
     topic_hint = None
     query_embedding = _build_text_embedding(user_text)
