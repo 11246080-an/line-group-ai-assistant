@@ -910,23 +910,6 @@ def _meal_constraints_from_itinerary(itinerary: dict[str, Any], spot: dict[str, 
     return constraints
 
 
-def _is_unsuitable_meal_candidate(candidate: dict[str, Any]) -> bool:
-    text = " ".join(
-        str(candidate.get(key) or "")
-        for key in ("name", "description", "subtitle", "address")
-    )
-    unsuitable_terms = (
-        "臺北商業大學餐廳",
-        "台北商業大學餐廳",
-        "大學餐廳",
-        "學校餐廳",
-        "學生餐廳",
-        "員生餐廳",
-        "教職員餐廳",
-    )
-    return any(term in text for term in unsuitable_terms)
-
-
 def _enrich_generic_meal_spots_with_places(
     itinerary: dict[str, Any],
     *,
@@ -972,10 +955,7 @@ def _enrich_generic_meal_spots_with_places(
             updated_spots.append(spot)
             continue
 
-        candidate = next(
-            (item for item in candidates if not _is_unsuitable_meal_candidate(item)),
-            candidates[0],
-        )
+        candidate = candidates[0]
         description_parts = [
             "午餐推薦",
             str(candidate.get("description") or "").strip(),

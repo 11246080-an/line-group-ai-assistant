@@ -781,7 +781,7 @@ def _shooting_script_itinerary_draft() -> dict[str, Any]:
     return {
         "title": "台北中午出發半日文創與老街輕旅行",
         "region": "台北市",
-        "summary": "中午出發，先安排午餐與華山展覽，再前往北車買書，接續老街與文創園區行程。",
+        "summary": "中午出發，依序安排買書、午餐、文創展覽與老街散步，交通以捷運和步行為主。",
         "duration": "半日遊",
         "estimated_budget": 1000,
         "currency": "TWD",
@@ -790,6 +790,14 @@ def _shooting_script_itinerary_draft() -> dict[str, Any]:
         "spots": [
             {
                 "sequence": 1,
+                "name": "三民書局（台北車站）",
+                "description": "購買老師指定課本。",
+                "address": "台北車站周邊",
+                "latitude": 25.0478,
+                "longitude": 121.5170,
+            },
+            {
+                "sequence": 2,
                 "name": "不葷主義茶餐廳 台北店",
                 "description": "午餐推薦｜評分 4.9｜中價位｜素食餐廳｜Google Places",
                 "address": "台北市中正區",
@@ -797,20 +805,12 @@ def _shooting_script_itinerary_draft() -> dict[str, Any]:
                 "longitude": 121.5193,
             },
             {
-                "sequence": 2,
+                "sequence": 3,
                 "name": "華山1914文化創意產業園區",
                 "description": "逛展覽活動，安排不排隊太久。",
                 "address": "台北市中正區八德路一段1號",
                 "latitude": 25.0422,
                 "longitude": 121.5328,
-            },
-            {
-                "sequence": 3,
-                "name": "台北車站／北車三民書局買書",
-                "description": "購買老師指定課本，完成後再接續文創與老街行程。",
-                "address": "台北車站周邊",
-                "latitude": 25.0478,
-                "longitude": 121.5170,
             },
             {
                 "sequence": 4,
@@ -830,9 +830,9 @@ def _shooting_script_itinerary_draft() -> dict[str, Any]:
             },
         ],
         "transport": [
-            {"from_sequence": 1, "to_sequence": 2, "mode": "捷運／步行", "estimated_minutes": 20, "note": "午餐後前往華山"},
-            {"from_sequence": 2, "to_sequence": 3, "mode": "捷運／步行", "estimated_minutes": 15, "note": "華山後前往北車買書"},
-            {"from_sequence": 3, "to_sequence": 4, "mode": "捷運／步行", "estimated_minutes": 25, "note": "北車到大稻埕"},
+            {"from_sequence": 1, "to_sequence": 2, "mode": "步行", "estimated_minutes": 10, "note": "買書後前往午餐"},
+            {"from_sequence": 2, "to_sequence": 3, "mode": "捷運／步行", "estimated_minutes": 20, "note": "午餐後前往華山"},
+            {"from_sequence": 3, "to_sequence": 4, "mode": "捷運／步行", "estimated_minutes": 25, "note": "華山到大稻埕"},
             {"from_sequence": 4, "to_sequence": 5, "mode": "捷運", "estimated_minutes": 30, "note": "大稻埕到松山文創園區"},
         ],
     }
@@ -864,12 +864,7 @@ def _handle_shooting_script_text(
         _debug_print("Shooting script anonymous poll handled before normal flow.")
         return True
 
-    should_stage_script_itinerary = (
-        ("好" in compact and "幫我們重新排一下" in compact)
-        or "照這個行程順序安排" in compact
-        or "照這個順序安排" in compact
-    )
-    if should_stage_script_itinerary:
+    if "好" in compact and "幫我們重新排一下" in compact:
         result = stage_generated_itinerary(
             line_group_id=line_group_id,
             line_user_id=line_user_id,
@@ -3765,28 +3760,6 @@ def _looks_like_point_to_point_directions_request(user_text: str) -> bool:
     normalized_text = str(user_text or "").strip()
     if not normalized_text:
         return False
-    requirement_discussion_terms = (
-        "希望",
-        "盡量",
-        "不太想",
-        "可以先",
-        "吃完飯",
-        "午餐",
-        "預算",
-        "不要超過",
-        "以下",
-        "不用排太久",
-        "排太久",
-        "下課",
-        "安排",
-        "買書",
-        "課本",
-    )
-    explicit_direction_terms = ("怎麼去", "怎麼走", "交通方式", "交通路線", "路線", "導航", "搭什麼")
-    if any(term in normalized_text for term in requirement_discussion_terms) and not any(
-        term in normalized_text for term in explicit_direction_terms
-    ):
-        return False
     has_origin_destination = bool(
         re.search(r"從.+?(?:到|去|前往).+", normalized_text)
         or re.search(r".+?(?:到|去|前往).+?(?:怎麼去|怎麼走|交通|路線|搭什麼)", normalized_text)
@@ -4138,7 +4111,7 @@ def _looks_like_itinerary_condition_update(
     has_trip_context = any(term in normalized_text for term in ("行程", "安排", "路線", "去", "從", "到"))
     if has_condition and _looks_like_fixed_movie_context("", analysis_result):
         return True
-    if has_condition and any(term in normalized_text for term in ("午餐", "餐廳", "素食", "預算", "交通", "捷運", "走路", "公車", "點前", "中午", "不用排太久", "排太久", "排隊")):
+    if has_condition and any(term in normalized_text for term in ("午餐", "餐廳", "素食", "預算", "交通", "捷運", "走路", "公車", "點前", "中午")):
         return True
     return bool(has_condition and has_trip_context)
 
@@ -4149,11 +4122,6 @@ def _extract_text_location_query_payload(
     recent_messages: list[str] | None = None,
 ) -> dict[str, Any] | None:
     if _looks_like_itinerary_condition_update(user_text, analysis_result):
-        return None
-    if recent_messages and _looks_like_itinerary_condition_update(
-        _recent_message_body_text(recent_messages[-6:]),
-        analysis_result,
-    ):
         return None
     if _looks_like_point_to_point_directions_request(user_text):
         return None
@@ -7070,6 +7038,19 @@ def _try_handle_fast_direct_request(
             _reply_feature_result(event, route_result)
             _mark_reply_sent(conversation_key, "fast_point_to_point_route", route_result.text)
             _debug_print("Fast point-to-point route flow handled before AI analysis")
+            return True
+
+    if _direct_weather_query_has_known_location(user_text):
+        if _handle_weather_recommendation_request(
+            event,
+            conversation_key,
+            "fast_weather_request",
+            line_group_id,
+            query_text=user_text,
+            location_text="",
+            time_text="",
+        ):
+            _debug_print("Fast weather recommendation flow handled before AI analysis")
             return True
 
     return False
