@@ -4138,7 +4138,7 @@ def _looks_like_itinerary_condition_update(
     has_trip_context = any(term in normalized_text for term in ("行程", "安排", "路線", "去", "從", "到"))
     if has_condition and _looks_like_fixed_movie_context("", analysis_result):
         return True
-    if has_condition and any(term in normalized_text for term in ("午餐", "餐廳", "素食", "預算", "交通", "捷運", "走路", "公車", "點前", "中午")):
+    if has_condition and any(term in normalized_text for term in ("午餐", "餐廳", "素食", "預算", "交通", "捷運", "走路", "公車", "點前", "中午", "不用排太久", "排太久", "排隊")):
         return True
     return bool(has_condition and has_trip_context)
 
@@ -4149,6 +4149,11 @@ def _extract_text_location_query_payload(
     recent_messages: list[str] | None = None,
 ) -> dict[str, Any] | None:
     if _looks_like_itinerary_condition_update(user_text, analysis_result):
+        return None
+    if recent_messages and _looks_like_itinerary_condition_update(
+        _recent_message_body_text(recent_messages[-6:]),
+        analysis_result,
+    ):
         return None
     if _looks_like_point_to_point_directions_request(user_text):
         return None
