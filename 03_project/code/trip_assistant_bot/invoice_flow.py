@@ -485,7 +485,7 @@ def _save_invoice_draft(session: InvoiceCaptureSession, draft: dict[str, Any], f
             + next_step.text
             + warning,
             actions=next_step.actions,
-            data={"draft": payload},
+            data=next_step.data,
         )
     actions = [ActionSpec("合併成一筆", "postback", "invoice|mode|merge")]
     if items:
@@ -499,7 +499,12 @@ def _save_invoice_draft(session: InvoiceCaptureSession, draft: dict[str, Any], f
         text += f"\n\n共辨識到 {len(items)} 個商品，請選擇合併或展開。"
     else:
         text += "\n\n沒有可靠的商品明細，建議合併成一筆。"
-    return FlowResult(True, text, actions=actions, data={"draft": payload})
+    return FlowResult(
+        True,
+        text,
+        actions=actions,
+        data={"expense_draft": redact_structure(payload), "draft_type": "invoice"},
+    )
 
 
 def handle_invoice_image_bytes(
