@@ -2886,7 +2886,21 @@ def _recommendation_source_label(result: dict[str, Any]) -> str:
     return "推薦來源：系統整理"
 
 
-def _recommendation_card_title(result: dict[str, Any]) -> str:
+def _is_event_recommendation(result: dict[str, Any], items: list[dict[str, Any]] | None = None) -> bool:
+    if str(result.get("tourism_kind") or "").strip() == "event":
+        return True
+    provider = str(result.get("provider") or "").strip()
+    if "event" in provider:
+        return True
+    for item in items or []:
+        item_provider = str(item.get("provider") or "").strip()
+        description = str(item.get("description") or "").strip()
+        if "event" in item_provider or "活動期間" in description:
+            return True
+    return False
+
+
+def _recommendation_card_title(result: dict[str, Any], *, label: str = "景點推薦") -> str:
     city = str(result.get("tourism_city") or "").strip()
     query_text = str(result.get("query_text") or "").strip()
     title_parts: list[str] = []
@@ -2903,7 +2917,7 @@ def _recommendation_card_title(result: dict[str, Any]) -> str:
         if len(title_parts) >= 3:
             break
     title = "".join(title_parts).strip()
-    return f"{title or '附近'}景點推薦"
+    return f"{title or '附近'}{label}"
 
 
 def _build_recommendation_flex(result: dict[str, Any]) -> FlexMessage | None:
@@ -2912,7 +2926,8 @@ def _build_recommendation_flex(result: dict[str, Any]) -> FlexMessage | None:
     if not items:
         return None
 
-    query_text = redact_sensitive_identifiers(_recommendation_card_title(result))[:60]
+    recommendation_label = "活動推薦" if _is_event_recommendation(result, items) else "景點推薦"
+    query_text = redact_sensitive_identifiers(_recommendation_card_title(result, label=recommendation_label))[:60]
     source_label = _recommendation_source_label(result)
     city = redact_sensitive_identifiers(str(result.get("tourism_city") or "").strip())[:32]
     subtitle = city or "依群組討論條件整理"
@@ -2934,7 +2949,7 @@ def _build_recommendation_flex(result: dict[str, Any]) -> FlexMessage | None:
                 },
                 {
                     "type": "text",
-                    "text": "景點推薦",
+                    "text": recommendation_label,
                     "size": "sm",
                     "color": "#52656A",
                     "align": "end",
@@ -3022,7 +3037,7 @@ def _build_recommendation_flex(result: dict[str, Any]) -> FlexMessage | None:
             "type": "box",
             "layout": "vertical",
             "contents": [
-                {"type": "text", "text": "景點推薦", "size": "xs", "color": "#D5F2EC", "weight": "bold"},
+                {"type": "text", "text": recommendation_label, "size": "xs", "color": "#D5F2EC", "weight": "bold"},
                 {"type": "text", "text": query_text, "size": "xl", "color": "#FFFFFF", "weight": "bold", "wrap": True, "margin": "sm"},
             ],
             "backgroundColor": "#147D6F",
@@ -3036,7 +3051,7 @@ def _build_recommendation_flex(result: dict[str, Any]) -> FlexMessage | None:
         },
     }
     return FlexMessage(
-        alt_text=f"景點推薦：{query_text}"[:400],
+        alt_text=f"{recommendation_label}：{query_text}"[:400],
         contents=FlexContainer.from_dict(payload),
     )
 
@@ -7425,6 +7440,14 @@ def handle_message(event: MessageEvent) -> None:
         ):
             return
 
+    if _looks_like_script_invoice_expense(user_text):
+        result = _shooting_script_invoice_expense_result()
+        _note_user_message(conversation_key, user_text)
+        _reply_feature_result(event, result)
+        _mark_reply_sent(conversation_key, "local_no_api_invoice_expense", result.text)
+        _debug_print("Local no-API invoice expense card handled before feature routing.")
+        return
+
     try:
         if _handle_feature_text(
             event,
@@ -7554,14 +7577,6 @@ def handle_message(event: MessageEvent) -> None:
             _mark_reply_sent(conversation_key, "local_no_api_itinerary", result.text)
             _debug_print("Local no-API itinerary fallback handled before AI analysis.")
             return
-
-    if _looks_like_script_invoice_expense(user_text):
-        result = _shooting_script_invoice_expense_result()
-        _note_user_message(conversation_key, user_text)
-        _reply_feature_result(event, result)
-        _mark_reply_sent(conversation_key, "local_no_api_invoice_expense", result.text)
-        _debug_print("Local no-API invoice expense card handled before AI analysis.")
-        return
 
     topic_hint = None
     query_embedding = _build_text_embedding(user_text)
