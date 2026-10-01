@@ -3765,6 +3765,28 @@ def _looks_like_point_to_point_directions_request(user_text: str) -> bool:
     normalized_text = str(user_text or "").strip()
     if not normalized_text:
         return False
+    requirement_discussion_terms = (
+        "希望",
+        "盡量",
+        "不太想",
+        "可以先",
+        "吃完飯",
+        "午餐",
+        "預算",
+        "不要超過",
+        "以下",
+        "不用排太久",
+        "排太久",
+        "下課",
+        "安排",
+        "買書",
+        "課本",
+    )
+    explicit_direction_terms = ("怎麼去", "怎麼走", "交通方式", "交通路線", "路線", "導航", "搭什麼")
+    if any(term in normalized_text for term in requirement_discussion_terms) and not any(
+        term in normalized_text for term in explicit_direction_terms
+    ):
+        return False
     has_origin_destination = bool(
         re.search(r"從.+?(?:到|去|前往).+", normalized_text)
         or re.search(r".+?(?:到|去|前往).+?(?:怎麼去|怎麼走|交通|路線|搭什麼)", normalized_text)

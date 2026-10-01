@@ -115,6 +115,8 @@ def _valid_location_names(analysis_result: dict[str, Any], *, user_text: str = "
 def should_optimize_route(analysis_result: dict[str, Any], *, user_text: str = "") -> bool:
     scenario_code = str(analysis_result.get("scenario_code") or "").strip()
     reply_trigger = str(analysis_result.get("reply_trigger") or "").strip()
+    if not _has_route_signal(user_text):
+        return False
     if not bool(analysis_result.get("should_intervene")):
         return False
     try:
