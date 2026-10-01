@@ -719,6 +719,15 @@ def _compact_script_text(text: str) -> str:
     return re.sub(r"\s+", "", str(text or ""))
 
 
+def _strip_script_speaker_prefix(text: str) -> str:
+    return re.sub(r"^[A-EＡ-Ｅ]\s*[：:]\s*", "", str(text or "").strip())
+
+
+def _looks_like_script_replan_confirmation(text: str) -> bool:
+    compact = _compact_script_text(_strip_script_speaker_prefix(text))
+    return compact in {"好，幫我們重新排一下。", "好，幫我們重新排一下", "好幫我們重新排一下"}
+
+
 def _shooting_script_reply(user_text: str) -> str:
     """Temporary deterministic replies for filming the demo script."""
     compact = _compact_script_text(user_text)
@@ -864,7 +873,7 @@ def _handle_shooting_script_text(
         _debug_print("Shooting script anonymous poll handled before normal flow.")
         return True
 
-    if "好" in compact and "幫我們重新排一下" in compact:
+    if _looks_like_script_replan_confirmation(user_text):
         result = stage_generated_itinerary(
             line_group_id=line_group_id,
             line_user_id=line_user_id,
@@ -7484,26 +7493,20 @@ def handle_message(event: MessageEvent) -> None:
         _debug_print("Local no-API fallback reply handled before AI analysis.")
         return
 
-    compact_user_text = re.sub(r"\s+", "", user_text)
-    if compact_user_text in {"好，幫我們重新排一下。", "好，幫我們重新排一下", "好幫我們重新排一下"}:
-        fallback_draft = _build_fallback_itinerary_draft_from_context(
-            list(_get_or_create_state(conversation_key).history) + [user_text],
-            {"extracted_info": {}},
+    if _looks_like_script_replan_confirmation(user_text):
+        result = stage_generated_itinerary(
+            line_group_id=line_group_id,
+            line_user_id=line_user_id,
+            itinerary_draft=_shooting_script_itinerary_draft(),
+            reply_text="我先依照大家已提出的時間、預算、交通、午餐和地點需求，整理一版半日行程草稿。",
+            context_text=user_text,
         )
-        if fallback_draft:
-            result = stage_generated_itinerary(
-                line_group_id=line_group_id,
-                line_user_id=line_user_id,
-                itinerary_draft=fallback_draft,
-                reply_text="我先依照大家已提出的時間、預算、交通、午餐和地點需求，整理一版半日行程草稿。",
-                context_text=user_text,
-            )
-            if result.handled:
-                _note_user_message(conversation_key, user_text)
-                _reply_feature_result(event, result)
-                _mark_reply_sent(conversation_key, "local_no_api_itinerary", result.text)
-                _debug_print("Local no-API itinerary fallback handled before AI analysis.")
-                return
+        if result.handled:
+            _note_user_message(conversation_key, user_text)
+            _reply_feature_result(event, result)
+            _mark_reply_sent(conversation_key, "local_no_api_itinerary", result.text)
+            _debug_print("Local no-API itinerary fallback handled before AI analysis.")
+            return
 
     topic_hint = None
     query_embedding = _build_text_embedding(user_text)
