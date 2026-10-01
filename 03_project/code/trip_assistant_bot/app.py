@@ -728,7 +728,7 @@ def _shooting_script_reply(user_text: str) -> str:
     if "聽起來都很有趣" in compact and "選擇" in compact:
         return "看起來大家提出好多個出遊地點，需要我開啟投票功能嗎？"
 
-    if "最好不用排太久" in compact and "素食" in compact:
+    if "最好不用排太久" in compact:
         return (
             "已整理大家的行程需求。目前的景點順序可能產生折返，"
             "需要我根據活動資訊、地點位置、時間、預算、交通方式和午餐需求，"
