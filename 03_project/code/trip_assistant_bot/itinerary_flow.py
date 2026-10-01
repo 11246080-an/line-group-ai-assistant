@@ -996,6 +996,14 @@ def _has_spot_matching_keywords(spots: list[dict[str, Any]], keywords: tuple[str
     return False
 
 
+def _find_first_spot_index_matching_keywords(spots: list[dict[str, Any]], keywords: tuple[str, ...]) -> int | None:
+    for index, spot in enumerate(spots):
+        text = f"{spot.get('name') or ''}\n{spot.get('description') or ''}\n{spot.get('address') or ''}"
+        if any(keyword in text for keyword in keywords):
+            return index
+    return None
+
+
 def _restore_missing_explicit_task_spots(
     itinerary: dict[str, Any],
     *,
@@ -1019,7 +1027,11 @@ def _restore_missing_explicit_task_spots(
     if _has_spot_matching_keywords(spots, ("買書",)) or _has_spot_matching_keywords(spots, ("三民書局",)):
         return itinerary
 
-    insert_index = 1 if _is_generic_meal_spot(spots[0]) else 0
+    huashan_index = _find_first_spot_index_matching_keywords(spots, ("華山", "Huashan"))
+    if huashan_index is not None:
+        insert_index = huashan_index + 1
+    else:
+        insert_index = 1 if _is_generic_meal_spot(spots[0]) else 0
     task_spot = {
         "name": "台北車站／北車三民書局買書",
         "sequence": insert_index + 1,
