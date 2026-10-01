@@ -4297,6 +4297,8 @@ def _should_observe_weather_risk_without_reply(
     user_text: str,
     analysis_result: dict[str, Any],
 ) -> bool:
+    if _has_direct_help_request(user_text) or _has_direct_itinerary_planning_request(user_text):
+        return False
     return (
         _has_weather_request_signal(user_text, analysis_result)
         and not _is_direct_weather_question(user_text)
@@ -5468,7 +5470,7 @@ _DECISION_COMPLETED_PATTERNS = (
 )
 
 _DIRECT_HELP_PATTERNS = (
-    r"(?:幫我|幫我們|幫忙|可以幫|請幫|麻煩|請).{0,18}(?:查|整理|推薦|規劃|安排|比較|估|算|排|建立|發起|確認|儲存)",
+    r"(?:幫我|幫我們|幫忙|可以幫|請幫|麻煩|請).{0,18}(?:查|整理|推薦|規劃|安排|調整|重排|比較|估|算|排|建立|發起|確認|儲存)",
     r"(?:怎麼去|怎麼走|路線|導航|交通方式|搭什麼|開車|捷運|公車).{0,12}(?:嗎|呢|\?|？)?$",
     r"(?:票價|門票|營業時間|天氣|附近|推薦|有什麼|哪個比較|怎麼排).{0,18}(?:嗎|呢|\?|？)",
     r"(?:排一版|排個|整理一下|查一下|估一下|算一下|看一下|建立投票|發起投票|確認行程|儲存行程)",
@@ -5527,10 +5529,10 @@ def _has_direct_itinerary_planning_request(user_text: str) -> bool:
     return bool(
         re.search(
             r"(幫我|幫我們|可以幫我|可以幫我們|麻煩|請).{0,16}"
-            r"(重新排|重排|排一下|排一版|排行程|整理完整行程|安排完整行程|評估|怎麼安排|安排比較順|規劃)",
+            r"(重新排|重排|排一下|排一版|排行程|調整行程|調整一下行程|重新安排|整理完整行程|安排完整行程|評估|怎麼安排|安排比較順|規劃)",
             text,
         )
-        or re.search(r"(重新排|重排|排一版|排行程|整理完整行程|安排完整行程|怎麼安排比較順|安排比較順)", text)
+        or re.search(r"(重新排|重排|排一版|排行程|調整行程|調整一下行程|重新安排|整理完整行程|安排完整行程|怎麼安排比較順|安排比較順)", text)
     )
 
 
