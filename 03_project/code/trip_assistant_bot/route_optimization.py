@@ -227,6 +227,9 @@ def geocode_place(name: str, *, session: Any = None) -> RouteSpot | None:
         return None
     display_name = place.get("displayName") or {}
     resolved_name = str(display_name.get("text") or name).strip()
+    blocked_terms = ("旅行社", "旅遊", "包車", "Planning Tour", "tour", "Tour")
+    if any(term in resolved_name for term in blocked_terms) and not any(term in name for term in blocked_terms):
+        return None
     return RouteSpot(resolved_name, float(latitude), float(longitude), str(place.get("formattedAddress") or "").strip())
 
 

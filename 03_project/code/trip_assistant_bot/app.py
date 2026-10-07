@@ -5670,6 +5670,8 @@ def _extract_route_candidates_from_recent_messages(recent_messages: list[str]) -
             return
         if any(token in name for token in ("哪些", "什麼", "哪裡", "哪邊", "要去哪些")):
             return
+        if any(token in name for token in ("旅遊", "旅行社", "包車", "Planning Tour", "tour", "Tour")):
+            return
         if name not in candidates:
             candidates.append(name)
 
@@ -5677,7 +5679,7 @@ def _extract_route_candidates_from_recent_messages(recent_messages: list[str]) -
         text = str(raw_message or "").strip()
         if not text:
             continue
-        for match in re.finditer(r"(?:想要去|想去|要去)([^，。！？\n]+)", text):
+        for match in re.finditer(r"(?:想要去|想去)([^，。！？\n]+)", text):
             chunk = match.group(1)
             if any(token in chunk for token in ("哪些", "什麼", "哪裡", "哪邊")):
                 continue
