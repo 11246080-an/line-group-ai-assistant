@@ -4224,6 +4224,14 @@ def _extract_text_location_query_payload(
     analysis_result: dict[str, Any],
     recent_messages: list[str] | None = None,
 ) -> dict[str, Any] | None:
+    extracted_for_type = analysis_result.get("extracted_info") if isinstance(analysis_result, dict) else {}
+    need_type = ""
+    if isinstance(extracted_for_type, dict):
+        need_type = str(extracted_for_type.get("need_type") or "").strip()
+    scenario_code = str(analysis_result.get("scenario_code") or "").strip() if isinstance(analysis_result, dict) else ""
+    scenario_name = str(analysis_result.get("scenario_name") or "").strip() if isinstance(analysis_result, dict) else ""
+    if scenario_code == "劇本四" or scenario_name == "自動行程生成" or "行程規劃" in need_type:
+        return None
     if _looks_like_group_destination_discussion(user_text):
         return None
     if _looks_like_itinerary_condition_update(user_text, analysis_result):
@@ -6040,6 +6048,37 @@ def _build_fallback_itinerary_draft_from_context(
         )
 
     if len(spots) < 2:
+        generic_locations: list[str] = []
+        for value in [*(extracted.get("options") or []), *(extracted.get("location") or [])]:
+            name = str(value or "").strip()
+            if not name or name in {"台北", "臺北", "台北市", "臺北市", "週末", "一日行程"}:
+                continue
+            if name not in generic_locations:
+                generic_locations.append(name)
+        for name in generic_locations[:6]:
+            description = "依群組討論納入行程，實際停留時間可依當天狀況調整。"
+            if "象山" in name:
+                description = "安排戶外步道與城市景觀，適合作為上午活動。"
+            elif "四四南村" in name:
+                description = "可逛文創與眷村展區，適合午餐後輕鬆散步。"
+            elif "101" in name:
+                description = "安排觀景與信義區活動，適合作為下午或傍晚行程。"
+            add_spot(name, description)
+
+        if len(spots) >= 2 and any(keyword in source_text for keyword in ("午餐", "餐廳", "吃午餐", "吃飯")):
+            meal_spot = {
+                "sequence": 2,
+                "name": "沿路午餐餐廳",
+                "description": "在景點之間安排午餐，餐廳可依當天營業狀況再確認。",
+                "address": "",
+                "latitude": None,
+                "longitude": None,
+            }
+            spots.insert(1, meal_spot)
+            for index, spot in enumerate(spots, start=1):
+                spot["sequence"] = index
+
+    if len(spots) < 2:
         return None
 
     transport = [
@@ -6053,6 +6092,19 @@ def _build_fallback_itinerary_draft_from_context(
         for index in range(1, len(spots))
     ]
     budget = 1000 if any(keyword in compact for keyword in ("1000", "一千")) else None
+    if not any(keyword in source_text for keyword in ("三民書局", "買書", "課本", "北車", "華山", "大稻埕", "松菸", "松山文創")):
+        return {
+            "title": "週末一日遊行程草稿",
+            "region": "台北市",
+            "summary": "依照群組已提出的景點與午餐需求，先整理一版可討論的一日行程草稿。",
+            "duration": "一日遊",
+            "estimated_budget": budget,
+            "currency": "TWD",
+            "type": "城市輕旅行",
+            "best_for": "適合想把已提出景點整理成一版行程，再由成員共同確認與調整。",
+            "spots": spots,
+            "transport": transport,
+        }
     return {
         "title": "台北中午出發半日文創與老街輕旅行",
         "region": "台北市",
