@@ -5662,15 +5662,36 @@ def _extract_route_candidates_from_recent_messages(recent_messages: list[str]) -
     }
     candidates: list[str] = []
 
+    def is_invalid_candidate(name: str) -> bool:
+        if not name or name in ignored or len(name) < 2 or len(name) > 30:
+            return True
+        invalid_tokens = (
+            "哪些",
+            "什麼",
+            "哪裡",
+            "哪邊",
+            "要去哪些",
+            "這樣",
+            "怎麼",
+            "我們行程",
+            "行程要",
+            "路線",
+            "比較順",
+            "順路",
+            "旅遊",
+            "旅行社",
+            "包車",
+            "Planning Tour",
+            "tour",
+            "Tour",
+        )
+        return any(token in name for token in invalid_tokens)
+
     def add_candidate(value: str) -> None:
         name = re.sub(r"^[A-EＡ-Ｅ]\s*[：:]\s*", "", str(value or "")).strip()
         name = re.sub(r"(也)?想去.*$", "", name).strip()
         name = name.strip(" \t\r\n，,、。.!！?？：:；;（）()")
-        if not name or name in ignored or len(name) < 2 or len(name) > 30:
-            return
-        if any(token in name for token in ("哪些", "什麼", "哪裡", "哪邊", "要去哪些")):
-            return
-        if any(token in name for token in ("旅遊", "旅行社", "包車", "Planning Tour", "tour", "Tour")):
+        if is_invalid_candidate(name):
             return
         if name not in candidates:
             candidates.append(name)
@@ -5703,6 +5724,8 @@ def _build_direct_route_analysis_from_context(
             candidate = re.sub(r"(@?AI旅遊行程助理|Bot|可以|請|幫我|幫我們|這三個景點|這幾個景點|景點)", "", part)
             candidate = candidate.strip()
             if candidate and candidate not in candidates and len(candidate) >= 2:
+                if any(token in candidate for token in ("這樣", "怎麼", "我們行程", "行程要", "路線", "比較順", "順路")):
+                    continue
                 candidates.append(candidate)
     if len(candidates) < 2:
         return None
