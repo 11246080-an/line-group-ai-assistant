@@ -3827,6 +3827,34 @@ TEXT_LOCATION_REQUEST_TERMS = (
 )
 
 
+def _looks_like_group_destination_discussion(user_text: str) -> bool:
+    normalized_text = str(user_text or "").strip()
+    if not normalized_text:
+        return False
+    explicit_bot_request_terms = (
+        "@AI",
+        "AI旅遊行程助理",
+        "Bot",
+        "bot",
+        "推薦",
+        "查",
+        "查詢",
+        "搜尋",
+        "找",
+        "幫我",
+        "幫我們",
+        "可以幫我",
+        "可以幫我們",
+        "介紹",
+    )
+    if any(term in normalized_text for term in explicit_bot_request_terms):
+        return False
+    return bool(
+        re.search(r"(我們|大家).{0,12}(?:行|旅遊|旅行|出遊|一日遊|兩日遊).{0,12}(?:要去|想去|可以去).{0,8}(?:哪些|什麼|哪裡|哪邊).{0,8}(?:地方|景點|地點)", normalized_text)
+        or re.search(r"(?:要去|想去|可以去).{0,8}(?:哪些|什麼|哪裡|哪邊).{0,8}(?:地方|景點|地點)", normalized_text)
+    )
+
+
 def _looks_like_point_to_point_directions_request(user_text: str) -> bool:
     normalized_text = str(user_text or "").strip()
     if not normalized_text:
@@ -4005,6 +4033,8 @@ def _looks_like_text_location_lookup(user_text: str) -> bool:
     normalized_text = str(user_text or "").strip()
     if not normalized_text:
         return False
+    if _looks_like_group_destination_discussion(normalized_text):
+        return False
     if _looks_like_itinerary_condition_update(normalized_text):
         return False
     if _looks_like_point_to_point_directions_request(normalized_text):
@@ -4036,6 +4066,8 @@ def _infer_text_activity_types_from_recent_messages(recent_messages: list[str]) 
 def _looks_like_recent_text_location_lookup(user_text: str, recent_messages: list[str]) -> bool:
     normalized_text = str(user_text or "").strip()
     if not normalized_text or not recent_messages:
+        return False
+    if _looks_like_group_destination_discussion(normalized_text):
         return False
     if _looks_like_itinerary_condition_update(normalized_text):
         return False
@@ -4192,6 +4224,8 @@ def _extract_text_location_query_payload(
     analysis_result: dict[str, Any],
     recent_messages: list[str] | None = None,
 ) -> dict[str, Any] | None:
+    if _looks_like_group_destination_discussion(user_text):
+        return None
     if _looks_like_itinerary_condition_update(user_text, analysis_result):
         return None
     if _looks_like_point_to_point_directions_request(user_text):
@@ -7693,6 +7727,10 @@ def handle_message(event: MessageEvent) -> None:
         )
         _debug_print("DEBUG 送進 AI 的上下文：")
         _debug_print(context_text)
+
+        if _looks_like_group_destination_discussion(user_text):
+            _debug_print("Group destination discussion detected before AI; keep quiet.")
+            return
 
         direct_route_analysis = _build_direct_route_analysis_from_context(user_text, _recent_messages)
         if direct_route_analysis is not None:
