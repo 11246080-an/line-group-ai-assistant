@@ -5644,6 +5644,18 @@ def _has_direct_itinerary_planning_request(user_text: str) -> bool:
     )
 
 
+def _has_direct_route_optimization_request(user_text: str) -> bool:
+    text = str(user_text or "").strip()
+    if not text:
+        return False
+    return bool(
+        re.search(r"(路線|景點|這幾個|這三個|這幾個景點|這三個景點).{0,16}(怎麼排|怎麼走|怎麼安排).{0,16}(比較順|順路|少繞路|不繞路)", text)
+        or re.search(r"(怎麼排|怎麼走|怎麼安排).{0,16}(路線|景點|行程).{0,16}(比較順|順路|少繞路|不繞路)", text)
+        or re.search(r"(幫我|幫我們|可以幫我|可以幫我們|請|麻煩).{0,18}(排路線|路線最佳化|路線優化|排成比較順|排順路)", text)
+        or re.search(r"(排成比較順|排順路|路線最佳化|路線優化|少繞路|不繞路|動線)", text)
+    )
+
+
 def _extract_route_candidates_from_recent_messages(recent_messages: list[str]) -> list[str]:
     ignored = {
         "",
@@ -5715,7 +5727,7 @@ def _build_direct_route_analysis_from_context(
     user_text: str,
     recent_messages: list[str],
 ) -> dict[str, Any] | None:
-    if not _has_direct_itinerary_planning_request(user_text):
+    if not _has_direct_route_optimization_request(user_text):
         return None
     candidates = _extract_route_candidates_from_recent_messages(recent_messages)
     # Also support direct commands that name spots in the same sentence.
