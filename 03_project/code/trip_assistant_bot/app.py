@@ -5610,6 +5610,81 @@ def _has_direct_itinerary_planning_request(user_text: str) -> bool:
     )
 
 
+def _extract_route_candidates_from_recent_messages(recent_messages: list[str]) -> list[str]:
+    ignored = {
+        "",
+        "景點",
+        "地點",
+        "地方",
+        "哪些地方",
+        "什麼景點",
+        "看海",
+        "拍照",
+        "吃飯",
+        "午餐",
+        "晚餐",
+        "行程",
+        "路線",
+    }
+    candidates: list[str] = []
+
+    def add_candidate(value: str) -> None:
+        name = re.sub(r"^[A-EＡ-Ｅ]\s*[：:]\s*", "", str(value or "")).strip()
+        name = re.sub(r"(也)?想去.*$", "", name).strip()
+        name = name.strip(" \t\r\n，,、。.!！?？：:；;（）()")
+        if not name or name in ignored or len(name) < 2 or len(name) > 30:
+            return
+        if any(token in name for token in ("哪些", "什麼", "哪裡", "哪邊", "要去哪些")):
+            return
+        if name not in candidates:
+            candidates.append(name)
+
+    for raw_message in recent_messages or []:
+        text = str(raw_message or "").strip()
+        if not text:
+            continue
+        for match in re.finditer(r"(?:想要去|想去|要去)([^，。！？\n]+)", text):
+            chunk = match.group(1)
+            if any(token in chunk for token in ("哪些", "什麼", "哪裡", "哪邊")):
+                continue
+            for part in re.split(r"[、,，/／]|(?:\s*(?:和|跟|與|及)\s*)", chunk):
+                add_candidate(part)
+        for match in re.finditer(r"([^，。！？\n]{2,30}?)(?:也)?想去", text):
+            add_candidate(match.group(1))
+    return candidates[:10]
+
+
+def _build_direct_route_analysis_from_context(
+    user_text: str,
+    recent_messages: list[str],
+) -> dict[str, Any] | None:
+    if not _has_direct_itinerary_planning_request(user_text):
+        return None
+    candidates = _extract_route_candidates_from_recent_messages(recent_messages)
+    # Also support direct commands that name spots in the same sentence.
+    for match in re.finditer(r"(?:把|將)?(.{2,80}?)(?:排成|安排成|排|安排).{0,12}(?:比較順|順路)", user_text):
+        for part in re.split(r"[、,，/／]|(?:\s*(?:和|跟|與|及)\s*)", match.group(1)):
+            candidate = re.sub(r"(@?AI旅遊行程助理|Bot|可以|請|幫我|幫我們|這三個景點|這幾個景點|景點)", "", part)
+            candidate = candidate.strip()
+            if candidate and candidate not in candidates and len(candidate) >= 2:
+                candidates.append(candidate)
+    if len(candidates) < 2:
+        return None
+    return {
+        "scenario_code": "劇本五",
+        "scenario_name": "路線最佳化",
+        "stage": "方案產生階段",
+        "should_intervene": True,
+        "reply_trigger": "explicit_request",
+        "confidence_score": 0.99,
+        "extracted_info": {
+            "location": candidates,
+            "options": candidates,
+            "need_type": "路線最佳化",
+        },
+    }
+
+
 def _looks_like_candidate_option_suggestion(user_text: str) -> bool:
     text = str(user_text or "").strip()
     if not text:
@@ -7618,6 +7693,24 @@ def handle_message(event: MessageEvent) -> None:
         )
         _debug_print("DEBUG 送進 AI 的上下文：")
         _debug_print(context_text)
+
+        direct_route_analysis = _build_direct_route_analysis_from_context(user_text, _recent_messages)
+        if direct_route_analysis is not None:
+            route_result = build_optimized_route_result(direct_route_analysis, user_text=user_text)
+            route_reply = str((route_result or {}).get("reply_text") or "").strip()
+            if route_result and route_reply:
+                _reply_feature_result(
+                    event,
+                    FlowResult(
+                        True,
+                        route_reply,
+                        data={"route_card": route_result.get("route_card")},
+                    ),
+                )
+                _mark_reply_sent(conversation_key, "fast_route_optimization", route_reply)
+                _debug_print("Fast route optimization handled before AI analysis.")
+                return
+
         direct_reply = _reply_from_imported_itinerary(conversation_key, user_text)
         if direct_reply:
             _debug_print(f"DEBUG 命中匯入行程直接回覆：{direct_reply}")
