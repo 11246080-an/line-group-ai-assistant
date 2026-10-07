@@ -6055,6 +6055,14 @@ def _build_fallback_itinerary_draft_from_context(
                 continue
             if name not in generic_locations:
                 generic_locations.append(name)
+        for name in _extract_route_candidates_from_recent_messages(recent_messages):
+            if name not in generic_locations:
+                generic_locations.append(name)
+        for source in (result.get("suggested_reply"), result.get("intermediate_reply")):
+            text = str(source or "")
+            for known_name in ("象山", "四四南村", "101觀景台", "台北101觀景台", "台北101", "臺北101"):
+                if known_name in text and known_name not in generic_locations:
+                    generic_locations.append(known_name)
         for name in generic_locations[:6]:
             description = "依群組討論納入行程，實際停留時間可依當天狀況調整。"
             if "象山" in name:
@@ -7988,7 +7996,6 @@ def handle_message(event: MessageEvent) -> None:
     if (
         not isinstance(itinerary_draft, dict)
         and _has_direct_itinerary_planning_request(user_text)
-        and _has_enough_itinerary_requirements(_recent_messages, result)
     ):
         fallback_draft = _build_fallback_itinerary_draft_from_context(_recent_messages, result)
         if fallback_draft:
@@ -8001,13 +8008,20 @@ def handle_message(event: MessageEvent) -> None:
             )
             _debug_print("LLM did not return itinerary_draft; generated fallback itinerary draft.")
 
-    if should_intervene and _should_defer_planning_intervention(user_text, _recent_messages, result):
+    if (
+        should_intervene
+        and not (_has_direct_itinerary_planning_request(user_text) and isinstance(itinerary_draft, dict))
+        and _should_defer_planning_intervention(user_text, _recent_messages, result)
+    ):
         _debug_print("Planning requirements are still incomplete; keep observing.")
         return
 
     if (
         should_intervene
-        and confidence_score >= MIN_INTERVENTION_CONFIDENCE
+        and (
+            confidence_score >= MIN_INTERVENTION_CONFIDENCE
+            or _has_direct_itinerary_planning_request(user_text)
+        )
         and isinstance(itinerary_draft, dict)
     ):
         if not _should_stage_itinerary_draft(user_text, _recent_messages, result):
