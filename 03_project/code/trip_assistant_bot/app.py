@@ -5405,10 +5405,10 @@ def _has_direct_itinerary_planning_request(user_text: str) -> bool:
     return bool(
         re.search(
             r"(幫我|幫我們|可以幫我|可以幫我們|麻煩|請).{0,16}"
-            r"(重新排|重排|排一下|排一版|排行程|排路線|排成比較順|調整行程|調整一下行程|重新安排|安排一日遊|安排半日遊|安排行程|整理完整行程|安排完整行程|評估|怎麼排|怎麼安排|安排比較順|規劃)",
+            r"(重新排|重排|排一下|排一版|排行程|排路線|排成比較順|調整行程|調整一下行程|重新安排|安排一日遊|安排半日遊|安排一日行程|安排半日行程|安排行程|整理完整行程|安排完整行程|評估|怎麼排|怎麼安排|安排比較順|規劃)",
             text,
         )
-        or re.search(r"(重新排|重排|排一版|排行程|排路線|排成比較順|調整行程|調整一下行程|重新安排|安排一日遊|安排半日遊|安排行程|整理完整行程|安排完整行程|怎麼安排比較順|安排比較順)", text)
+        or re.search(r"(重新排|重排|排一版|排行程|排路線|排成比較順|調整行程|調整一下行程|重新安排|安排一日遊|安排半日遊|安排一日行程|安排半日行程|安排行程|整理完整行程|安排完整行程|怎麼安排比較順|安排比較順)", text)
         or re.search(r"(?:這幾個|這幾個景點|這三個|這三個景點|景點|行程|路線).{0,12}(?:怎麼排|怎麼走|怎麼安排).{0,12}(?:比較順|順路)", text)
         or re.search(r"(?:怎麼排|怎麼走|怎麼安排).{0,12}(?:路線|行程|景點).{0,12}(?:比較順|順路)", text)
         or re.search(r"(?:排|安排).{0,8}(?:路線|行程|景點).{0,12}(?:比較順|順路)", text)
@@ -5424,6 +5424,11 @@ def _has_direct_route_optimization_request(user_text: str) -> bool:
         or re.search(r"(怎麼排|怎麼走|怎麼安排).{0,16}(路線|景點|行程).{0,16}(比較順|順路|少繞路|不繞路)", text)
         or re.search(r"(幫我|幫我們|可以幫我|可以幫我們|請|麻煩).{0,18}(排路線|路線最佳化|路線優化|排成比較順|排順路)", text)
         or re.search(r"(排成比較順|排順路|路線最佳化|路線優化|少繞路|不繞路|動線)", text)
+        or re.search(
+            r"[^，。！？]{2,80}(?:、|，|,|和|跟|與|及)[^，。！？]{2,40}"
+            r"(?:怎麼排|怎麼走|怎麼安排)(?:比較順|順路|少繞路|不繞路)",
+            text,
+        )
     )
 
 
@@ -5449,13 +5454,19 @@ def _extract_route_candidates_from_recent_messages(recent_messages: list[str]) -
         if not name or name in ignored or len(name) < 2 or len(name) > 30:
             return True
         invalid_tokens = (
+            "我們",
             "哪些",
             "什麼",
             "哪裡",
             "哪邊",
+            "這週",
+            "下週",
+            "週末",
+            "星期",
             "要去哪些",
             "這樣",
             "怎麼",
+            "走走",
             "我們行程",
             "行程要",
             "路線",
@@ -5502,6 +5513,20 @@ def _build_direct_route_analysis_from_context(
         return None
     candidates = _extract_route_candidates_from_recent_messages(recent_messages)
     # Also support direct commands that name spots in the same sentence.
+    for match in re.finditer(
+        r"(.{2,80}?)(?:怎麼排|怎麼走|怎麼安排)(?:比較順|順路|少繞路|不繞路)",
+        user_text,
+    ):
+        for part in re.split(r"[、,，/／]|(?:\s*(?:和|跟|與|及)\s*)", match.group(1)):
+            candidate = re.sub(
+                r"(@?AI旅遊行程助理|Bot|可以|請|幫我|幫我們|這三個景點|這幾個景點|景點)",
+                "",
+                part,
+            ).strip(" \t\r\n，,、。.!！?？：:；;（）()")
+            if candidate and candidate not in candidates and len(candidate) >= 2:
+                if any(token in candidate for token in ("這樣", "怎麼", "我們行程", "行程要", "路線", "比較順", "順路")):
+                    continue
+                candidates.append(candidate)
     for match in re.finditer(r"(?:把|將)?(.{2,80}?)(?:排成|安排成|排|安排).{0,12}(?:比較順|順路)", user_text):
         for part in re.split(r"[、,，/／]|(?:\s*(?:和|跟|與|及)\s*)", match.group(1)):
             candidate = re.sub(r"(@?AI旅遊行程助理|Bot|可以|請|幫我|幫我們|這三個景點|這幾個景點|景點)", "", part)
@@ -5862,7 +5887,13 @@ def _build_fallback_itinerary_draft_from_context(
         }
         for index in range(1, len(spots))
     ]
-    budget = 1000 if any(keyword in compact for keyword in ("1000", "一千")) else None
+    budget_match = re.search(r"(?:預算(?:每人)?|每人預算)[^\d]{0,8}(\d{2,6})\s*元?", compact)
+    if budget_match:
+        budget = int(budget_match.group(1))
+    elif "一千" in compact:
+        budget = 1000
+    else:
+        budget = None
     if not any(keyword in source_text for keyword in ("三民書局", "買書", "課本", "北車", "華山", "大稻埕", "松菸", "松山文創")):
         return {
             "title": "週末一日遊行程草稿",
