@@ -678,12 +678,6 @@ class ConversationState:
 
 conversation_states: dict[str, ConversationState] = {}
 conversation_lock = threading.Lock()
-SHOOTING_SCRIPT_MODE = os.getenv("SHOOTING_SCRIPT_MODE", "0").strip().lower() not in {
-    "0",
-    "false",
-    "off",
-    "no",
-}
 
 
 def _prune_conversation_states_locked() -> None:
@@ -713,237 +707,6 @@ def _note_user_message(conversation_key: str, text: str) -> None:
         state = _get_or_create_state(conversation_key)
         state.history.append(normalized_text)
         state.user_message_count += 1
-
-
-def _compact_script_text(text: str) -> str:
-    return re.sub(r"\s+", "", str(text or ""))
-
-
-def _strip_script_speaker_prefix(text: str) -> str:
-    return re.sub(r"^[A-EＡ-Ｅ]\s*[：:]\s*", "", str(text or "").strip())
-
-
-def _looks_like_script_replan_confirmation(text: str) -> bool:
-    compact = _compact_script_text(_strip_script_speaker_prefix(text))
-    return compact in {
-        "好，幫我們重新排一下。",
-        "好，幫我們重新排一下",
-        "好幫我們重新排一下",
-        "那就照這個行程順序安排喔。",
-        "那就照這個行程順序安排喔",
-        "那就照這個行程順序安排",
-        "那就照這個順序安排喔。",
-        "那就照這個順序安排喔",
-        "那就照這個順序安排",
-    }
-
-
-def _looks_like_script_invoice_expense(text: str) -> bool:
-    compact = _compact_script_text(_strip_script_speaker_prefix(text))
-    return (
-        "午餐" in compact
-        and "1500" in compact
-        and any(keyword in compact for keyword in ("付", "總共", "發票", "記帳", "午餐費"))
-    )
-
-
-def _shooting_script_invoice_expense_result() -> FlowResult:
-    return FlowResult(
-        True,
-        "發票辨識完成，午餐費已加入行程帳本。",
-        data={
-            "expense_confirmed": {
-                "expense_no": "EXP-001",
-                "item": "午餐",
-                "amount": 1500,
-                "category": "餐飲",
-                "payer": "A",
-                "source": "invoice",
-            }
-        },
-    )
-
-
-def _shooting_script_reply(user_text: str) -> str:
-    """Temporary deterministic replies for filming the demo script."""
-    compact = _compact_script_text(user_text)
-    if not compact:
-        return ""
-
-    if "聽起來都很有趣" in compact and "選擇" in compact:
-        return "看起來大家提出好多個出遊地點，需要我開啟投票功能嗎？"
-
-    if "最好不用排太久" in compact:
-        return (
-            "已整理大家的行程需求。目前的景點順序可能產生折返，"
-            "需要我根據活動資訊、地點位置、時間、預算、交通方式和午餐需求，"
-            "重新安排完整行程嗎？"
-        )
-
-    if "明天下午會不會下雨" in compact or ("華山" in compact and "大稻埕" in compact and "下雨" in compact):
-        return (
-            "我先幫你們查一下天氣。\n\n"
-            "台北市明天下午可能有短暫降雨，建議攜帶雨具。\n\n"
-            "華山與松山文創園區都有室內展覽空間，即使下雨仍可進行；"
-            "大稻埕戶外步行時間較多，如果雨勢變大，可以縮短停留時間，"
-            "改以室內店家或迪化街周邊店面為主。"
-        )
-
-    if "好" in compact and "照這個順序安排" in compact:
-        return "行程已確認，是否儲存這份私人行程？"
-
-    if compact in {"確認行程", "確認"}:
-        return (
-            "已儲存私人行程。\n\n"
-            "台北中午出發半日文創與老街輕旅行\n\n"
-            "- 12:00　三民書局（台北車站）購買課本\n"
-            "- 12:40　不葷主義茶餐廳 台北店午餐\n"
-            "- 13:40　華山1914文化創意產業園區\n"
-            "- 15:00　大稻埕老街散步\n"
-            "- 16:30　松山文創園區展覽或活動\n"
-            "- 18:30　行程結束，搭捷運回家\n\n"
-            "交通方式：捷運＋步行\n"
-            "預估花費：1000 元以內\n"
-            "天氣提醒：明天下午可能有短暫降雨，請攜帶雨具；大稻埕可視雨勢縮短停留時間。"
-        )
-
-    if "午餐費" in compact and "1500" in compact:
-        return "已建立這筆記帳草稿。項目：午餐費，金額：1500 元，付款人：A。請確認後加入行程帳本。"
-
-    if "目前總花費" in compact or "結算行程" in compact:
-        return "本次行程目前總花費為 4900 元。"
-
-    if "產生報告" in compact or "產生PDF" in compact:
-        return "已產生 PDF 記帳報告。"
-
-    if "匯入" in compact and "網站" in compact:
-        return "已將本次行程匯入旅遊推薦網站，其他使用者可以查看景點順序、交通方式、行程時間、預估花費與總花費。"
-
-    return ""
-
-
-def _shooting_script_itinerary_draft() -> dict[str, Any]:
-    return {
-        "title": "台北中午出發半日文創與老街輕旅行",
-        "region": "台北市",
-        "summary": "中午出發，依序安排買書、午餐、文創展覽與老街散步，交通以捷運和步行為主。",
-        "duration": "半日遊",
-        "estimated_budget": 1000,
-        "currency": "TWD",
-        "type": "文化",
-        "best_for": "適合想控制預算、用捷運與步行完成文創展覽和老街行程的朋友。",
-        "spots": [
-            {
-                "sequence": 1,
-                "name": "三民書局（台北車站）",
-                "description": "購買老師指定課本。",
-                "address": "台北車站周邊",
-                "latitude": 25.0478,
-                "longitude": 121.5170,
-            },
-            {
-                "sequence": 2,
-                "name": "不葷主義茶餐廳 台北店",
-                "description": "午餐推薦｜評分 4.9｜中價位｜素食餐廳｜Google Places",
-                "address": "台北市中正區",
-                "latitude": 25.0449,
-                "longitude": 121.5193,
-            },
-            {
-                "sequence": 3,
-                "name": "華山1914文化創意產業園區",
-                "description": "逛展覽活動，安排不排隊太久。",
-                "address": "台北市中正區八德路一段1號",
-                "latitude": 25.0422,
-                "longitude": 121.5328,
-            },
-            {
-                "sequence": 4,
-                "name": "大稻埕",
-                "description": "逛老街，感受歷史文化氛圍。",
-                "address": "台北市大同區迪化街",
-                "latitude": 25.0543,
-                "longitude": 121.5135,
-            },
-            {
-                "sequence": 5,
-                "name": "松山文創園區",
-                "description": "參觀展覽或活動，結束後方便搭捷運回家。",
-                "address": "台北市信義區光復南路133號",
-                "latitude": 25.0458,
-                "longitude": 121.5674,
-            },
-        ],
-        "transport": [
-            {"from_sequence": 1, "to_sequence": 2, "mode": "步行", "estimated_minutes": 10, "note": "買書後前往午餐"},
-            {"from_sequence": 2, "to_sequence": 3, "mode": "捷運／步行", "estimated_minutes": 20, "note": "午餐後前往華山"},
-            {"from_sequence": 3, "to_sequence": 4, "mode": "捷運／步行", "estimated_minutes": 25, "note": "華山到大稻埕"},
-            {"from_sequence": 4, "to_sequence": 5, "mode": "捷運", "estimated_minutes": 30, "note": "大稻埕到松山文創園區"},
-        ],
-    }
-
-
-def _handle_shooting_script_text(
-    event: MessageEvent,
-    *,
-    user_text: str,
-    line_group_id: str,
-    line_user_id: str,
-    conversation_key: str,
-) -> bool:
-    compact = _compact_script_text(user_text)
-    if "建立匿名投票" in compact or compact in {"建立投票", "匿名投票"}:
-        result = create_anonymous_poll(
-            line_group_id=line_group_id,
-            question="這次景點要選哪一個？",
-            options=["華山展覽", "大稻埕", "松菸活動"],
-            eligible_line_user_ids=[line_user_id] if line_user_id else [],
-            auto_created=True,
-            urgent=True,
-            created_by_line_user_id=line_user_id,
-            discussion_fingerprint="shooting-script-scenic-vote",
-        )
-        _note_user_message(conversation_key, user_text)
-        _reply_feature_result(event, result)
-        _mark_reply_sent(conversation_key, "shooting_script_poll", result.text)
-        _debug_print("Shooting script anonymous poll handled before normal flow.")
-        return True
-
-    if _looks_like_script_replan_confirmation(user_text):
-        result = stage_generated_itinerary(
-            line_group_id=line_group_id,
-            line_user_id=line_user_id,
-            itinerary_draft=_shooting_script_itinerary_draft(),
-            reply_text="我先依照大家已提出的時間、預算、交通、午餐和地點需求，整理一版半日行程草稿。",
-            context_text=user_text,
-        )
-        if result.handled:
-            _note_user_message(conversation_key, user_text)
-            _reply_feature_result(event, result)
-            _mark_reply_sent(conversation_key, "shooting_script_itinerary", result.text)
-            _debug_print("Shooting script itinerary card handled before normal flow.")
-            return True
-        fallback = _shooting_script_reply("好，幫我們重新排一下")
-        if fallback:
-            _note_user_message(conversation_key, user_text)
-            _reply_text_and_mark(event, conversation_key, "shooting_script", fallback)
-            return True
-
-    if _looks_like_script_invoice_expense(user_text):
-        result = _shooting_script_invoice_expense_result()
-        _note_user_message(conversation_key, user_text)
-        _reply_feature_result(event, result)
-        _mark_reply_sent(conversation_key, "shooting_script_invoice_expense", result.text)
-        _debug_print("Shooting script invoice expense card handled before normal flow.")
-        return True
-
-    scripted_reply = _shooting_script_reply(user_text)
-    if scripted_reply:
-        _note_user_message(conversation_key, user_text)
-        _reply_text_and_mark(event, conversation_key, "shooting_script", scripted_reply)
-        _debug_print("Shooting script fixed reply handled before normal flow.")
-        return True
-    return False
 
 
 def _store_imported_itinerary(
@@ -7599,7 +7362,6 @@ def handle_location_message(event: MessageEvent) -> None:
 
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_message(event: MessageEvent) -> None:
-    global SHOOTING_SCRIPT_MODE
     # Redaction is the first operation on user-controlled text.  The raw value is
     # never logged, stored, embedded, or sent to an AI provider.
     user_text = redact_sensitive_identifiers(event.message.text.strip())
@@ -7615,46 +7377,17 @@ def handle_message(event: MessageEvent) -> None:
     _debug_print("=" * 50)
     _debug_print(f"DEBUG 收到訊息：{user_text}")
 
-    if user_text.lower() in {"#shooting_on", "#拍攝模式開"}:
-        SHOOTING_SCRIPT_MODE = True
-        _reply_text_and_mark(event, conversation_key, "shooting_mode", "拍攝模式已開啟，劇本關鍵台詞會使用固定回覆。")
-        return
-
-    if user_text.lower() in {"#shooting_off", "#拍攝模式關"}:
-        SHOOTING_SCRIPT_MODE = False
-        _reply_text_and_mark(event, conversation_key, "shooting_mode", "拍攝模式已關閉，系統恢復一般判斷流程。")
-        return
-
     if user_text.lower() == "#reset":
-        SHOOTING_SCRIPT_MODE = False
         _reset_conversation_state(conversation_key)
         try:
             _reply_text_and_mark(
                 event,
                 conversation_key,
                 "manual_reset",
-                "已清空這個群組目前的對話狀態，並關閉拍攝模式，可以重新開始測試。",
+                "已清空這個群組目前的對話狀態，可以重新開始測試。",
             )
         except Exception as exc:
             _log_failure("Reset reply", exc)
-        return
-
-    if SHOOTING_SCRIPT_MODE:
-        if _handle_shooting_script_text(
-            event,
-            user_text=user_text,
-            line_group_id=line_group_id,
-            line_user_id=line_user_id,
-            conversation_key=conversation_key,
-        ):
-            return
-
-    if _looks_like_script_invoice_expense(user_text):
-        result = _shooting_script_invoice_expense_result()
-        _note_user_message(conversation_key, user_text)
-        _reply_feature_result(event, result)
-        _mark_reply_sent(conversation_key, "local_no_api_invoice_expense", result.text)
-        _debug_print("Local no-API invoice expense card handled before feature routing.")
         return
 
     try:
@@ -7756,36 +7489,6 @@ def handle_message(event: MessageEvent) -> None:
         except Exception as _db_exc:
             _log_failure("Fast direct request persistence", _db_exc)
         return
-
-    local_script_reply = _shooting_script_reply(user_text)
-    if local_script_reply and any(
-        marker in user_text
-        for marker in (
-            "最好不用排太久",
-            "明天下午會不會下雨",
-            "照這個順序安排",
-            "確認行程",
-        )
-    ):
-        _note_user_message(conversation_key, user_text)
-        _reply_text_and_mark(event, conversation_key, "local_no_api_fallback", local_script_reply)
-        _debug_print("Local no-API fallback reply handled before AI analysis.")
-        return
-
-    if _looks_like_script_replan_confirmation(user_text):
-        result = stage_generated_itinerary(
-            line_group_id=line_group_id,
-            line_user_id=line_user_id,
-            itinerary_draft=_shooting_script_itinerary_draft(),
-            reply_text="我先依照大家已提出的時間、預算、交通、午餐和地點需求，整理一版半日行程草稿。",
-            context_text=user_text,
-        )
-        if result.handled:
-            _note_user_message(conversation_key, user_text)
-            _reply_feature_result(event, result)
-            _mark_reply_sent(conversation_key, "local_no_api_itinerary", result.text)
-            _debug_print("Local no-API itinerary fallback handled before AI analysis.")
-            return
 
     topic_hint = None
     query_embedding = _build_text_embedding(user_text)
