@@ -5773,6 +5773,20 @@ def _extract_itinerary_budget_amount(text: str) -> int | None:
     return None
 
 
+def _infer_itinerary_region(extracted: dict[str, Any], source_text: str) -> str:
+    raw_locations = extracted.get("location") or []
+    if not isinstance(raw_locations, list):
+        raw_locations = [raw_locations]
+    for value in raw_locations:
+        name = str(value or "").strip()
+        if len(name) <= 4 and re.fullmatch(r"[\u4e00-\u9fff]{2,3}[縣市]", name):
+            return name
+    for name in ("新北市", "臺北市", "台北市", "桃園市", "臺中市", "台中市", "臺南市", "台南市", "高雄市"):
+        if name in source_text:
+            return name
+    return ""
+
+
 def _build_fallback_itinerary_draft_from_context(
     recent_messages: list[str],
     result: dict[str, Any],
@@ -5787,6 +5801,7 @@ def _build_fallback_itinerary_draft_from_context(
         location_values = [location_values]
     location_text = " ".join(str(item or "") for item in location_values)
     source_text = f"{recent_text}\n{location_text}"
+    region = _infer_itinerary_region(extracted, source_text)
 
     spots: list[dict[str, Any]] = []
 
@@ -5854,7 +5869,11 @@ def _build_fallback_itinerary_draft_from_context(
         generic_locations: list[str] = []
         for value in [*(extracted.get("options") or []), *(extracted.get("location") or [])]:
             name = str(value or "").strip()
-            if not name or name in {"台北", "臺北", "台北市", "臺北市", "週末", "一日行程"}:
+            if (
+                not name
+                or name in {"台北", "臺北", "週末", "一日行程"}
+                or (len(name) <= 4 and re.fullmatch(r"[\u4e00-\u9fff]{2,3}[縣市]", name))
+            ):
                 continue
             if name not in generic_locations:
                 generic_locations.append(name)
@@ -5874,6 +5893,8 @@ def _build_fallback_itinerary_draft_from_context(
                 description = "安排參觀園區與戶外空間，停留時間可依天氣調整。"
             elif "夜市" in name:
                 description = "安排在傍晚或晚上逛街與用餐，作為行程收尾。"
+            elif "老街" in name:
+                description = "安排逛老街、特色店家與在地小吃，並保留輕鬆散步時間。"
             elif "象山" in name:
                 description = "安排戶外步道與城市景觀，適合作為上午活動。"
             elif "四四南村" in name:
@@ -5912,7 +5933,7 @@ def _build_fallback_itinerary_draft_from_context(
     if not any(keyword in source_text for keyword in ("三民書局", "買書", "課本", "北車", "華山", "大稻埕", "松菸", "松山文創")):
         return {
             "title": "週末一日遊行程草稿",
-            "region": "台北市",
+            "region": region,
             "summary": "依照群組已提出的景點與旅遊條件，先整理一版可討論的一日行程草稿。",
             "duration": "一日遊",
             "estimated_budget": budget,
