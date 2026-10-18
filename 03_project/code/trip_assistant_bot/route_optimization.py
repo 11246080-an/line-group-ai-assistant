@@ -196,7 +196,12 @@ def _optimize_greedy(spots: list[RouteSpot]) -> list[RouteSpot]:
 def optimize_spots(spots: list[RouteSpot]) -> list[RouteSpot]:
     if len(spots) < 2:
         return list(spots)
-    return _optimize_exact(spots) if len(spots) <= MAX_EXACT_SPOTS else _optimize_greedy(spots)
+    optimized = _optimize_exact(spots) if len(spots) <= MAX_EXACT_SPOTS else _optimize_greedy(spots)
+    # An open route and its reverse have the same distance. Prefer the user's
+    # first-mentioned place when it is already one of the two optimal endpoints.
+    if optimized and optimized[-1] == spots[0]:
+        optimized.reverse()
+    return optimized
 
 
 def geocode_place(name: str, *, session: Any = None) -> RouteSpot | None:

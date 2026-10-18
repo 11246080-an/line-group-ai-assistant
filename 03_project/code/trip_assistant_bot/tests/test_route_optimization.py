@@ -15,6 +15,10 @@ class RouteOptimizationTests(unittest.TestCase):
         self.assertLess(route_distance_km(optimized), route_distance_km(original))
         self.assertIn([spot.name for spot in optimized], (["A", "B", "C"], ["C", "B", "A"]))
 
+    def test_open_route_prefers_first_mentioned_optimal_endpoint(self):
+        optimized = optimize_spots([self.a, self.c, self.b])
+        self.assertEqual([spot.name for spot in optimized], ["A", "B", "C"])
+
     def test_only_scenario_five_with_two_locations_runs(self):
         result = {
             "scenario_code": "劇本五",

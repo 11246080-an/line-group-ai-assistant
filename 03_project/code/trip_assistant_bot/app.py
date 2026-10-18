@@ -5758,6 +5758,16 @@ def _recently_asked_itinerary_replan(conversation_key: str) -> bool:
         )
 
 
+def _extract_itinerary_budget_amount(text: str) -> int | None:
+    compact = "".join(str(text or "").split())
+    budget_match = re.search(r"(?:預算(?:每人)?|每人預算)[^\d]{0,8}(\d{2,6})\s*元?", compact)
+    if budget_match:
+        return int(budget_match.group(1))
+    if "一千" in compact:
+        return 1000
+    return None
+
+
 def _build_fallback_itinerary_draft_from_context(
     recent_messages: list[str],
     result: dict[str, Any],
@@ -5887,13 +5897,7 @@ def _build_fallback_itinerary_draft_from_context(
         }
         for index in range(1, len(spots))
     ]
-    budget_match = re.search(r"(?:預算(?:每人)?|每人預算)[^\d]{0,8}(\d{2,6})\s*元?", compact)
-    if budget_match:
-        budget = int(budget_match.group(1))
-    elif "一千" in compact:
-        budget = 1000
-    else:
-        budget = None
+    budget = _extract_itinerary_budget_amount(compact)
     if not any(keyword in source_text for keyword in ("三民書局", "買書", "課本", "北車", "華山", "大稻埕", "松菸", "松山文創")):
         return {
             "title": "週末一日遊行程草稿",
@@ -7064,6 +7068,10 @@ def _direct_weather_query_has_known_location(user_text: str) -> bool:
 
 
 def _should_allow_ai_processing_hint(user_text: str, recent_messages: list[str]) -> bool:
+    normalized = str(user_text or "").strip()
+    if _has_direct_itinerary_planning_request(normalized):
+        return True
+
     if (
         _looks_like_current_location_request(user_text)
         or _looks_like_cost_or_ticket_lookup(user_text)
@@ -7076,7 +7084,6 @@ def _should_allow_ai_processing_hint(user_text: str, recent_messages: list[str])
     ):
         return False
 
-    normalized = str(user_text or "").strip()
     heavy_request_keywords = (
         "推薦景點",
         "景點推薦",
@@ -7085,6 +7092,8 @@ def _should_allow_ai_processing_hint(user_text: str, recent_messages: list[str])
         "找活動",
         "排一日遊",
         "排半日遊",
+        "安排一日行程",
+        "安排半日行程",
         "排行程",
         "規劃行程",
         "幫我排",
@@ -7637,11 +7646,15 @@ def handle_message(event: MessageEvent) -> None:
             "AI analysis input type=%s",
             type(context_text).__name__,
         )
+        allow_processing_hint = _should_allow_ai_processing_hint(user_text, _recent_messages)
+        if allow_processing_hint:
+            _send_processing_hint("anticipated_slow_request")
+
         raw_result = analyze_dialogue(
             context_text,
             on_processing_required=(
                 _send_processing_hint
-                if _should_allow_ai_processing_hint(user_text, _recent_messages)
+                if allow_processing_hint
                 else None
             ),
         )
@@ -7758,6 +7771,13 @@ def handle_message(event: MessageEvent) -> None:
         )
         and isinstance(itinerary_draft, dict)
     ):
+        if itinerary_draft.get("estimated_budget") in (None, ""):
+            context_budget = _extract_itinerary_budget_amount(
+                _recent_message_body_text(_recent_messages[-10:])
+            )
+            if context_budget is not None:
+                itinerary_draft = {**itinerary_draft, "estimated_budget": context_budget}
+
         if not _should_stage_itinerary_draft(user_text, _recent_messages, result):
             if _has_enough_itinerary_requirements(_recent_messages, result):
                 if _recently_asked_itinerary_replan(conversation_key):
