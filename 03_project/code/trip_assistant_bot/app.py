@@ -3612,8 +3612,13 @@ def _looks_like_group_destination_discussion(user_text: str) -> bool:
     )
     if any(term in normalized_text for term in explicit_bot_request_terms):
         return False
+    candidate_statement = bool(
+        re.search(r"(?:我|我們|大家)?(?:還|也)?想(?:要)?去[^？?]+", normalized_text)
+        and not any(term in normalized_text for term in ("怎麼排", "怎麼走", "怎麼安排", "比較順", "順路"))
+    )
     return bool(
-        re.search(r"(我們|大家).{0,12}(?:行|旅遊|旅行|出遊|一日遊|兩日遊).{0,12}(?:要去|想去|可以去).{0,8}(?:哪些|什麼|哪裡|哪邊).{0,8}(?:地方|景點|地點)", normalized_text)
+        candidate_statement
+        or re.search(r"(我們|大家).{0,12}(?:行|旅遊|旅行|出遊|一日遊|兩日遊).{0,12}(?:要去|想去|可以去).{0,8}(?:哪些|什麼|哪裡|哪邊).{0,8}(?:地方|景點|地點)", normalized_text)
         or re.search(r"(?:要去|想去|可以去).{0,8}(?:哪些|什麼|哪裡|哪邊).{0,8}(?:地方|景點|地點)", normalized_text)
     )
 
@@ -5863,7 +5868,13 @@ def _build_fallback_itinerary_draft_from_context(
                     generic_locations.append(known_name)
         for name in generic_locations[:6]:
             description = "依群組討論納入行程，實際停留時間可依當天狀況調整。"
-            if "象山" in name:
+            if "故宮" in name or "博物館" in name or "美術館" in name:
+                description = "安排參觀館藏與展覽，並預留充足的室內參觀時間。"
+            elif "官邸" in name or "公園" in name or "花園" in name:
+                description = "安排參觀園區與戶外空間，停留時間可依天氣調整。"
+            elif "夜市" in name:
+                description = "安排在傍晚或晚上逛街與用餐，作為行程收尾。"
+            elif "象山" in name:
                 description = "安排戶外步道與城市景觀，適合作為上午活動。"
             elif "四四南村" in name:
                 description = "可逛文創與眷村展區，適合午餐後輕鬆散步。"
@@ -5902,7 +5913,7 @@ def _build_fallback_itinerary_draft_from_context(
         return {
             "title": "週末一日遊行程草稿",
             "region": "台北市",
-            "summary": "依照群組已提出的景點與午餐需求，先整理一版可討論的一日行程草稿。",
+            "summary": "依照群組已提出的景點與旅遊條件，先整理一版可討論的一日行程草稿。",
             "duration": "一日遊",
             "estimated_budget": budget,
             "currency": "TWD",
